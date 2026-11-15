@@ -10,6 +10,7 @@ Used by:
 import sys
 import os
 import subprocess
+from typing import Optional, List, Dict, Any
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -113,13 +114,15 @@ def _print_help():
     print("  update | upgrade               Self-update npm/PyPI package and re-sync agents")
     print("  check-update                   Check for a newer published version")
     print("  activate / license             License activation and status")
+    print("  login / auth                   Authorize this device via browser login")
+    print("  logout / unlink                Unlink this device and remove local license")
     print("  sync                           Sync telemetry with the cloud backend")
     print("  providers / proxy / mcp        Providers info / proxy server / MCP stdio server")
     print("  --version                      Print version and exit")
 
 
-def main():
-    args = sys.argv[1:]
+def main(argv: Optional[List[str]] = None):
+    args = sys.argv[1:] if argv is None else list(argv)
     command = args[0] if args else "stats"
 
     if command in ("--help", "-h", "help"):
@@ -514,6 +517,192 @@ def main():
         graph, _ = GraphEngine.for_file(file_path)
         res = graph.graph_guided_skeletonize(file_path, target_symbol)
         print(res)
+
+    elif command in ("login", "auth", "connect"):
+        from src.license_manager import LicenseManager
+        import json
+        import time
+        import urllib.request
+        import webbrowser
+        import platform
+
+        cloud_url = os.environ.get("TOKENSAFE_CLOUD_URL", "https://api.tokensafe.dev").rstrip("/")
+        active_tier, active_lic = LicenseManager.get_active_license()
+        active_email = active_lic.get("email", "")
+
+        print("\n\033[1m\033[36m╔════════════════════════════════════════════════════════════════════╗\033[0m")
+        print("\033[1m\033[36m║             ⚡ TOKENSAFE ACCOUNT AUTHORIZATION ⚡                  ║\033[0m")
+        print("\033[1m\033[36m╚════════════════════════════════════════════════════════════════════╝\033[0m\n")
+
+        if active_email and active_email != "community@tokensafe.dev":
+            print(f"  Currently logged in as: \033[32m{active_email}\033[0m (Tier: {active_tier.upper()})")
+            if sys.stdin.isatty():
+                ans = input("  Do you want to re-authenticate or switch accounts? [y/N]: ").strip().lower()
+                if ans not in ("y", "yes"):
+                    print("  Keeping current authorization.\n")
+                    sys.exit(0)
+
+        # 1. Request device code
+        machine_fp = LicenseManager.get_machine_fingerprint()
+        payload = {
+            "machine_fp": machine_fp,
+            "platform": platform.system()[:32],
+            "arch": platform.machine()[:32],
+            "agent": str(LicenseManager.detect_agent())[:32],
+            "version": "",
+            "hostname": platform.node()[:64]
+        }
+        try:
+            req = urllib.request.Request(
+                f"{cloud_url}/api/auth/device/code",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "User-Agent": "TokenSafe/CLI-Login"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                init_data = json.loads(resp.read().decode("utf-8") or "{}")
+        except Exception as exc:
+            print(f"\033[31m✖ Could not connect to {cloud_url}: {exc}\033[0m")
+            print("  Check your internet connection and try again.\n")
+            sys.exit(1)
+
+        if not init_data.get("success"):
+            print(f"\033[31m✖ Authorization initiation failed: {init_data.get('error')}\033[0m\n")
+            sys.exit(1)
+
+        user_code = init_data["user_code"]
+        device_code = init_data["device_code"]
+        verif_url = init_data.get("verification_uri_complete") or f"{init_data['verification_uri']}?code={user_code}"
+        interval = init_data.get("interval", 3)
+
+        print("  To authorize this device and connect your account:")
+        print(f"    1. Confirm code:  \033[1m\033[33m{user_code}\033[0m")
+        print(f"    2. In browser at: \033[36m{verif_url}\033[0m\n")
+
+        # Attempt to open browser automatically
+        try:
+            webbrowser.open(verif_url)
+            print("  \033[2m(Opened verification page in your default browser)\033[0m")
+        except Exception:
+            pass
+
+        print("  Waiting for authorization in browser (Ctrl+C to abort)...", end="", flush=True)
+
+        # 2. Polling loop
+        spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        spin_idx = 0
+        approved_data = None
+
+        try:
+            start_time = time.time()
+            while time.time() - start_time < 600:
+                time.sleep(interval)
+                spin_char = spinner[spin_idx % len(spinner)]
+                spin_idx += 1
+                print(f"\r  {spin_char} Waiting for authorization in browser (Ctrl+C to abort)...", end="", flush=True)
+
+                try:
+                    poll_req = urllib.request.Request(
+                        f"{cloud_url}/api/auth/device/poll",
+                        data=json.dumps({"device_code": device_code}).encode("utf-8"),
+                        headers={"Content-Type": "application/json", "User-Agent": "TokenSafe/CLI-Login"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(poll_req, timeout=4.0) as resp:
+                        poll_data = json.loads(resp.read().decode("utf-8") or "{}")
+                except Exception:
+                    continue
+
+                status = poll_data.get("status")
+                if status == "approved":
+                    approved_data = poll_data
+                    break
+                elif status == "quota_exhausted":
+                    print(f"\n\n\033[31m✖ {poll_data.get('error')}\033[0m\n")
+                    sys.exit(1)
+                elif status in ("expired", "denied"):
+                    print(f"\n\n\033[31m✖ Authorization {status}.\033[0m\n")
+                    sys.exit(1)
+
+        except KeyboardInterrupt:
+            print("\n\n\033[33m  Authorization cancelled by user.\033[0m")
+            print("  Run 'tokensafe login' whenever you are ready.\n")
+            sys.exit(130)
+
+        if not approved_data:
+            print("\n\n\033[31m✖ Authorization timed out. Please try again.\033[0m\n")
+            sys.exit(1)
+
+        # 3. Save license and device token
+        lic_key = approved_data.get("license_key", "")
+        dev_tok = approved_data.get("device_token", "")
+        auth_email = approved_data.get("email", "")
+
+        ok, msg = LicenseManager.save_license(lic_key, device_token=dev_tok)
+        if ok:
+            valid, lic_meta, _ = LicenseManager.validate_license(lic_key)
+            detected_tier = (lic_meta.get("tier") or approved_data.get("tier") or "free").lower()
+            org_id = lic_meta.get("org")
+
+            print(f"\r\033[K  \033[32m\033[1m✔ Successfully authenticated as {auth_email}!\033[0m")
+            if detected_tier == "solo":
+                print("  \033[32m✔ Solo Pro license activated (Unlimited tokens).\033[0m")
+            elif detected_tier in ("team", "enterprise"):
+                org_msg = f" [{org_id}]" if org_id else ""
+                print(f"  \033[32m✔ Team license activated (Unlimited tokens, organization workspace{org_msg}).\033[0m")
+            else:
+                print("  \033[32m✔ Community Edition license activated (500,000 free tokens/month).\033[0m")
+            print(f"  \033[36m✔ Web dashboard unlocked at: https://tokensafe.dev/dashboard\033[0m\n")
+
+            # Sync local token metrics
+            try:
+                from src.telemetry_sync import TelemetrySync
+                sync_res = TelemetrySync.sync(license_key=lic_key, timeout=3.0)
+                if sync_res.get("success") and sync_res.get("synced_events", 0) > 0:
+                    print(f"  \033[36m✔ Synced {sync_res['synced_events']:,} optimization events to your cloud dashboard.\033[0m\n")
+            except Exception:
+                pass
+        else:
+            print(f"\n\033[31m✖ Failed to save license: {msg}\033[0m\n")
+            sys.exit(1)
+
+    elif command in ("logout", "unlink", "disconnect"):
+        from src.license_manager import LicenseManager, LICENSE_FILE, GLOBAL_LICENSE_FILE
+        import json
+        import urllib.request
+
+        cloud_url = os.environ.get("TOKENSAFE_CLOUD_URL", "https://api.tokensafe.dev").rstrip("/")
+        machine_fp = LicenseManager.get_machine_fingerprint()
+        _, active_lic = LicenseManager.get_active_license()
+        active_email = active_lic.get("email", "")
+
+        # 1. Unlink on server to free up device slot
+        if active_email and machine_fp and active_email != "community@tokensafe.dev":
+            try:
+                req = urllib.request.Request(
+                    f"{cloud_url}/api/auth/device/unlink",
+                    data=json.dumps({"email": active_email, "machine_fp": machine_fp}).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": "TokenSafe/CLI-Logout"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=4.0):
+                    pass
+            except Exception:
+                pass
+
+        # 2. Remove local license files
+        for p in (LICENSE_FILE, GLOBAL_LICENSE_FILE):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+        print("\n\033[32m✔ Successfully unlinked this device and logged out.\033[0m")
+        if active_email and active_email != "community@tokensafe.dev":
+            print(f"  Disconnected account: {active_email}")
+        print("  Your device slot has been freed.")
+        print("  Run \033[36mtokensafe login\033[0m anytime to connect again.\n")
 
     elif command == "activate":
         from src.license_manager import LicenseManager

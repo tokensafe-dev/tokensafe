@@ -186,6 +186,19 @@ class TelemetrySync:
             target_url = f"{base_url}/api/telemetry/sync"
             active_key = license_key or LicenseManager.get_active_license_key()
 
+            # Silent license renewal: if device has a device_token and license expires in < 7 days (or expired), refresh
+            try:
+                dev_tok = LicenseManager.get_device_token()
+                if dev_tok:
+                    _, active_lic = LicenseManager.get_active_license()
+                    exp_ts = int(active_lic.get("expires_at") or 0)
+                    if not active_key or (exp_ts and (exp_ts - time.time()) < 7 * 86400):
+                        refreshed, _ = LicenseManager.refresh_device_license()
+                        if refreshed:
+                            active_key = LicenseManager.get_active_license_key()
+            except Exception:
+                pass
+
             target_email = (email or "").strip().lower()
             if active_key and not active_key.startswith("ts_live_"):
                 is_valid, payload, _ = LicenseManager.validate_license(active_key)

@@ -91,9 +91,58 @@ class LicenseManager:
 
     @classmethod
     def get_machine_fingerprint(cls) -> str:
-        """One-way anonymized machine identifier for server-side free-tier quota continuity."""
-        raw = f"ts:{platform.system()}:{platform.node()}:{uuid.getnode()}:{os.path.expanduser('~')}"
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+        """
+        One-way anonymized machine identifier for server-side quota continuity.
+        Uses persistent ~/.tokensafe/data/.machine_id backed by hardware UUID
+        (IOPlatformUUID on macOS / /etc/machine-id on Linux) to prevent Wi-Fi/DHCP drift.
+        """
+        try:
+            data_dir = resolve_data_dir()
+            mid_file = os.path.join(data_dir, ".machine_id")
+            if os.path.exists(mid_file):
+                with open(mid_file, "r", encoding="utf-8") as f:
+                    content = f.read().strip().lower()
+                if re.fullmatch(r"[0-9a-f]{32}", content):
+                    return content
+        except Exception:
+            pass
+
+        hw_uuid = ""
+        try:
+            if platform.system() == "Darwin":
+                import subprocess
+                cmd = ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                if res.returncode == 0:
+                    for line in res.stdout.splitlines():
+                        if "IOPlatformUUID" in line:
+                            parts = line.split("=")
+                            if len(parts) > 1:
+                                hw_uuid = parts[1].strip().strip('"')
+                                break
+            elif platform.system() == "Linux":
+                for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+                    if os.path.exists(p):
+                        with open(p, "r", encoding="utf-8") as f:
+                            hw_uuid = f.read().strip()
+                            if hw_uuid:
+                                break
+        except Exception:
+            hw_uuid = ""
+
+        raw = f"ts:{platform.system()}:{hw_uuid or uuid.getnode()}"
+        fp = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+        try:
+            data_dir = resolve_data_dir()
+            os.makedirs(data_dir, exist_ok=True)
+            mid_file = os.path.join(data_dir, ".machine_id")
+            with open(mid_file, "w", encoding="utf-8") as f:
+                f.write(fp)
+        except Exception:
+            pass
+
+        return fp
 
     @classmethod
     def detect_agent(cls) -> str:
@@ -444,11 +493,56 @@ class LicenseManager:
         return key
 
     @classmethod
-    def save_license(cls, license_key: str) -> Tuple[bool, str]:
-        """Saves a verified license key to local and user global persistent storage."""
+    def get_device_token(cls) -> str:
+        """Retrieves stored device refresh token."""
+        for target_file in cls._candidate_license_files():
+            if os.path.exists(target_file):
+                try:
+                    with open(target_file, "r", encoding="utf-8") as f:
+                        tok = json.load(f).get("device_token", "")
+                    if tok:
+                        return str(tok).strip()
+                except Exception:
+                    pass
+        return ""
+
+    @classmethod
+    def refresh_device_license(cls) -> Tuple[bool, str]:
+        """Silently refreshes signed Community license via saved device_token without user interaction."""
+        device_token = cls.get_device_token()
+        if not device_token:
+            return False, "no_device_token"
+        try:
+            import urllib.request
+            cloud_url = os.environ.get("TOKENSAFE_CLOUD_URL", "https://api.tokensafe.dev").rstrip("/")
+            req = urllib.request.Request(
+                f"{cloud_url}/api/auth/device/refresh",
+                data=json.dumps({
+                    "device_token": device_token,
+                    "machine_fp": cls.get_machine_fingerprint()
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json", "User-Agent": "TokenSafe/Refresh"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
+                data = json.loads(resp.read().decode("utf-8") or "{}")
+            new_key = data.get("license_key", "")
+            if resp.status == 200 and data.get("success") and new_key:
+                ok, msg = cls.save_license(new_key, device_token=device_token)
+                return ok, msg
+            return False, str(data.get("error") or "refresh_failed")
+        except Exception as exc:
+            return False, str(exc)
+
+    @classmethod
+    def save_license(cls, license_key: str, device_token: str = "") -> Tuple[bool, str]:
+        """Saves a verified license key and optional device refresh token to persistent storage."""
         valid, payload, msg = cls.validate_license(license_key)
         if not valid:
             return False, f"Cannot save invalid license: {msg}"
+
+        # Preserve existing device_token if none provided
+        resolved_device_token = device_token or cls.get_device_token()
 
         record = {
             "license_key": license_key,
@@ -456,6 +550,7 @@ class LicenseManager:
             "email": payload.get("email"),
             "expires_at": payload.get("expires_at"),
             "trial": payload.get("trial", False),
+            "device_token": resolved_device_token,
             "saved_at": int(time.time())
         }
 
@@ -497,8 +592,9 @@ class LicenseManager:
             )
             if base_dir:
                 mirror_paths.append(os.path.join(base_dir, ".qledger.json"))
-            mirror_paths.append(os.path.join(os.path.dirname(DATA_DIR), ".qledger.json"))
-            mirror_paths.append(os.path.join(DATA_DIR, ".qledger.json"))
+            else:
+                mirror_paths.append(os.path.join(os.path.dirname(DATA_DIR), ".qledger.json"))
+                mirror_paths.append(os.path.join(DATA_DIR, ".qledger.json"))
 
             for mirror_path in mirror_paths:
                 if os.path.exists(mirror_path):

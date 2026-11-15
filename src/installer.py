@@ -550,7 +550,7 @@ WantedBy=default.target
         try:
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
                 return
-            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes"):
+            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes") or "unittest" in sys.modules:
                 return
             st = cls.proxy_status()
             if st.get("claude_code_wired"):
@@ -573,6 +573,50 @@ WantedBy=default.target
             return
         except Exception:
             return  # fail-open: a prompt problem never breaks install/update
+
+    @classmethod
+    def maybe_prompt_account_login(cls, context: str = "install") -> None:
+        """
+        Interactive prompt to connect TokenSafe account and unlock web dashboard.
+        Migrates anonymous community@tokensafe.dev licenses to verified user accounts.
+        Fail-open: skips quietly on non-interactive environments (CI, scripts).
+        """
+        try:
+            from src.license_manager import LicenseManager
+            _, lic = LicenseManager.get_active_license()
+            email = lic.get("email", "")
+
+            # If user already has a real personal account (not the legacy anonymous key), nothing to prompt
+            if email and email != "community@tokensafe.dev":
+                return
+
+            is_anonymous = (email == "community@tokensafe.dev")
+
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                print(f"  {CYAN}ℹ{RESET} Run {BOLD}tokensafe login{RESET} anytime to activate your Community license & web dashboard.\n")
+                return
+
+            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes") or "unittest" in sys.modules:
+                return
+
+            if context == "update" and is_anonymous:
+                print(f"\n  {YELLOW}→ Anonymous Community license detected (migrating to verified personal account).{RESET}")
+                print(f"    Connect your free account at {CYAN}https://tokensafe.dev{RESET} to unlock your web dashboard.")
+            else:
+                print(f"\n  {CYAN}→ Connect your free TokenSafe account (500,000 tokens/mo) to unlock your web dashboard:{RESET}")
+
+            print(f"    Open browser to authorize? [{GREEN}Y{RESET}/n] ", end="", flush=True)
+            answer = input().strip().lower()
+            if answer in ("", "y", "yes"):
+                from src.cli import main as cli_main
+                cli_main(["login"])
+            else:
+                print(f"    {CYAN}ℹ{RESET} You can run {BOLD}tokensafe login{RESET} anytime to activate your account.\n")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        except Exception:
+            return
 
     @classmethod
     def install_mcp_config(cls, agent_key: str) -> Tuple[bool, str]:
@@ -1073,6 +1117,7 @@ WantedBy=default.target
 
         print(f"\n\033[32m\033[1m✅ TokenSafe successfully connected to {installed_count} agent(s)!\033[0m")
         print("   Restart your IDE / Agent to start saving tokens automatically.\n")
+        cls.maybe_prompt_account_login(context="install")
         cls.maybe_prompt_proxy_enable(context="install")
 
     @staticmethod
@@ -1419,6 +1464,7 @@ WantedBy=default.target
         print(f"   Synchronized {synced_count} agent environments with zero-loss AST & God Nodes rules.")
         print(f"   Run {BOLD}tokensafe stats{RESET} to view token savings.")
         print(f"   {CYAN}ℹ{RESET} If your terminal still shows the old version, open a new window or run {BOLD}hash -r{RESET}.")
+        cls.maybe_prompt_account_login(context="update")
         cls.maybe_prompt_proxy_enable(context="update")
 
 def main():
