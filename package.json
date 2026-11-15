@@ -1,7 +1,7 @@
 {
   "name": "tokensafe",
   "mcpName": "dev.tokensafe/tokensafe",
-  "version": "3.2.0",
+  "version": "4.0.0",
   "description": "Make AI coding agents 3x faster without burning team quotas. Exact code context. Fewer tokens. Safer changes.",
   "main": "bin/tokensafe.js",
   "bin": {
@@ -11,7 +11,7 @@
     "bin/tokensafe.js",
     "bin/tokensafe",
     "bin/agy-tokens",
-    "src/*.py",
+    "src/",
     "!src/cloud_backend.py",
     "!src/mailer.py",
     "!**/__pycache__/**",

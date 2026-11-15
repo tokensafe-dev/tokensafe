@@ -27,3 +27,4 @@ data/distill_failure_state.json
 data/.sync.lock
 data/.mcp_reload
 docs/plans/
+.tokensafe/

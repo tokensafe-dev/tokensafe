@@ -719,6 +719,8 @@ class CommandSanitizer:
         raw, resolved_exit = cls._extract_tool_stdout(tool_response)
         if not raw or len(raw) < 400:
             return None
+        from src.format_parsers.ansi import strip_ansi
+        raw = strip_ansi(raw)
         if resolved_exit is None:
             # Unknown exit status: refuse to mute anything that looks like a failure,
             # but allow noise-only stripping (tracebacks stay intact) when it saves >=15%.

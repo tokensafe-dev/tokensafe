@@ -159,6 +159,11 @@ class LoopDetector:
                 f"Token Optimizer Loop Guard: Tool '{tool_name}' invoked with identical "
                 f"parameters {repeats} times in a row. Pausing loop to prevent token drain."
             )
+            try:
+                from src.mistakes import MistakesLedger
+                MistakesLedger.record_from_loop(tool_name, args, repeats)
+            except Exception:
+                pass
             return True, repeats, msg
 
         return False, repeats, ""

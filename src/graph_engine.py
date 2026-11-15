@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import stat
 import tempfile
 import time
@@ -50,7 +51,76 @@ _SKIP_CALLS = {
     "true", "false", "null", "undefined", "None", "True", "False",
 }
 
-_CACHE_SCHEMA_VERSION = 2
+_CACHE_SCHEMA_VERSION = 3
+
+_STATIC_ASSET_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+    ".css", ".scss", ".sass", ".less",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".map", ".pdf", ".mp4", ".mp3",
+}
+
+_BACKEND_ROUTE_PATTERNS = [
+    # Python: @app.get("/users"), @router.post('/login'), @bp.route('/data')
+    re.compile(r'@(?:app|router|api|bp)\.(?:get|post|put|delete|patch|route)\(\s*["\']([^"\']+)["\']', re.IGNORECASE),
+    # JS/TS: app.get("/users", ...), router.post('/login', ...)
+    re.compile(r'(?<!@)\b(?:app|router|server|fastify)\.(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']', re.IGNORECASE),
+    # Java/Kotlin Spring: @GetMapping("/users"), @PostMapping(value = "/login"), @RequestMapping("/api")
+    re.compile(r'@(?:Get|Post|Put|Delete|Patch|Request)Mapping\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']', re.IGNORECASE),
+    # Go Gin/Echo/Fiber: r.GET("/users", ...), router.POST('/login', ...)
+    re.compile(r'\b(?:r|router|g|e|app)\.(?:GET|POST|PUT|DELETE|PATCH)\(\s*["\']([^"\']+)["\']'),
+    # Go net/http: http.HandleFunc("/users", ...)
+    re.compile(r'http\.HandleFunc\(\s*["\']([^"\']+)["\']'),
+    # C# ASP.NET Core: [HttpGet("/users")], [Route("api/users")]
+    re.compile(r'\[(?:Http(?:Get|Post|Put|Delete|Patch)|Route)\(\s*["\']([^"\']+)["\']'),
+    # PHP Laravel: Route::get('/users', ...), Route::post('/login', ...)
+    re.compile(r'Route::(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']'),
+]
+
+_FRONTEND_CALL_PATTERNS = [
+    # fetch("/api/users") or fetch(`/api/users/${id}`)
+    re.compile(r'\bfetch\(\s*[`"\']([^`"\'?#]+)'),
+    # axios.get("/api/users"), api.post(`/api/users/${id}`), client.get, etc.
+    re.compile(r'\b(?:axios|api|client|httpClient|ky)\.(?:get|post|put|delete|patch)\(\s*[`"\']([^`"\'?#]+)'),
+    # useSWR("/api/users")
+    re.compile(r'\buseSWR\(\s*[`"\']([^`"\'?#]+)'),
+    # axios("/api/users")
+    re.compile(r'\baxios\(\s*[`"\']([^`"\'?#]+)'),
+]
+
+_NEXT_APP_ROUTE_RE = re.compile(r'^(?:src/)?app/(api/.+?)/route\.[a-zA-Z0-9]+$')
+_NEXT_PAGES_ROUTE_RE = re.compile(r'^(?:src/)?pages/(api/.+?)\.[a-zA-Z0-9]+$')
+_CONTROLLER_PREFIX_RE = re.compile(r'@RequestMapping\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']|\[Route\(\s*["\']([^"\']+)["\']\)', re.IGNORECASE)
+
+
+def _normalize_route_path(p: str) -> str:
+    if not p or not isinstance(p, str):
+        return ""
+    p = p.strip()
+    if not p:
+        return ""
+    p = re.sub(r'^https?://[^/]+', '', p).strip()
+    p = p.split('?')[0].split('#')[0].strip()
+    if not p:
+        return ""
+    if not p.startswith('/'):
+        p = '/' + p
+    # Replace template expressions ${...} or {param}
+    p = re.sub(r'\$?\{[^}]+\}', '*', p)
+    # Replace Next.js / bracket params [...param] or [param]
+    p = re.sub(r'\[[^]]+\]', '*', p)
+    # Replace Express / path params :param
+    p = re.sub(r':[a-zA-Z_][a-zA-Z0-9_]*', '*', p)
+    # Collapse multiple slashes
+    p = re.sub(r'/+', '/', p)
+    if len(p) > 1 and p.endswith('/'):
+        p = p[:-1]
+    _, ext = os.path.splitext(p)
+    if ext.lower() in _STATIC_ASSET_EXTS:
+        return ""
+    if p in ("/", "*", "/*"):
+        return ""
+    return p
 
 
 def _is_test_file(rel_path: str) -> bool:
@@ -125,6 +195,8 @@ class CodeGraph:
         self.file_mtimes: Dict[str, float] = {}            # file_rel_path -> mtime
         self.file_stats: Dict[str, Tuple[float, int]] = {} # file_rel_path -> (mtime, size)
         self.file_imports: Dict[str, Set[str]] = {}        # file_rel_path -> raw imported modules
+        self.file_endpoints: Dict[str, List[Tuple[str, Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key)]
+        self.file_api_calls: Dict[str, List[Tuple[str, Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key)]
         self.last_scanned: float = 0.0
         self.backend: str = self._detect_backend()
 
@@ -144,44 +216,127 @@ class CodeGraph:
     def _cache_path(self) -> str:
         cache_dir = os.path.join(resolve_data_dir(), "graph_cache")
         key = hashlib.md5(self.root_dir.encode("utf-8")).hexdigest()[:12]
+        return os.path.join(cache_dir, f"{key}.db")
+
+    def _legacy_json_cache_path(self) -> str:
+        cache_dir = os.path.join(resolve_data_dir(), "graph_cache")
+        key = hashlib.md5(self.root_dir.encode("utf-8")).hexdigest()[:12]
         return os.path.join(cache_dir, f"{key}.json")
+
+    def _clear_graph_state(self) -> None:
+        self.symbols.clear()
+        self.file_symbols.clear()
+        self.edges.clear()
+        self.rev_edges.clear()
+        self.file_stats.clear()
+        self.file_mtimes.clear()
+        self.file_imports.clear()
+        self.file_endpoints.clear()
+        self.file_api_calls.clear()
 
     def _load_disk_cache(self) -> bool:
         path = self._cache_path()
-        if not os.path.exists(path):
-            return False
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if (
-                data.get("version") != _CACHE_SCHEMA_VERSION
-                or data.get("root_dir") != self.root_dir
-                or data.get("backend") != self.backend
-            ):
+        if os.path.exists(path):
+            try:
+                con = sqlite3.connect(path, timeout=5.0)
+                try:
+                    cur = con.cursor()
+                    meta = dict(cur.execute("SELECT key, val FROM graph_meta").fetchall())
+                    if (
+                        int(meta.get("version", 0)) != _CACHE_SCHEMA_VERSION
+                        or meta.get("root_dir") != self.root_dir
+                        or meta.get("backend") != self.backend
+                    ):
+                        return False
+
+                    self.symbols = {}
+                    for row in cur.execute("SELECT sym_key, rel_path, name, kind, line_start, line_end, signature FROM symbols").fetchall():
+                        self.symbols[row[0]] = CodeSymbol(
+                            name=row[2],
+                            kind=row[3],
+                            file_path=row[1],
+                            line_start=int(row[4]),
+                            line_end=int(row[5]),
+                            signature=row[6],
+                        )
+
+                    self.file_symbols = {}
+                    for row in cur.execute("SELECT rel_path, sym_key FROM file_symbols ORDER BY rel_path, idx").fetchall():
+                        self.file_symbols.setdefault(row[0], []).append(row[1])
+
+                    self.file_stats = {
+                        row[0]: (float(row[1]), int(row[2]))
+                        for row in cur.execute("SELECT rel_path, mtime, size FROM file_stats").fetchall()
+                    }
+                    self.file_mtimes = {k: v[0] for k, v in self.file_stats.items()}
+
+                    self.file_imports = {}
+                    for row in cur.execute("SELECT rel_path, imported FROM file_imports").fetchall():
+                        self.file_imports.setdefault(row[0], set()).add(row[1])
+
+                    self.edges = {}
+                    self.rev_edges = {}
+                    for row in cur.execute("SELECT source, target FROM edges").fetchall():
+                        s, t = row[0], row[1]
+                        self.edges.setdefault(s, set()).add(t)
+                        self.rev_edges.setdefault(t, set()).add(s)
+
+                    self.file_endpoints = {}
+                    try:
+                        for row in cur.execute("SELECT rel_path, route, sym_key FROM api_endpoints").fetchall():
+                            self.file_endpoints.setdefault(row[0], []).append((row[1], row[2]))
+                    except sqlite3.OperationalError:
+                        pass
+
+                    self.file_api_calls = {}
+                    try:
+                        for row in cur.execute("SELECT rel_path, route, sym_key FROM api_calls").fetchall():
+                            self.file_api_calls.setdefault(row[0], []).append((row[1], row[2]))
+                    except sqlite3.OperationalError:
+                        pass
+
+                    self.last_scanned = float(meta.get("last_scanned", 0.0))
+                    return True
+                finally:
+                    con.close()
+            except Exception:
+                self._clear_graph_state()
                 return False
 
-            self.symbols = {k: CodeSymbol.from_dict(v) for k, v in data.get("symbols", {}).items()}
-            self.file_symbols = {k: list(v) for k, v in data.get("file_symbols", {}).items()}
-            self.edges = {k: set(v) for k, v in data.get("edges", {}).items()}
-            self.rev_edges = {k: set(v) for k, v in data.get("rev_edges", {}).items()}
-            self.file_stats = {
-                k: (float(v[0]), int(v[1]))
-                for k, v in data.get("file_stats", {}).items()
-                if isinstance(v, (list, tuple)) and len(v) == 2
-            }
-            self.file_mtimes = {k: v[0] for k, v in self.file_stats.items()}
-            self.file_imports = {k: set(v) for k, v in data.get("file_imports", {}).items()}
-            self.last_scanned = float(data.get("last_scanned", 0.0))
-            return True
-        except Exception:
-            self.symbols.clear()
-            self.file_symbols.clear()
-            self.edges.clear()
-            self.rev_edges.clear()
-            self.file_stats.clear()
-            self.file_mtimes.clear()
-            self.file_imports.clear()
-            return False
+        # Fallback to legacy JSON cache if present
+        legacy_path = self._legacy_json_cache_path()
+        if os.path.exists(legacy_path):
+            try:
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if (
+                    data.get("root_dir") == self.root_dir
+                    and data.get("backend") == self.backend
+                ):
+                    self.symbols = {k: CodeSymbol.from_dict(v) for k, v in data.get("symbols", {}).items()}
+                    self.file_symbols = {k: list(v) for k, v in data.get("file_symbols", {}).items()}
+                    self.edges = {k: set(v) for k, v in data.get("edges", {}).items()}
+                    self.rev_edges = {k: set(v) for k, v in data.get("rev_edges", {}).items()}
+                    self.file_stats = {
+                        k: (float(v[0]), int(v[1]))
+                        for k, v in data.get("file_stats", {}).items()
+                        if isinstance(v, (list, tuple)) and len(v) == 2
+                    }
+                    self.file_mtimes = {k: v[0] for k, v in self.file_stats.items()}
+                    self.file_imports = {k: set(v) for k, v in data.get("file_imports", {}).items()}
+                    self.last_scanned = float(data.get("last_scanned", 0.0))
+                    # Migrate to SQLite format
+                    self._save_disk_cache()
+                    try:
+                        os.remove(legacy_path)
+                    except OSError:
+                        pass
+                    return True
+            except Exception:
+                self._clear_graph_state()
+                return False
+
+        return False
 
     def _save_disk_cache(self) -> None:
         if not self.use_disk_cache or os.environ.get("TOKENSAFE_GRAPH_DISK_CACHE", "1") == "0":
@@ -190,22 +345,68 @@ class CodeGraph:
         cache_dir = os.path.dirname(path)
         try:
             os.makedirs(cache_dir, exist_ok=True)
-            payload = {
-                "version": _CACHE_SCHEMA_VERSION,
-                "root_dir": self.root_dir,
-                "backend": self.backend,
-                "last_scanned": self.last_scanned,
-                "file_stats": {k: [v[0], v[1]] for k, v in self.file_stats.items()},
-                "file_symbols": self.file_symbols,
-                "file_imports": {k: sorted(v) for k, v in self.file_imports.items()},
-                "symbols": {k: v.to_dict() for k, v in self.symbols.items()},
-                "edges": {k: sorted(v) for k, v in self.edges.items()},
-                "rev_edges": {k: sorted(v) for k, v in self.rev_edges.items()},
-            }
-            fd, tmp_path = tempfile.mkstemp(prefix="graph_", suffix=".tmp", dir=cache_dir)
+            fd, tmp_path = tempfile.mkstemp(prefix="graph_", suffix=".db.tmp", dir=cache_dir)
+            os.close(fd)
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(payload, f)
+                con = sqlite3.connect(tmp_path, timeout=5.0)
+                try:
+                    cur = con.cursor()
+                    cur.execute("PRAGMA journal_mode = OFF")
+                    cur.execute("PRAGMA synchronous = OFF")
+                    cur.execute("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, val TEXT)")
+                    cur.execute("CREATE TABLE file_stats (rel_path TEXT PRIMARY KEY, mtime REAL, size INTEGER)")
+                    cur.execute("CREATE TABLE symbols (sym_key TEXT PRIMARY KEY, rel_path TEXT, name TEXT, kind TEXT, line_start INTEGER, line_end INTEGER, signature TEXT)")
+                    cur.execute("CREATE TABLE file_symbols (rel_path TEXT, sym_key TEXT, idx INTEGER, PRIMARY KEY (rel_path, sym_key))")
+                    cur.execute("CREATE TABLE file_imports (rel_path TEXT, imported TEXT, PRIMARY KEY (rel_path, imported))")
+                    cur.execute("CREATE TABLE edges (source TEXT, target TEXT, PRIMARY KEY (source, target))")
+                    cur.execute("CREATE TABLE api_endpoints (rel_path TEXT, route TEXT, sym_key TEXT)")
+                    cur.execute("CREATE TABLE api_calls (rel_path TEXT, route TEXT, sym_key TEXT)")
+
+                    cur.executemany(
+                        "INSERT INTO graph_meta VALUES (?, ?)",
+                        [
+                            ("version", str(_CACHE_SCHEMA_VERSION)),
+                            ("root_dir", self.root_dir),
+                            ("backend", self.backend),
+                            ("last_scanned", str(self.last_scanned)),
+                        ],
+                    )
+                    cur.executemany(
+                        "INSERT INTO file_stats VALUES (?, ?, ?)",
+                        [(k, v[0], v[1]) for k, v in self.file_stats.items()],
+                    )
+                    cur.executemany(
+                        "INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            (k, s.file_path, s.name, s.kind, s.line_start, s.line_end, s.signature)
+                            for k, s in self.symbols.items()
+                        ],
+                    )
+                    fs_rows = []
+                    for rel_path, sym_keys in self.file_symbols.items():
+                        for idx, sym_key in enumerate(sym_keys):
+                            fs_rows.append((rel_path, sym_key, idx))
+                    cur.executemany("INSERT INTO file_symbols VALUES (?, ?, ?)", fs_rows)
+
+                    cur.executemany(
+                        "INSERT INTO file_imports VALUES (?, ?)",
+                        [(rel_path, imp) for rel_path, imps in self.file_imports.items() for imp in imps],
+                    )
+                    cur.executemany(
+                        "INSERT INTO edges VALUES (?, ?)",
+                        [(src, tgt) for src, tgts in self.edges.items() for tgt in tgts],
+                    )
+                    cur.executemany(
+                        "INSERT INTO api_endpoints VALUES (?, ?, ?)",
+                        [(rel, ep[0], ep[1]) for rel, eps in self.file_endpoints.items() for ep in eps],
+                    )
+                    cur.executemany(
+                        "INSERT INTO api_calls VALUES (?, ?, ?)",
+                        [(rel, call[0], call[1]) for rel, calls in self.file_api_calls.items() for call in calls],
+                    )
+                    con.commit()
+                finally:
+                    con.close()
                 os.replace(tmp_path, path)
             except Exception:
                 try:
@@ -290,6 +491,7 @@ class CodeGraph:
 
         if reindexed > 0 or deleted or force:
             self._resolve_local_imports()
+            self._link_api_routes()
 
         self.last_scanned = time.time()
         if reindexed > 0 or deleted:
@@ -300,6 +502,8 @@ class CodeGraph:
         """Removes symbols, imports, and edges belonging to a file."""
         sym_keys = self.file_symbols.pop(rel_path, [])
         self.file_imports.pop(rel_path, None)
+        self.file_endpoints.pop(rel_path, None)
+        self.file_api_calls.pop(rel_path, None)
         for k in sym_keys:
             self.symbols.pop(k, None)
             targets = self.edges.pop(k, set())
@@ -340,6 +544,7 @@ class CodeGraph:
         ext = ext.lower()
 
         if self._try_index_treesitter(content, rel_path, file_node, ext):
+            self._extract_api_routes_and_calls(content, rel_path)
             return
 
         if ext == ".py":
@@ -348,6 +553,143 @@ class CodeGraph:
             self._parse_ruby(content, rel_path, file_node)
         elif ext in SUPPORTED_EXTS:
             self._parse_braces(content, rel_path, file_node, ext)
+
+        self._extract_api_routes_and_calls(content, rel_path)
+
+    def _find_enclosing_symbol(self, rel_path: str, line_no: int) -> Optional[str]:
+        sym_keys = self.file_symbols.get(rel_path, [])
+        if not sym_keys:
+            return None
+        candidates = []
+        for sk in sym_keys:
+            s = self.symbols.get(sk)
+            if s and s.line_start <= line_no <= s.line_end:
+                candidates.append((sk, s))
+        if candidates:
+            candidates.sort(key=lambda item: (0 if item[1].kind in ("function", "method") else 1, item[1].line_end - item[1].line_start))
+            return candidates[0][0]
+
+        for sk in sym_keys:
+            s = self.symbols.get(sk)
+            if s and 0 <= s.line_start - line_no <= 4:
+                return sk
+        return None
+
+    def _extract_api_routes_and_calls(self, content: str, rel_path: str) -> None:
+        self.file_endpoints[rel_path] = []
+        self.file_api_calls[rel_path] = []
+
+        norm_rel = rel_path.replace("\\", "/")
+
+        class_prefix = ""
+        m_prefix = _CONTROLLER_PREFIX_RE.search(content)
+        if m_prefix:
+            class_prefix = m_prefix.group(1) or m_prefix.group(2) or ""
+
+        # 1. Next.js file-based API routes
+        m_app = _NEXT_APP_ROUTE_RE.match(norm_rel)
+        m_pages = _NEXT_PAGES_ROUTE_RE.match(norm_rel)
+        if m_app or m_pages:
+            route_raw = "/" + (m_app.group(1) if m_app else m_pages.group(1))
+            norm_route = _normalize_route_path(route_raw)
+            if norm_route:
+                sym_keys = self.file_symbols.get(rel_path, [])
+                matched_any = False
+                for sk in sym_keys:
+                    s = self.symbols.get(sk)
+                    if s and s.name.upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "HANDLER", "DEFAULT"}:
+                        self.file_endpoints[rel_path].append((norm_route, sk))
+                        matched_any = True
+                if not matched_any:
+                    self.file_endpoints[rel_path].append((norm_route, None))
+
+        # 2. Backend route definitions
+        for rx in _BACKEND_ROUTE_PATTERNS:
+            for match in rx.finditer(content):
+                route_raw = match.group(1)
+                if class_prefix and not route_raw.startswith(class_prefix):
+                    full_route = class_prefix.rstrip("/") + "/" + route_raw.lstrip("/")
+                else:
+                    full_route = route_raw
+                norm_route = _normalize_route_path(full_route)
+                if not norm_route:
+                    continue
+                line_no = content[:match.start()].count("\n") + 1
+                sym_key = self._find_enclosing_symbol(rel_path, line_no)
+                self.file_endpoints[rel_path].append((norm_route, sym_key))
+
+        # 3. Frontend API call sites
+        for rx in _FRONTEND_CALL_PATTERNS:
+            for match in rx.finditer(content):
+                route_raw = match.group(1)
+                norm_route = _normalize_route_path(route_raw)
+                if not norm_route:
+                    continue
+                line_no = content[:match.start()].count("\n") + 1
+                sym_key = self._find_enclosing_symbol(rel_path, line_no)
+                self.file_api_calls[rel_path].append((norm_route, sym_key))
+
+    @staticmethod
+    def _route_matches(path: str, pattern_route: str) -> bool:
+        if not path or not pattern_route:
+            return False
+        if path == pattern_route:
+            return True
+        try:
+            pattern = "^" + re.escape(pattern_route).replace(r"\*", r"[^/]+") + "$"
+            if re.match(pattern, path):
+                return True
+        except re.error:
+            pass
+        try:
+            pattern2 = "^" + re.escape(path).replace(r"\*", r"[^/]+") + "$"
+            if re.match(pattern2, pattern_route):
+                return True
+        except re.error:
+            pass
+        return False
+
+    def _link_api_routes(self) -> None:
+        """
+        Cross-boundary semantic linking between frontend client API calls
+        and backend route endpoints across languages and frameworks.
+        """
+        try:
+            endpoint_map: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+            for rel_path, endpoints in self.file_endpoints.items():
+                for norm_route, sym_key in endpoints:
+                    if norm_route:
+                        endpoint_map.setdefault(norm_route, []).append((rel_path, sym_key))
+
+            if not endpoint_map:
+                return
+
+            for caller_rel, calls in self.file_api_calls.items():
+                caller_file_node = f"file:{caller_rel}"
+                for norm_route, caller_sym in calls:
+                    if not norm_route:
+                        continue
+                    matched_endpoints: List[Tuple[str, Optional[str]]] = []
+                    if norm_route in endpoint_map:
+                        matched_endpoints.extend(endpoint_map[norm_route])
+
+                    for ep_route, eps in endpoint_map.items():
+                        if ep_route != norm_route and ("*" in ep_route or "*" in norm_route):
+                            if self._route_matches(norm_route, ep_route):
+                                matched_endpoints.extend(eps)
+
+                    for ep_rel, ep_sym in matched_endpoints:
+                        if ep_rel == caller_rel:
+                            continue
+                        ep_file_node = f"file:{ep_rel}"
+                        self.add_edge(caller_file_node, ep_file_node)
+
+                        src = caller_sym or caller_file_node
+                        dst = ep_sym or ep_file_node
+                        if src != dst:
+                            self.add_edge(src, dst)
+        except Exception:
+            pass
 
     def _register_symbol(self, rel_path: str, file_node: str, symbol: CodeSymbol, sym_key: str):
         self.symbols[sym_key] = symbol
@@ -877,6 +1219,11 @@ class CodeGraph:
                 found.update(scoped_callers)
             elif len(fallback_callers) <= 3:
                 found.update(fallback_callers)
+
+            # Direct incoming edges (e.g. cross-boundary API caller symbols)
+            for caller in self.rev_edges.get(tk, set()):
+                if caller in self.symbols and caller != tk:
+                    found.add(caller)
 
             found.discard(tk)
             return found

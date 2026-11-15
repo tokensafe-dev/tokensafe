@@ -105,7 +105,10 @@ def _print_help():
     print("  test <prompt>                  Preview TOCP S-expression prompt compaction")
     print("  digest [--send] [--email=...]  Compile (and optionally dispatch) the weekly team digest")
     print("  guard <command>                Pre-flight safety check for a shell command")
-    print("  doctor                         Audit MCP tool overhead and token tax")
+    print("  expand-ref <hash>              Restore folded tool/command/file result by its 8-char hash")
+    print("  wrap <command>                 Run command with compact output folding (e.g. tests/logs)")
+    print("  web <url>                      Fetch web page/docs and print clean compact Markdown")
+    print("  doctor [--cleanup]             Audit MCP tool overhead and detect competitor conflicts")
     print("  tests [pytest] [--traceback]   Run the unit test suite (compact failure report)")
     print("  prune [--days N | --max N]     Compact metrics database (roll old events)")
     print("  vacuum                         Reclaim SQLite disk space")
@@ -215,7 +218,7 @@ def main(argv: Optional[List[str]] = None):
             pass
         print(dashboard.render_terminal())
 
-    elif command in ("html", "web"):
+    elif command in ("html", "dashboard-html"):
         from src.paths import resolve_data_dir
         tracker = MetricsTracker()
         dashboard = Dashboard(tracker)
@@ -468,6 +471,36 @@ def main(argv: Optional[List[str]] = None):
                 print(f"\n\033[32m✔ MCP server '{target}' re-enabled successfully.\033[0m\n")
             else:
                 print(f"\n\033[31m✖ Server '{target}' not found in disabled servers.\033[0m\n")
+        elif subcmd in ("wrap", "proxy-wrap"):
+            from src.mcp_config_manager import MCPConfigManager
+            target = args[2].strip() if len(args) > 2 else "--all"
+            if target in ("--all", "-a", "all"):
+                count = MCPConfigManager.wrap_all()
+                print(f"\n\033[32m✔ Wrapped {count} third-party MCP server(s) behind tokensafe mcp-proxy.\033[0m\n")
+            else:
+                servers = MCPConfigManager.list_servers()
+                matched = [s for s in servers if s["server_name"] == target]
+                if not matched:
+                    print(f"\n\033[31m✖ Server '{target}' not found in active agent MCP configs.\033[0m\n")
+                else:
+                    for s in matched:
+                        MCPConfigManager.wrap_server(s["config_path"], s["server_name"])
+                    print(f"\n\033[32m✔ Server '{target}' wrapped behind tokensafe mcp-proxy.\033[0m\n")
+        elif subcmd in ("unwrap", "restore"):
+            from src.mcp_config_manager import MCPConfigManager
+            target = args[2].strip() if len(args) > 2 else "--all"
+            if target in ("--all", "-a", "all"):
+                count = MCPConfigManager.unwrap_all()
+                print(f"\n\033[32m✔ Unwrapped {count} MCP server(s) back to direct execution.\033[0m\n")
+            else:
+                servers = MCPConfigManager.list_servers()
+                matched = [s for s in servers if s["server_name"] == target]
+                if not matched:
+                    print(f"\n\033[31m✖ Server '{target}' not found in active agent MCP configs.\033[0m\n")
+                else:
+                    for s in matched:
+                        MCPConfigManager.unwrap_server(s["config_path"], s["server_name"])
+                    print(f"\n\033[32m✔ Server '{target}' restored to original command.\033[0m\n")
         elif subcmd in ("list", "ls", "status"):
             from src.environment_auditor import EnvironmentAuditor
             print(EnvironmentAuditor.format_cli_report())
@@ -475,9 +508,93 @@ def main(argv: Optional[List[str]] = None):
             from src.mcp_server import run_mcp_server
             run_mcp_server()
 
+    elif command in ("mcp-proxy", "mcp_proxy"):
+        target_args = list(args[1:])
+        if target_args and target_args[0] == "--":
+            target_args.pop(0)
+        from src.mcp_proxy import run_proxy
+        run_proxy(target_args)
+
     elif command in ("doctor", "audit", "tax"):
         from src.environment_auditor import EnvironmentAuditor
         print(EnvironmentAuditor.format_cli_report())
+
+        from src.competitors import CompetitorAuditor
+        conflicts = CompetitorAuditor.audit()
+        if conflicts:
+            print("\n\033[1m\033[33m⚡ DETECTED CONFLICTING OR STALE TOOLS ⚡\033[0m")
+            for c in conflicts:
+                print(f"  • \033[1m{c['name']}\033[0m [{c['class']}]: {c['description']}")
+                for tr in c['traces']:
+                    loc = tr.get('path') or tr.get('file') or tr.get('config')
+                    print(f"    - {tr['kind']}: {loc}")
+            print("\n  💡 Tip: Run 'tokensafe doctor --cleanup' to remove conflicting orphan hooks/rules.\n")
+
+            if "--cleanup" in args:
+                for c in conflicts:
+                    res = CompetitorAuditor.cleanup(c["id"])
+                    print(f"  \033[32m✔ Cleaned {c['name']}: {', '.join(res.get('removed', []))}\033[0m")
+
+    elif command in ("web", "fetch", "url"):
+        if len(args) < 2:
+            print("Usage: tokensafe web <url>")
+            sys.exit(1)
+        url = args[1].strip()
+        from src.web_reader import WebReader
+        md, ok, err = WebReader.fetch_url(url)
+        if not ok:
+            print(f"\033[31mError: {err}\033[0m")
+            sys.exit(1)
+        print(md)
+
+    elif command in ("search", "find", "fts"):
+        if len(args) < 2:
+            print("Usage: tokensafe search <query> [--limit 25] [--path <dir>]")
+            sys.exit(1)
+        query = args[1]
+        limit = 25
+        target_dir = os.getcwd()
+        if "--limit" in args:
+            idx = args.index("--limit")
+            if idx + 1 < len(args):
+                try:
+                    limit = int(args[idx + 1])
+                except ValueError:
+                    pass
+        if "--path" in args:
+            idx = args.index("--path")
+            if idx + 1 < len(args):
+                target_dir = os.path.abspath(args[idx + 1])
+
+        from src.fts_index import CodeFTSIndex
+        idx_engine = CodeFTSIndex(target_dir)
+        idx_engine.index_files()
+        results = idx_engine.search(query, limit=limit)
+        if not results:
+            print(f"No matches found for '{query}'.")
+        else:
+            print(f"\n\033[1m\033[36m⚡ SQLite FTS5 BM25 Search ({len(results)} matches for '{query}'):\033[0m\n")
+            for r in results:
+                print(f"  \033[32m{r['file']}:{r['line']}\033[0m: {r['content']}")
+            print()
+
+    elif command in ("index", "fts-index"):
+        target_dir = os.getcwd()
+        if len(args) > 1 and not args[1].startswith("-"):
+            target_dir = os.path.abspath(args[1])
+        from src.fts_index import CodeFTSIndex
+        idx_engine = CodeFTSIndex(target_dir)
+        if "--clear" in args or "--reset" in args:
+            idx_engine.clear()
+            print(f"\033[32m✔ Cleared FTS index database for {target_dir}.\033[0m")
+        else:
+            stats = idx_engine.index_files()
+            print(f"\n\033[1m\033[36m⚡ SQLite FTS5 Full-Text Indexer ⚡\033[0m")
+            print(f"  Scanned files: {stats['scanned_files']}")
+            print(f"  Updated files: {stats['updated_files']}")
+            print(f"  Indexed lines: {stats['indexed_lines']:,}")
+            print(f"  Duration:      {stats['duration_ms']:.2f} ms")
+            print(f"  Index path:    {idx_engine.db_path}\n")
 
     elif command in ("graph", "nodes"):
         from src.graph_engine import GraphEngine
@@ -823,6 +940,40 @@ def main(argv: Optional[List[str]] = None):
         print(f"\033[1mCompacted Tokens:\033[0m {res['compact_tokens']}")
         print(f"\033[1mTokens Saved:\033[0m     \033[32m\033[1m+{res['saved_tokens']} tokens\033[0m ({render_bar(res['reduction_pct'])})\n")
 
+    elif command == "wrap":
+        if len(args) < 2:
+            print("Usage: tokensafe wrap <command>")
+            sys.exit(1)
+        sub_cmd = " ".join(args[1:])
+        try:
+            proc = subprocess.run(sub_cmd, shell=True, capture_output=True, text=True)
+            raw = (proc.stdout or "") + (proc.stderr or "")
+        except Exception as e:
+            print(f"Error running command: {e}")
+            sys.exit(1)
+
+        from src.format_parsers.ansi import strip_ansi
+        from src.test_parsers import TestOutputParser
+        from src.stash import stash_block
+
+        raw = strip_ansi(raw)
+        compacted, was_test = TestOutputParser.compact(raw)
+        if was_test:
+            print(compacted)
+            sys.exit(proc.returncode)
+
+        lines = raw.splitlines()
+        if len(lines) > 40:
+            head = lines[:15]
+            tail = lines[-15:]
+            omitted = len(lines) - 30
+            _, marker = stash_block(raw, source="wrap")
+            folded = "\n".join(head + [f"... [{omitted} lines omitted by TokenSafe] ..."] + tail + [marker])
+            print(folded)
+        else:
+            print(raw)
+        sys.exit(proc.returncode)
+
     elif command in ("tests", "testsuite", "unittest"):
         tests_dir = os.path.join(PROJECT_ROOT, "tests")
         if not os.path.isdir(tests_dir):
@@ -961,6 +1112,87 @@ def main(argv: Optional[List[str]] = None):
                 print("\n\033[33m○ Email delivery is handled by TokenSafe Cloud; preview HTML saved locally.\033[0m\n")
         else:
             print("Tip: Run with --send to dispatch email, or --email=<addr> to target specific team.\n")
+
+    elif command in ("expand-ref", "expand_ref", "expand"):
+        if len(args) < 2:
+            print("Usage: tokensafe expand-ref <hash8>")
+            sys.exit(1)
+        ref_hash = args[1].strip()
+        from src.stash import retrieve_block
+        content = retrieve_block(ref_hash)
+        if content is None:
+            print(f"\033[31mError: Stashed reference '{ref_hash}' not found or expired.\033[0m")
+            sys.exit(1)
+        print(content)
+
+    elif command in ("optimize-image", "image-opt", "image"):
+        if len(args) < 2:
+            print("Usage: tokensafe optimize-image <image_path> [--max-edge 1024]")
+            sys.exit(1)
+        img_path = args[1]
+        max_edge = 1024
+        if "--max-edge" in args:
+            idx = args.index("--max-edge")
+            if idx + 1 < len(args):
+                try:
+                    max_edge = int(args[idx + 1])
+                except ValueError:
+                    pass
+        from src.image_downscale import ImageDownscaler
+        res = ImageDownscaler.optimize(img_path, max_edge=max_edge)
+        if not res.get("success"):
+            print(f"\033[31mError: {res.get('error')}\033[0m")
+            sys.exit(1)
+        if res.get("was_downscaled"):
+            print(f"\033[32m✔ Downscaled image using {res.get('engine')}:\033[0m {res['orig_dimensions']} ➔ {res['new_dimensions']}")
+            print(f"  Saved vision tokens: ~{res['saved_tokens']} tokens")
+            print(f"  Optimized image: {res['optimized_path']}")
+        else:
+            print(f"Image within bounds ({res.get('dimensions', 'N/A')} <= {max_edge}px). Using original file.")
+
+    elif command in ("prune-superseded", "prune_superseded"):
+        if len(args) < 2:
+            print("Usage: tokensafe prune-superseded <transcript_path>")
+            sys.exit(1)
+        t_path = args[1]
+        from src.superseded import SupersededPruner
+        res = SupersededPruner.prune_transcript(t_path)
+        if not res.get("success"):
+            print(f"\033[31mError: {res.get('error')}\033[0m")
+            sys.exit(1)
+        print(f"\033[32m✔ Pruned {res['pruned_count']} superseded tool read(s) from transcript.\033[0m")
+        print(f"  Saved context: ~{res['saved_tokens']} tokens")
+
+    elif command in ("mistakes", "deadends"):
+        from src.mistakes import MistakesLedger
+        sub = args[1] if len(args) > 1 else "list"
+        if sub in ("clear", "reset"):
+            c = MistakesLedger.clear_mistakes(os.getcwd())
+            print(f"\033[32m✔ Cleared {c} mistake record(s).\033[0m")
+        elif sub in ("record", "add"):
+            reason = "Failed hypothesis"
+            f_path = None
+            if "--reason" in args:
+                idx = args.index("--reason")
+                if idx + 1 < len(args):
+                    reason = args[idx + 1]
+            if "--file" in args:
+                idx = args.index("--file")
+                if idx + 1 < len(args):
+                    f_path = args[idx + 1]
+            entry = MistakesLedger.record_revert(f_path or "project", reason, project_root=os.getcwd())
+            print(f"\033[32m✔ Recorded mistake: {entry['summary']}\033[0m")
+        else:
+            entries = MistakesLedger.list_mistakes(project_root=os.getcwd())
+            if not entries:
+                print("No recorded dead-ends or reverts for this project.")
+            else:
+                print(f"\n\033[1m\033[36m⚡ TOKENSAFE ANTI-STUCK DEAD-ENDS LEDGER ({len(entries)}) ⚡\033[0m\n")
+                for e in entries:
+                    print(f"  • \033[1m{e.get('file') or 'project'}\033[0m: {e.get('summary')} [{e.get('source')}]")
+                guard = MistakesLedger.get_guard_prompt(project_root=os.getcwd())
+                if guard:
+                    print(f"\n\033[33mActive prompt guard:\033[0m\n{guard}\n")
 
     elif command == "reset":
         confirm = input("Are you sure you want to reset all token metrics? [y/N]: ").strip().lower()

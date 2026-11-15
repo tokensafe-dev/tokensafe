@@ -165,6 +165,38 @@ class ScopedSearch:
                     "markdown": f"Regex compilation error: {str(e)}"
                 }
 
+        # Fast-path: SQLite FTS5 trigram BM25 search for plain identifier queries
+        if not regex_mode and len(query) >= 3 and not any(c in query for c in "*?[]{}()^$+\\|"):
+            try:
+                from src.fts_index import CodeFTSIndex
+                fts = CodeFTSIndex(root_dir)
+                fts_results = fts.search(query, limit=max_results)
+                if fts_results:
+                    fts_matches = []
+                    fts_hit_files = set()
+                    for r in fts_results:
+                        f_rel = r["file"]
+                        if cls.is_match_file(os.path.basename(f_rel), f_rel, scope):
+                            fts_matches.append({
+                                "file": f_rel,
+                                "line": r["line"],
+                                "content": r["content"]
+                            })
+                            fts_hit_files.add(f_rel)
+                    if fts_matches:
+                        return {
+                            "success": True,
+                            "query": query,
+                            "scope": scope,
+                            "total_scanned_files": len(fts_hit_files),
+                            "total_matches": len(fts_matches),
+                            "timed_out": False,
+                            "matches": fts_matches,
+                            "markdown": cls._render_markdown(query, fts_matches, len(fts_hit_files), False, max_results)
+                        }
+            except Exception:
+                pass  # Seamless fallback to disk scan
+
         matches: List[Dict[str, Any]] = []
         total_scanned_files = 0
         hit_files = set()

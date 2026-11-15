@@ -5,3 +5,15 @@
 #   - Cloud backend: fail-closed RS256 verification of Clerk session tokens
 #   - Release tooling: MCP Registry DNS Ed25519 key loading
 cryptography>=42.0
+
+# Tree-sitter AST & code intelligence engines (pre-compiled binary wheels)
+tree-sitter>=0.23
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-go
+tree-sitter-rust
+tree-sitter-java
+tree-sitter-php
+tree-sitter-kotlin
+tree-sitter-c-sharp

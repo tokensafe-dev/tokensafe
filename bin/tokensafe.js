@@ -13,6 +13,19 @@ const os = require('os');
 const ROOT_DIR = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
 const VENV_DIR = path.join(os.homedir(), '.tokensafe', 'venv');
+const CORE_DEPS = [
+  'cryptography>=42.0',
+  'tree-sitter>=0.23',
+  'tree-sitter-python',
+  'tree-sitter-javascript',
+  'tree-sitter-typescript',
+  'tree-sitter-go',
+  'tree-sitter-rust',
+  'tree-sitter-java',
+  'tree-sitter-php',
+  'tree-sitter-kotlin',
+  'tree-sitter-c-sharp'
+];
 
 function checkPython(cmd, requireCrypto) {
   const probe = requireCrypto
@@ -26,12 +39,12 @@ function checkPython(cmd, requireCrypto) {
   }
 }
 
-function bootstrapCryptography(basePython) {
-  console.error('⚡ Installing required dependency: cryptography>=42.0 ...');
+function bootstrapDependencies(basePython) {
+  console.error('⚡ Installing TokenSafe dependencies (cryptography & tree-sitter AST grammars)...');
   // 1. Try user-site pip first (respects normal user environments)
   const userPip = spawnSync(
     basePython,
-    ['-m', 'pip', 'install', '--user', '--quiet', '--disable-pip-version-check', 'cryptography>=42.0'],
+    ['-m', 'pip', 'install', '--user', '--quiet', '--disable-pip-version-check', ...CORE_DEPS],
     { encoding: 'utf-8', stdio: 'pipe' }
   );
   if (userPip.status === 0 && checkPython(basePython, true)) {
@@ -50,7 +63,7 @@ function bootstrapCryptography(basePython) {
   }
   const venvPip = spawnSync(
     venvPy,
-    ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', 'cryptography>=42.0'],
+    ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', ...CORE_DEPS],
     { encoding: 'utf-8', stdio: 'pipe' }
   );
   if (venvPip.status === 0 && checkPython(venvPy, true)) {
@@ -59,7 +72,7 @@ function bootstrapCryptography(basePython) {
   return null;
 }
 
-// Locate Python 3.10+ interpreter with required `cryptography` package
+// Locate Python 3.10+ interpreter with required dependencies
 function findPython() {
   const venvPy = process.platform === 'win32'
     ? path.join(VENV_DIR, 'Scripts', 'python.exe')
@@ -74,11 +87,11 @@ function findPython() {
   for (const cmd of candidates) {
     if (cmd === venvPy && !fs.existsSync(venvPy)) continue;
     if (checkPython(cmd, false)) {
-      const bootstrapped = bootstrapCryptography(cmd);
+      const bootstrapped = bootstrapDependencies(cmd);
       if (bootstrapped) return bootstrapped;
-      console.error("\n❌ TokenSafe requires the Python 'cryptography>=42.0' package.");
-      console.error("Install it manually cleanly via:");
-      console.error("  pip install 'cryptography>=42.0'\n");
+      console.error("\n❌ TokenSafe requires Python 3.10+ and 'cryptography>=42.0'.");
+      console.error("Install dependencies manually via:");
+      console.error("  pip install 'cryptography>=42.0' 'tree-sitter>=0.23' 'tree-sitter-python'\n");
       process.exit(1);
     }
   }
@@ -100,6 +113,9 @@ Commands:
   tokensafe sync               Synchronize local token metrics with Cloud Dashboard
   tokensafe html               Generate and open interactive browser dashboard
   tokensafe test "<prompt>"    Test prompt compression on custom input
+  tokensafe expand-ref <hash>  Restore folded tool/command/file result by its 8-char hash
+  tokensafe wrap <command>     Run command with compact output folding (e.g. tests/logs)
+  tokensafe web <url>          Fetch web page/docs and print clean compact Markdown
   tokensafe doctor             Audit MCP servers & skills context token tax
   tokensafe providers          List active LLM distillation models & keys
   tokensafe benchmark          Run zero-loss verification benchmark suite

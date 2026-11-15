@@ -144,6 +144,30 @@ def _handle(payload: dict) -> dict:
                 response["reason"] = quota["warning"]
             return response
 
+        # Step 3-Image: Downscale oversized vision images (>1024px)
+        if path and os.path.exists(path) and path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            try:
+                from src.image_downscale import ImageDownscaler
+                opt_res = ImageDownscaler.optimize(path, max_edge=1024)
+                if opt_res.get("success") and opt_res.get("was_downscaled"):
+                    response["overwrite"] = {path_key: opt_res["optimized_path"]}
+                    response["reason"] = f"Token Optimizer: Downscaled image to {opt_res['new_dimensions']} (Saved ~{opt_res['saved_tokens']} vision tokens)"
+                    tracker.record_event(
+                        session_id=conversation_id,
+                        event_type="IMAGE_DOWNSCALE",
+                        original_tokens=opt_res.get("saved_tokens", 0) + 300,
+                        optimized_tokens=300,
+                        details={
+                            "target_file": os.path.basename(path),
+                            "orig_dim": opt_res.get("orig_dimensions"),
+                            "new_dim": opt_res.get("new_dimensions"),
+                            "saved_tokens": opt_res.get("saved_tokens")
+                        }
+                    )
+                    return response
+            except Exception:
+                pass
+
         # Step 3A: If model explicitly specified line range, respect it
         if start_line is not None and end_line is not None:
             return response

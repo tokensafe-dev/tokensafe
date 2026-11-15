@@ -49,6 +49,13 @@ def handle(event: str, payload: dict) -> dict:
                 extra = f"{extra}\n\n{quota['warning']}"
         except Exception:
             pass
+        try:
+            from src.mistakes import MistakesLedger
+            guard = MistakesLedger.get_guard_prompt(project_root=str(payload.get("cwd") or os.getcwd()))
+            if guard:
+                extra = f"{extra}\n\n{guard}"
+        except Exception:
+            pass
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",

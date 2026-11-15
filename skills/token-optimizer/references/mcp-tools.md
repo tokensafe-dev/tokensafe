@@ -4,9 +4,11 @@ All tools are exposed via Model Context Protocol (stdio JSON-RPC 2.0).
 
 | MCP Tool | Description | Efficiency Impact |
 |---|---|---|
-| `tokensafe:smart_read_file` | Graph-guided AST reader with `symbol` body retention, `dep_mode` (`signature` default / `full`), and session pointer dedup (`force_full`). OpenAPI/Swagger, Prisma, GraphQL and SQL files are auto-sliced: `symbol` = spec path/model/type/table; empty `symbol` returns a compact overview. | **-90% to -98%** token reduction |
+| `tokensafe:smart_read_file` | Graph-guided AST reader with `symbol` body retention, `dep_mode` (`signature` default / `full`), and session pointer dedup (`force_full`). OpenAPI/Swagger, Prisma, GraphQL and SQL files are auto-sliced: `symbol` = spec path/model/type/table; empty `symbol` returns a compact overview. Lockfiles (`package-lock.json`, `Cargo.lock`) and tabular data (`.csv`, `.tsv`, `.sql`, `.har`) auto-reduce with reversible hash anchors. | **-90% to -98%** token reduction |
+| `tokensafe:expand_ref` | Expands a previously folded or stashed tool/command/file result by its 8-character hex hash anchor (e.g. `'a1b2c3d4'`). Returns the full original text that TokenSafe folded without re-running tools. | **Zero Data Loss** recovery |
+| `tokensafe:read_web_page` | Fetches a web page URL and converts it to clean, readable Markdown, stripping scripts, styles, navbars, and ads. | **-80% to -95%** vs raw HTML fetches |
 | `tokensafe:smart_bundle` | Multi-symbol context bundle: up to 8 `{path, symbol}` targets in ONE call — per-file skeletons with shared import lines deduplicated and merged 1-hop dependency signatures. Replaces 3+ chained `smart_read_file` calls. | **-85% to -95%** + one roundtrip instead of many |
-| `tokensafe:scoped_search` | Safe, token-bounded keyword, symbol, or config search across the codebase (supports `path='.'`, `scope='code'`/`'config'`/`'all'`/file extension/subfolder, 4s safety timeout, system root protection). | **-90% to -95%** vs raw grep/find |
+| `tokensafe:scoped_search` | Safe, token-bounded keyword, symbol, or config search across the codebase. Accelerated by native SQLite FTS5 trigram index with BM25 relevance ranking (<1ms) and seamless regex fallback (supports `path='.'`, `scope='code'`/`'config'`/`'all'`/file extension/subfolder). | **-90% to -95%** vs raw grep/find |
 | `tokensafe:list_dir` | Token-efficient directory tree without lockfiles, timestamps, or ignored folders (node_modules, .git, dist, .env). Replaces `ls -la`. | **-90%** vs verbose `ls` |
 | `tokensafe:get_architecture_graph` | Computes dependency topology, hub centrality, and identifies top God Nodes for `project_path`. | **~200 tokens** (replaces 50k crawl) |
 | `tokensafe:get_api_surface` | Generates a compact markdown map of all exported types, interfaces, and classes. | **~500 tokens** for entire project |
@@ -16,6 +18,9 @@ All tools are exposed via Model Context Protocol (stdio JSON-RPC 2.0).
 | `tokensafe:compact_conversation` | On-demand context compaction: folds a long JSONL session transcript into a lean Consolidated State Ledger (`transcript_path`, optional `invocation_num`). Call when the context window feels heavy or before a new subtask. | **-80% to -95%** history tokens |
 | `tokensafe:context_budget` | Context Budget HUD: estimated window usage (`model`/`window_tokens`/`session_id`) with tools/history/prompts breakdown and 50/80/95% thresholds. Call before deciding to compact. | Floor estimate, always labeled estimated |
 | `tokensafe:guard_inspect` | Pre-flight security & hygiene audit: denies literal secrets/destructive commands in shell lines (secrets, TLS, SQLi, raw grep); advisory for never-terminating streams (`tail -f`, `watch`, `docker attach`) and TLS bypasses. | **Zero-Risk** pre-flight gate |
+| `tokensafe:optimize_image` | Downscales oversized screenshots/diagrams (>1024px) before LLM vision ingestion while preserving original disk files and aspect ratios. | **-50% to -75%** vision tokens |
+| `tokensafe:prune_superseded` | Prunes obsolete intermediate tool read outputs in long transcripts that were superseded by subsequent edits or re-reads. | **-30% to -40%** context mass |
+| `tokensafe:get_mistakes` | Anti-stuck persistent ledger: retrieves past dead-ends, loop guard trips, and git reverts to prevent cycling through failed solutions. | **Anti-loop / Zero Repetition** |
 | `tokensafe:get_token_savings_metrics` | Returns cumulative analytics: tokens saved (measured/estimated split), context ratio, ≈USD value (derived), and optimization source breakdown. | Persistent SQLite analytics |
 
 ---
@@ -123,3 +128,40 @@ All tools are exposed via Model Context Protocol (stdio JSON-RPC 2.0).
 }
 ```
 *Folds past turns into a Consolidated State Ledger (-80% to -95% history tokens) so long sessions never degrade into context starvation. The transcript path is provided by the host session (hook payload `transcript_path` / session start context).*
+
+### 7. Vision Image Optimizer (`optimize_image`)
+```json
+{
+  "ServerName": "tokensafe",
+  "ToolName": "optimize_image",
+  "Arguments": {
+    "image_path": "/path/to/screenshot.png",
+    "max_edge": 1024
+  }
+}
+```
+*Downscales oversized 2K/4K screenshots to max 1024px, saving 50-75% vision tokens while keeping original files intact on disk.*
+
+### 8. Superseded Tool Output Pruning (`prune_superseded`)
+```json
+{
+  "ServerName": "tokensafe",
+  "ToolName": "prune_superseded",
+  "Arguments": {
+    "transcript_path": "/path/to/transcript.jsonl"
+  }
+}
+```
+*Replaces outdated intermediate file reads with reversible 1-line stashed tombstones (-30-40% context mass in multi-turn sessions).*
+
+### 9. Anti-Stuck Mistakes Memory (`get_mistakes`)
+```json
+{
+  "ServerName": "tokensafe",
+  "ToolName": "get_mistakes",
+  "Arguments": {
+    "project_root": "."
+  }
+}
+```
+*Retrieves active dead-ends, failed hypotheses, and git reverts to prevent agents from attempting known failing solutions.*

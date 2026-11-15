@@ -1,0 +1,159 @@
+"""
+Unit tests for Tree-sitter multi-language support (Java, PHP, Kotlin) in TokenSafe.
+"""
+
+import unittest
+import os
+import shutil
+import tempfile
+from src.treesitter_backend import TreeSitterBackend
+from src.graph_engine import CodeGraph
+
+
+class TestTreeSitterLanguages(unittest.TestCase):
+
+    def test_java_parsing_and_skeleton(self):
+        java_code = """package com.example;
+
+import java.util.List;
+
+public class PaymentService {
+    private final Gateway gateway;
+
+    public PaymentService(Gateway gateway) {
+        this.gateway = gateway;
+    }
+
+    public boolean processPayment(String orderId, double amount) {
+        System.out.println("Processing " + orderId);
+        return gateway.charge(orderId, amount);
+    }
+}
+"""
+        data = TreeSitterBackend.extract_graph_data(java_code, ".java", "PaymentService.java")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("PaymentService", names)
+        self.assertIn("processPayment", names)
+        calls = [c[1] for c in data["calls"]]
+        self.assertTrue(any("charge" in c for c in calls))
+
+        skeleton = TreeSitterBackend.skeletonize_braces(java_code, ".java")
+        self.assertIn("public class PaymentService {", skeleton)
+        self.assertIn("/* ... */", skeleton)
+
+    def test_php_parsing_and_skeleton(self):
+        php_code = """<?php
+namespace App\\Http\\Controllers;
+
+use App\\Models\\User;
+
+class UserController {
+    public function show(int $id): User {
+        $user = User::findOrFail($id);
+        return $user;
+    }
+}
+"""
+        data = TreeSitterBackend.extract_graph_data(php_code, ".php", "UserController.php")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("UserController", names)
+        self.assertIn("show", names)
+        calls = [c[1] for c in data["calls"]]
+        self.assertTrue(any("findOrFail" in c for c in calls))
+
+        skeleton = TreeSitterBackend.skeletonize_braces(php_code, ".php")
+        self.assertIn("class UserController {", skeleton)
+        self.assertIn("/* ... */", skeleton)
+
+    def test_kotlin_parsing_and_skeleton(self):
+        kt_code = """package com.example.store
+
+class CartManager(val storage: Storage) {
+    fun checkout(cartId: String): Boolean {
+        validateCart(cartId)
+        return storage.save(cartId)
+    }
+}
+"""
+        data = TreeSitterBackend.extract_graph_data(kt_code, ".kt", "CartManager.kt")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("CartManager", names)
+        self.assertIn("checkout", names)
+        calls = [c[1] for c in data["calls"]]
+        self.assertTrue(any("save" in c or "validateCart" in c for c in calls))
+
+        skeleton = TreeSitterBackend.skeletonize_braces(kt_code, ".kt")
+        self.assertIn("class CartManager", skeleton)
+        self.assertIn("/* ... */", skeleton)
+
+    def test_csharp_parsing_and_skeleton(self):
+        cs_code = """namespace Company.App
+{
+    public class OrderProcessor
+    {
+        public bool ExecuteOrder(string id)
+        {
+            Validate(id);
+            return Save(id);
+        }
+    }
+}
+"""
+        data = TreeSitterBackend.extract_graph_data(cs_code, ".cs", "OrderProcessor.cs")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("OrderProcessor", names)
+        self.assertIn("ExecuteOrder", names)
+        calls = [c[1] for c in data["calls"]]
+        self.assertTrue(any("Save" in c or "Validate" in c for c in calls))
+
+        skeleton = TreeSitterBackend.skeletonize_braces(cs_code, ".cs")
+        self.assertIn("public class OrderProcessor", skeleton)
+        self.assertIn("/* ... */", skeleton)
+
+    def test_graph_engine_with_polyglot_repo(self):
+        tmp_dir = tempfile.mkdtemp(prefix="tokensafe_polyglot_")
+        try:
+            java_path = os.path.join(tmp_dir, "App.java")
+            with open(java_path, "w") as f:
+                f.write("public class App { public static void main(String[] args) { System.out.println(1); } }\n")
+
+            php_path = os.path.join(tmp_dir, "index.php")
+            with open(php_path, "w") as f:
+                f.write("<?php class Router { public function dispatch() { run(); } }\n")
+
+            kt_path = os.path.join(tmp_dir, "Main.kt")
+            with open(kt_path, "w") as f:
+                f.write("class Runner { fun start() { execute(); } }\n")
+
+            cs_path = os.path.join(tmp_dir, "Service.cs")
+            with open(cs_path, "w") as f:
+                f.write("namespace Test { public class Service { public void DoWork() { Work(); } } }\n")
+
+            graph = CodeGraph(tmp_dir)
+            count = graph.scan()
+
+            self.assertEqual(count, 4)
+            self.assertIn("App.java", graph.file_symbols)
+            self.assertIn("index.php", graph.file_symbols)
+            self.assertIn("Main.kt", graph.file_symbols)
+            self.assertIn("Service.cs", graph.file_symbols)
+
+            java_syms = [s.split("::")[-1] for s in graph.file_symbols["App.java"]]
+            php_syms = [s.split("::")[-1] for s in graph.file_symbols["index.php"]]
+            kt_syms = [s.split("::")[-1] for s in graph.file_symbols["Main.kt"]]
+            cs_syms = [s.split("::")[-1] for s in graph.file_symbols["Service.cs"]]
+
+            self.assertIn("App", java_syms)
+            self.assertIn("Router", php_syms)
+            self.assertIn("Runner", kt_syms)
+            self.assertIn("Service", cs_syms)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

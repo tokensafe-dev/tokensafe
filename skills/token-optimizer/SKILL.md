@@ -76,12 +76,17 @@ The full tool table with efficiency impact, JSON workflow examples, the Guard ch
 Quick pointers:
 
 - Search: `tokensafe:scoped_search(query, path=".", scope="code")` — safe keyword & symbol search, never raw grep.
-- Inspect: `tokensafe:smart_read_file(path, symbol)` — definition + 1-hop deps.
+- Inspect: `tokensafe:smart_read_file(path, symbol)` — definition + 1-hop deps. Auto-slices lockfiles, CSV/TSV, SQL dumps.
+- Expand Stash: `tokensafe:expand_ref(hash)` — restore full raw content of any folded block by its 8-char hash (e.g. 'a1b2c3d4').
+- Web Reading: `tokensafe:read_web_page(url)` — fetch documentation/articles as clean Markdown without HTML/script junk.
 - Bundle: `tokensafe:smart_bundle(targets=[{path, symbol}])` — 3-8 related symbols across files in one call, shared imports deduplicated.
 - Navigate: `tokensafe:get_architecture_graph(project_path)` / `tokensafe:get_api_surface(project_path)`.
 - Directory: `tokensafe:list_dir(path, depth=2)` — clean tree, never verbose `ls -la`.
-- Terminal: `tokensafe:sanitize_command(command, cwd)` — bounded logs/diffs, test runner guards.
+- Terminal: `tokensafe:sanitize_command(command, cwd)` or run via `tokensafe wrap '<cmd>'`.
 - Context: `tokensafe:compact_conversation(transcript_path)` / `tokensafe:context_budget`.
+- Vision: `tokensafe:optimize_image(image_path, max_edge=1024)` — downscale images >1024px (-50-75% vision tokens).
+- Prune Reads: `tokensafe:prune_superseded(transcript_path)` — drops obsolete intermediate file reads (-30-40% context).
+- Anti-Stuck: `tokensafe:get_mistakes(project_root)` — persistent memory of prior dead-ends and git reverts.
 
 ---
 

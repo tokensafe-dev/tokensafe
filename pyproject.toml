@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokensafe"
-version = "3.2.0"
+version = "4.0.0"
 description = "Make AI coding agents 3x faster without burning team quotas. Exact code context. Fewer tokens. Safer changes."
 readme = "README.md"
 authors = [
@@ -42,10 +42,6 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=42.0",
-]
-
-[project.optional-dependencies]
-treesitter = [
     "tree-sitter>=0.23",
     "tree-sitter-python",
     "tree-sitter-javascript",
@@ -53,12 +49,16 @@ treesitter = [
     "tree-sitter-go",
     "tree-sitter-rust",
     "tree-sitter-java",
+    "tree-sitter-php",
+    "tree-sitter-kotlin",
     "tree-sitter-c-sharp",
+]
+
+[project.optional-dependencies]
+treesitter_extra = [
     "tree-sitter-c",
     "tree-sitter-cpp",
-    "tree-sitter-php",
     "tree-sitter-ruby",
-    "tree-sitter-kotlin",
     "tree-sitter-swift",
 ]
 

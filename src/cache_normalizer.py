@@ -113,7 +113,28 @@ class PromptCacheNormalizer:
         re.compile(r"Conversation ID:\s*[a-f0-9-]{8,36}", re.IGNORECASE),
         re.compile(r"invocationNum[\"']?\s*[:=]\s*\d+", re.IGNORECASE),
         re.compile(r"Generated locally at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", re.IGNORECASE),
+        re.compile(r"⚡ \*\*TokenSafe Turn Savings\*\*:.*?(?=\n|$)", re.IGNORECASE),
+        re.compile(r"\(TokenSafe: compacted ~?\d[\d,]* prompt tokens.*?\)", re.IGNORECASE),
+        re.compile(r"\[TokenSafe: Pointer Hit .*?\]", re.IGNORECASE),
+        re.compile(r"Community Edition limit reached.*?(?=\n|$)", re.IGNORECASE),
     ]
+
+    @classmethod
+    def validate_prefix_stability(
+        cls,
+        messages_a: List[Dict[str, Any]],
+        messages_b: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """
+        Validates that the static system prefix between two consecutive turns
+        produces identical prefix hashes to guarantee 100% KV-cache hits.
+        """
+        _, meta_a = cls.normalize_messages(messages_a, tools=tools)
+        _, meta_b = cls.normalize_messages(messages_b, tools=tools)
+        hash_a = meta_a.get("prefix_hash") or cls.compute_prefix_hash(json.dumps(meta_a.get("normalized_tools") or []))
+        hash_b = meta_b.get("prefix_hash") or cls.compute_prefix_hash(json.dumps(meta_b.get("normalized_tools") or []))
+        return hash_a == hash_b
 
     @classmethod
     def strip_volatile_elements(cls, text: str) -> str:

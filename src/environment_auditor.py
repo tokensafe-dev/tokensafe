@@ -263,6 +263,9 @@ class EnvironmentAuditor:
         # 3. Rule files (rules.md limits)
         rules = cls.audit_rules(workspace_root)
 
+        # 4. Ghost Tokens audit
+        ghost_tokens = cls.audit_ghost_tokens(workspace_root)
+
         total_mcp_tools = sum(s["tool_count"] for s in servers.values() if s["active"])
         total_mcp_tokens = sum(s["est_tokens_per_turn"] for s in servers.values() if s["active"])
         total_skills_tokens = skills_count * EST_TOKENS_PER_SKILL
@@ -280,7 +283,104 @@ class EnvironmentAuditor:
             "total_static_tokens_per_turn": total_static_tokens,
             "bloated_servers": bloated_servers,
             "has_critical_bloat": len(bloated_servers) > 0,
-            "rules": rules
+            "rules": rules,
+            "ghost_tokens": ghost_tokens,
+        }
+
+    @classmethod
+    def audit_ghost_tokens(cls, workspace_root: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Audits the workspace and configuration for 'Ghost Tokens':
+        1. Multi-IDE duplicate rule files (e.g. both CLAUDE.md and .cursorrules / AGENTS.md repeating rules).
+        2. Commented-out dead code blocks in rule files (HTML comments, hash comments).
+        3. Stale or orphaned agent instruction files.
+        4. Oversized prompt config files (>2,500 tokens).
+        """
+        root = workspace_root or os.getcwd()
+
+        rule_candidates = [
+            ("AGENTS.md", os.path.join(root, "AGENTS.md"), "Universal"),
+            ("GEMINI.md", os.path.join(root, "GEMINI.md"), "Gemini CLI"),
+            ("CLAUDE.md", os.path.join(root, "CLAUDE.md"), "Claude Code"),
+            (".claude/CLAUDE.md", os.path.join(root, ".claude", "CLAUDE.md"), "Claude Code"),
+            (".cursorrules", os.path.join(root, ".cursorrules"), "Cursor"),
+            (".windsurfrules", os.path.join(root, ".windsurfrules"), "Windsurf"),
+            (".clinerules", os.path.join(root, ".clinerules"), "Cline"),
+            (".github/copilot-instructions.md", os.path.join(root, ".github", "copilot-instructions.md"), "Copilot"),
+        ]
+
+        found_rules = []
+        for name, path, agent_type in rule_candidates:
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    toks = count_tokens(content)
+                    found_rules.append({
+                        "name": name,
+                        "path": path,
+                        "rel_path": os.path.relpath(path, root),
+                        "agent": agent_type,
+                        "tokens": toks,
+                        "content": content
+                    })
+                except Exception:
+                    pass
+
+        ghost_files = []
+        ghost_tokens = 0
+
+        # Check for multi-IDE redundant rule files
+        if len(found_rules) >= 2:
+            canonical = next((r for r in found_rules if r["name"] in ("AGENTS.md", "CLAUDE.md")), found_rules[0])
+            for r in found_rules:
+                if r != canonical:
+                    ghost_files.append({
+                        "file": r["rel_path"],
+                        "type": "DUPLICATE_CROSS_IDE_RULE",
+                        "tokens": r["tokens"],
+                        "description": f"Redundant across IDEs ({r['agent']} vs {canonical['name']})"
+                    })
+                    ghost_tokens += r["tokens"]
+
+        # Check for dead commented-out rule blocks
+        comment_re = re.compile(r"<!--[\s\S]*?-->|^(?:#\s*.*\n){4,}", re.MULTILINE)
+        for r in found_rules:
+            dead_matches = comment_re.findall(r["content"])
+            dead_chars = sum(len(m) for m in dead_matches)
+            if dead_chars > 300:
+                dead_toks = count_tokens("".join(dead_matches))
+                ghost_files.append({
+                    "file": r["rel_path"],
+                    "type": "DEAD_COMMENT_BLOCKS",
+                    "tokens": dead_toks,
+                    "description": f"Commented-out inactive rule text in {r['rel_path']} (~{dead_toks} tokens)"
+                })
+                ghost_tokens += dead_toks
+
+        # Check for oversized config files (>2,500 tokens)
+        for cfg in ["package.json", "pyproject.toml", "Cargo.toml", "tsconfig.json"]:
+            cfg_path = os.path.join(root, cfg)
+            if os.path.isfile(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
+                        cfg_content = f.read()
+                    cfg_tokens = count_tokens(cfg_content)
+                    if cfg_tokens > 2500:
+                        ghost_files.append({
+                            "file": cfg,
+                            "type": "OVERSIZED_CONFIG",
+                            "tokens": cfg_tokens,
+                            "description": f"Heavy config file ({cfg_tokens:,} tokens) loaded repeatedly"
+                        })
+                except Exception:
+                    pass
+
+        return {
+            "ghost_tokens_per_turn": ghost_tokens,
+            "ghost_files": ghost_files,
+            "total_rule_files": len(found_rules),
+            "has_ghost_tokens": len(ghost_files) > 0
         }
 
     @classmethod
@@ -437,6 +537,15 @@ class EnvironmentAuditor:
             lines.append(f"  \033[1mRule Files:\033[0m {rules['files']} files, ~{rules['total_tokens']:,}/20,000 tokens [{budget_flag}]")
             for v in rules.get("violations", []):
                 lines.append(f"    \033[31m✖ {v['path']}: {v['effective_bytes']:,} bytes > {RULE_FILE_LIMIT_BYTES:,} cap\033[0m")
+
+        ghost = report.get("ghost_tokens") or {}
+        if ghost.get("has_ghost_tokens"):
+            lines.append(f"\n  \033[33m\033[1m👻 Ghost Tokens Detected:\033[0m ~{ghost['ghost_tokens_per_turn']:,} wasted tokens per turn")
+            for gf in ghost.get("ghost_files", [])[:5]:
+                lines.append(f"    • \033[1m{gf['file']}\033[0m (~{gf['tokens']:,} tokens): {gf['description']}")
+            lines.append("    \033[36m💡 Tip: Consolidate redundant rule files into a single AGENTS.md\033[0m")
+        else:
+            lines.append("\n  \033[32m✔ No Ghost Tokens detected: Rule files and configs are lean.\033[0m")
 
         if report["has_critical_bloat"]:
             lines.append("\n  \033[33m\033[1mDiagnostic Recommendation:\033[0m")

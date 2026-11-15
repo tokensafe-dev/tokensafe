@@ -8,10 +8,20 @@ from src.mcp_server import handle_tool_call, _execute_with_timeout, run_mcp_serv
 class TestMCPServer(unittest.TestCase):
     def test_tools_list_has_all_schemas(self):
         tool_names = [t["name"] for t in TOOLS]
-        self.assertIn("smart_read_file", tool_names)
-        self.assertIn("compress_prompt", tool_names)
-        self.assertIn("sanitize_command", tool_names)
-        self.assertIn("get_token_savings_metrics", tool_names)
+        expected_tools = [
+            "smart_read_file", "smart_bundle", "get_architecture_graph", "get_api_surface",
+            "compress_prompt", "context_budget", "compact_conversation", "sanitize_command",
+            "slice_diff", "get_token_savings_metrics", "guard_inspect", "list_dir",
+            "scoped_search", "read_web_page", "expand_ref", "optimize_image",
+            "prune_superseded", "get_mistakes"
+        ]
+        self.assertEqual(len(tool_names), 18)
+        for t in expected_tools:
+            self.assertIn(t, tool_names)
+            # Verify each tool schema has name, description, inputSchema
+            matching = [s for s in TOOLS if s["name"] == t][0]
+            self.assertTrue(len(matching["description"]) > 10)
+            self.assertEqual(matching["inputSchema"]["type"], "object")
 
     def test_compress_prompt_mcp(self):
         res = handle_tool_call("compress_prompt", {"prompt": "Слушай, перепиши функцию get_balance в wallet.ts"})
@@ -253,6 +263,100 @@ class TestMCPServer(unittest.TestCase):
             res = handle_tool_call("list_dir", {"path": "sub"})
             self.assertNotIn("isError", res)
             self.assertIn("file.txt", res["content"][0]["text"])
+
+    def test_expand_ref_mcp_call(self):
+        from src.stash import stash_block
+        _, marker = stash_block("SECRET_FULL_PAYLOAD_ABC_123", source="test")
+        hash8 = marker.split("#")[1].split(" ")[0]
+        res = handle_tool_call("expand_ref", {"hash": hash8})
+        self.assertNotIn("isError", res)
+        self.assertEqual(res["content"][0]["text"], "SECRET_FULL_PAYLOAD_ABC_123")
+
+    def test_get_mistakes_mcp_call(self):
+        from src.mistakes import MistakesLedger
+        MistakesLedger.record_revert("test_file.py", "Loop guard regression", project_root="/tmp")
+        res = handle_tool_call("get_mistakes", {"project_path": "/tmp"})
+        self.assertNotIn("isError", res)
+        data = json.loads(res["content"][0]["text"])
+        self.assertIn("entries", data)
+        self.assertIn("active_guard", data)
+
+    def test_optimize_image_mcp_call(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"not an image")
+            tmp = f.name
+        try:
+            res = handle_tool_call("optimize_image", {"image_path": tmp})
+            self.assertNotIn("isError", res)
+            text = res["content"][0]["text"]
+            self.assertIn(tmp, text)
+        finally:
+            import os
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+    def test_prune_superseded_mcp_call(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type": "tool_result", "content": "read 1"}\n')
+            tmp = f.name
+        try:
+            res = handle_tool_call("prune_superseded", {"transcript_path": tmp})
+            self.assertNotIn("isError", res)
+            data = json.loads(res["content"][0]["text"])
+            self.assertTrue(data.get("success"))
+        finally:
+            import os
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+    def test_read_web_page_mcp_call(self):
+        res = handle_tool_call("read_web_page", {"url": "http://127.0.0.1:80/probe"})
+        # Refused internal SSRF probe triggers fail-safe error message
+        self.assertIn("Refused to fetch potentially unsafe or internal URL", res["content"][0]["text"])
+
+    @patch("src.license_manager.LicenseManager.check_quota", return_value={"is_quota_exceeded": False})
+    def test_get_architecture_graph_mcp_call(self, _mock_quota):
+        res = handle_tool_call("get_architecture_graph", {"project_path": "."})
+        self.assertNotIn("isError", res)
+        self.assertIn("god_nodes", res["content"][0]["text"])
+
+    @patch("src.license_manager.LicenseManager.check_quota", return_value={"is_quota_exceeded": False})
+    def test_get_api_surface_mcp_call(self, _mock_quota):
+        res = handle_tool_call("get_api_surface", {"project_path": "."})
+        self.assertNotIn("isError", res)
+        self.assertIn("API Surface", res["content"][0]["text"])
+
+    @patch("src.license_manager.LicenseManager.check_quota", return_value={"is_quota_exceeded": False})
+    def test_smart_bundle_mcp_call(self, _mock_quota):
+        res = handle_tool_call("smart_bundle", {"targets": [{"path": "src/cli.py", "symbol": "main"}]})
+        self.assertNotIn("isError", res)
+        self.assertIn("def main", res["content"][0]["text"])
+
+    def test_context_budget_mcp_call(self):
+        res = handle_tool_call("context_budget", {"model": "claude-sonnet-4.0"})
+        self.assertNotIn("isError", res)
+        data = json.loads(res["content"][0]["text"])
+        self.assertIn("window_tokens", data)
+        self.assertIn("threshold", data)
+
+    def test_slice_diff_mcp_call(self):
+        diff_text = """diff --git a/src/cli.py b/src/cli.py
+--- a/src/cli.py
++++ b/src/cli.py
+@@ -10,3 +10,3 @@
+-import sys
++import sys, os
+"""
+        res = handle_tool_call("slice_diff", {"diff": diff_text, "max_lines": 50})
+        self.assertNotIn("isError", res)
+        self.assertIn("diff --git", res["content"][0]["text"])
+
+    def test_scoped_search_mcp_call(self):
+        res = handle_tool_call("scoped_search", {"query": "TokenSafe", "path": ".", "scope": "code"})
+        self.assertNotIn("isError", res)
+        self.assertIn("Scoped Search", res["content"][0]["text"])
 
 
 if __name__ == "__main__":

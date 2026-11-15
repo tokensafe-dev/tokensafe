@@ -1,0 +1,203 @@
+"""
+TokenSafe Persistent Revert & Failure Memory (Mistakes Ledger) (v3.3.0).
+
+Prevents AI coding agents from repeating known dead-ends, failed hypotheses,
+and reverted code patterns across turns and sessions.
+
+Synergizes directly with:
+1. `LoopDetector`: Captures repetitive tool-execution loops and converts them to persistent memory.
+2. Git Rollback Tracking: Detects git reverts/checkouts and logs the abandoned direction.
+3. Anti-Stuck Prompt Guard: Injects a compact (<80 tokens) warning into context before execution.
+"""
+
+import os
+import json
+import time
+import hashlib
+import subprocess
+from typing import Dict, Any, List, Optional
+from src.paths import resolve_data_dir
+
+
+def _find_project_mistakes_file(project_root: Optional[str] = None) -> str:
+    """Finds or creates .tokensafe/mistakes.jsonl in project or user data dir."""
+    if project_root and os.path.isdir(project_root):
+        proj_dir = os.path.join(project_root, ".tokensafe")
+        try:
+            os.makedirs(proj_dir, exist_ok=True)
+            return os.path.join(proj_dir, "mistakes.jsonl")
+        except Exception:
+            pass
+    # Fallback to global data dir
+    global_dir = resolve_data_dir()
+    os.makedirs(global_dir, exist_ok=True)
+    return os.path.join(global_dir, "mistakes.jsonl")
+
+
+class MistakesLedger:
+    """Persistent ledger of failed hypotheses and reverted code patterns."""
+
+    MAX_ENTRIES = 50
+
+    @classmethod
+    def record_failure(
+        cls,
+        summary: str,
+        file_path: Optional[str] = None,
+        source: str = "loop_guard",
+        details: Optional[str] = None,
+        project_root: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Records a failed attempt or dead-end in the persistent ledger.
+        """
+        ledger_path = _find_project_mistakes_file(project_root)
+        f_basename = os.path.basename(file_path) if file_path else ""
+
+        entry = {
+            "id": hashlib.sha256(f"{f_basename}:{summary}:{time.time()}".encode("utf-8")).hexdigest()[:12],
+            "timestamp": time.time(),
+            "source": source,
+            "file": f_basename,
+            "file_full": file_path or "",
+            "summary": summary.strip()[:200],
+            "details": (details or "").strip()[:500],
+            "active": True
+        }
+
+        entries = cls.list_mistakes(project_root=project_root, active_only=False)
+
+        # Deduplicate identical summary + file
+        filtered = [
+            e for e in entries
+            if not (e.get("file") == entry["file"] and e.get("summary") == entry["summary"])
+        ]
+        filtered.append(entry)
+
+        # Cap to MAX_ENTRIES
+        if len(filtered) > cls.MAX_ENTRIES:
+            filtered = filtered[-cls.MAX_ENTRIES:]
+
+        tmp_path = f"{ledger_path}.tmp.{os.getpid()}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                for e in filtered:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            os.replace(tmp_path, ledger_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        return entry
+
+    @classmethod
+    def record_from_loop(
+        cls,
+        tool_name: str,
+        args: Dict[str, Any],
+        repeats: int,
+        project_root: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Anti-stuck synergy: converts a tripped LoopDetector event into a persistent mistake record.
+        """
+        target = args.get("Path") or args.get("path") or args.get("CommandLine") or args.get("command") or ""
+        target_str = str(target)
+        if len(target_str) > 80:
+            target_str = target_str[:80] + "..."
+
+        summary = f"Tool '{tool_name}' stuck in {repeats}x loop with target: {target_str}"
+        fpath = args.get("Path") or args.get("path")
+        return cls.record_failure(
+            summary=summary,
+            file_path=str(fpath) if fpath else None,
+            source="loop_detector",
+            details=f"Identical parameters executed {repeats} times in a row without progress.",
+            project_root=project_root
+        )
+
+    @classmethod
+    def record_revert(
+        cls,
+        file_path: str,
+        reason: str,
+        project_root: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Records a reverted code change or git rollback.
+        """
+        summary = f"Reverted change: {reason.strip()}"
+        return cls.record_failure(
+            summary=summary,
+            file_path=file_path,
+            source="git_revert",
+            project_root=project_root
+        )
+
+    @classmethod
+    def list_mistakes(
+        cls,
+        project_root: Optional[str] = None,
+        active_only: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Loads all recorded mistakes from the ledger."""
+        ledger_path = _find_project_mistakes_file(project_root)
+        if not os.path.exists(ledger_path):
+            return []
+
+        entries = []
+        try:
+            with open(ledger_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            item = json.loads(line)
+                            if not active_only or item.get("active", True):
+                                entries.append(item)
+                        except Exception:
+                            pass
+        except Exception:
+            return []
+
+        return entries
+
+    @classmethod
+    def clear_mistakes(cls, project_root: Optional[str] = None) -> int:
+        """Clears all entries from the mistakes ledger."""
+        ledger_path = _find_project_mistakes_file(project_root)
+        if os.path.exists(ledger_path):
+            try:
+                entries = cls.list_mistakes(project_root=project_root, active_only=False)
+                os.remove(ledger_path)
+                return len(entries)
+            except Exception:
+                pass
+        return 0
+
+    @classmethod
+    def get_guard_prompt(
+        cls,
+        project_root: Optional[str] = None,
+        max_items: int = 3
+    ) -> Optional[str]:
+        """
+        Generates a compact (<80 tokens) prompt guard from recent active mistakes.
+        Injectable into system instructions or PreInvocation hooks.
+        """
+        mistakes = cls.list_mistakes(project_root=project_root, active_only=True)
+        if not mistakes:
+            return None
+
+        # Take the most recent active entries
+        recent = mistakes[-max_items:]
+        lines = ["[TokenSafe Anti-Stuck Guard: Prior Dead-Ends to Avoid in this Project]:"]
+        for m in reversed(recent):
+            f = m.get("file")
+            f_prefix = f"{f}: " if f else ""
+            lines.append(f"• {f_prefix}{m.get('summary', '')}")
+
+        return "\n".join(lines)

@@ -115,6 +115,13 @@ def _compact_read_result(text: str, path: str) -> Optional[str]:
 def _compact_command_result(text: str) -> Optional[str]:
     """Test summaries first (PASS: ...), log-style head/tail otherwise."""
     try:
+        from src.test_parsers import TestOutputParser
+        compacted, was_test = TestOutputParser.compact(text)
+        if was_test:
+            return compacted
+    except Exception:
+        pass
+    try:
         from src.command_sanitizer import CommandSanitizer
         compacted = CommandSanitizer.compact_test_output(text, 0)
         if compacted is not text and len(compacted) < len(text) * 0.6:
@@ -183,7 +190,7 @@ def _fold_anchor(tool_name: str, preview: str, orig_tokens: int, new_tokens: int
     return (
         f"{FOLD_MARKER} {tool_name} ({preview}) result consumed earlier — folded "
         f"~{orig_tokens}→{new_tokens} tokens (sha256:{sha[:8]}).{archive_note} "
-        f"To re-inspect: re-run {tool_name}, or use smart_read_file(force_full=true) for file reads.]"
+        f"To re-inspect: call tokensafe:expand_ref('{sha[:8]}'), re-run {tool_name}, or use smart_read_file(force_full=true).]"
     )
 
 

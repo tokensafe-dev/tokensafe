@@ -97,6 +97,14 @@ def main():
     except Exception:
         pass
 
+    try:
+        from src.mistakes import MistakesLedger
+        mistake_guard = MistakesLedger.get_guard_prompt(project_root=workspace_root)
+        if mistake_guard:
+            inject_steps.append({"systemMessage": {"systemMessage": mistake_guard, "metadata": {}}})
+    except Exception:
+        pass
+
     print(json.dumps({"injectSteps": inject_steps}))
 
 

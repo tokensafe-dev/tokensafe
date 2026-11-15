@@ -42,7 +42,7 @@ from src.paths import get_active_workspace, is_plugin_or_system_dir
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
-    "version": "3.2.0"
+    "version": "4.0.0"
 }
 
 # MCP client attribution: the initialize handshake carries clientInfo, which
@@ -275,6 +275,68 @@ TOOLS = [
                 }
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "expand_ref",
+        "description": "Expands a previously folded or stashed tool, command, file, or MCP result by its 8-character hex hash anchor (e.g. 'a1b2c3d4' or '#a1b2c3d4'). Returns the full original text that TokenSafe folded.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "hash": {
+                    "type": "string",
+                    "description": "8-character hex hash from the fold marker (e.g. 'a1b2c3d4' or '#a1b2c3d4')"
+                }
+            },
+            "required": ["hash"]
+        }
+    },
+    {
+        "name": "read_web_page",
+        "description": "Fetches a web page URL and converts it to clean, readable Markdown, stripping scripts, styles, navbars, and ads (-80-95% tokens compared to raw HTML).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Web URL to fetch and convert to Markdown"
+                }
+            },
+            "required": ["url"]
+        }
+    },
+    {
+        "name": "optimize_image",
+        "description": "Downscales oversized screenshots/diagrams before passing them to LLM vision endpoints. Resizes images exceeding max_edge (default: 1024px) while preserving aspect ratio and crispness, keeping the original image intact on disk (-50-75% vision tokens).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image_path": {"type": "string", "description": "Absolute or relative path to the image file"},
+                "max_edge": {"type": "integer", "description": "Maximum width/height in pixels (default: 1024)"}
+            },
+            "required": ["image_path"]
+        }
+    },
+    {
+        "name": "prune_superseded",
+        "description": "Prunes obsolete intermediate tool read outputs in long conversation transcripts that have since been modified by subsequent edits or re-read in later steps (-30-40% context mass).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "transcript_path": {"type": "string", "description": "Path to the JSONL conversation transcript to prune"}
+            },
+            "required": ["transcript_path"]
+        }
+    },
+    {
+        "name": "get_mistakes",
+        "description": "Returns known dead-ends, failed hypotheses, and reverted code changes for this project to prevent repeating unsuccessful approaches.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_root": {"type": "string", "description": "Optional project root directory (defaults to current project)"},
+                "clear": {"type": "boolean", "description": "If true, clears the mistakes ledger"}
+            }
         }
     }
 ]
@@ -764,6 +826,59 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
 
         if _is_binary_file(path):
             return _fallback_error("smart_read_file", f"'{os.path.basename(path)}' appears to be a binary file")
+
+        # Bloated lockfiles (package-lock.json, Cargo.lock, poetry.lock, pnpm-lock.yaml):
+        # Extract compact dependency bill with reversible hash anchor instead of a 30k token dump.
+        from src.format_parsers.lockfiles import LockfileReducer
+        if LockfileReducer.is_lockfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    raw_lock_text = f.read()
+                reduced_lock, was_reduced = LockfileReducer.reduce(raw_lock_text, os.path.basename(path))
+                if was_reduced:
+                    orig_t = count_tokens(raw_lock_text)
+                    opt_t = count_tokens(reduced_lock)
+                    tracker.record_event(
+                        session_id=_mcp_session_id(),
+                        event_type="LOCKFILE_REDUCE",
+                        original_tokens=orig_t,
+                        optimized_tokens=opt_t,
+                        details={"file": os.path.basename(path), "saved": orig_t - opt_t}
+                    )
+                    return {"content": [{"type": "text", "text": reduced_lock}]}
+            except Exception:
+                pass
+
+        # Tabular and database dump files (CSV, TSV, SQL, HAR):
+        # Extract schema, data types, and sample rows instead of dumping 10k rows into context.
+        from src.format_parsers.tabular import TabularReducer
+        if TabularReducer.is_tabular_or_dump(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    raw_data_text = f.read()
+                ext_lower = os.path.splitext(path)[1].lower()
+                if ext_lower in (".csv", ".tsv"):
+                    reduced_tab, was_reduced = TabularReducer.reduce_csv(raw_data_text)
+                elif ext_lower == ".sql":
+                    reduced_tab, was_reduced = TabularReducer.reduce_sql_dump(raw_data_text)
+                elif ext_lower == ".har":
+                    reduced_tab, was_reduced = TabularReducer.reduce_har(raw_data_text)
+                else:
+                    reduced_tab, was_reduced = raw_data_text, False
+
+                if was_reduced:
+                    orig_t = count_tokens(raw_data_text)
+                    opt_t = count_tokens(reduced_tab)
+                    tracker.record_event(
+                        session_id=_mcp_session_id(),
+                        event_type="TABULAR_REDUCE",
+                        original_tokens=orig_t,
+                        optimized_tokens=opt_t,
+                        details={"file": os.path.basename(path), "saved": orig_t - opt_t}
+                    )
+                    return {"content": [{"type": "text", "text": reduced_tab}]}
+            except Exception:
+                pass
 
         # Heavy declarative schema files (OpenAPI/Swagger/Prisma/GraphQL/SQL DDL):
         # generic AST skeletonization does not apply — route to the schema slicer.
@@ -1561,6 +1676,105 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             details={"query": query, "scope": scope, "matches": res["total_matches"]}
         )
         return {"content": [{"type": "text", "text": md_text}]}
+
+    elif name == "expand_ref":
+        raw_hash = args.get("hash") or args.get("ref") or args.get("id") or ""
+        if not raw_hash:
+            return _fallback_error("expand_ref", "missing required 'hash' argument")
+        try:
+            from src.stash import retrieve_block
+            content = retrieve_block(str(raw_hash))
+            if content is None:
+                return {
+                    "isError": True,
+                    "content": [{"type": "text", "text": f"Error: Stashed reference '{raw_hash}' not found or expired (retention is 7 days)."}]
+                }
+            return {"content": [{"type": "text", "text": content}]}
+        except Exception as e:
+            return _fallback_error("expand_ref", f"cannot retrieve stashed ref: {e}")
+
+    elif name == "read_web_page":
+        target_url = str(args.get("url") or args.get("link") or "").strip()
+        if not target_url:
+            return _fallback_error("read_web_page", "missing required 'url' argument")
+        try:
+            from src.web_reader import WebReader
+            content, ok, err = WebReader.fetch_url(target_url)
+            if not ok:
+                return _fallback_error("read_web_page", err or "failed to fetch web page")
+            orig_t = max(1000, len(content) // 2)
+            opt_t = count_tokens(content)
+            tracker.record_event(
+                session_id=_mcp_session_id(),
+                event_type="WEB_READ",
+                original_tokens=orig_t,
+                optimized_tokens=opt_t,
+                details={"url": target_url[:80], "saved": max(0, orig_t - opt_t)}
+            )
+            return {"content": [{"type": "text", "text": content}]}
+        except Exception as e:
+            return _fallback_error("read_web_page", f"error reading web page: {e}")
+
+    elif name == "optimize_image":
+        img_path = str(args.get("image_path") or args.get("path") or "").strip()
+        if not img_path:
+            return _fallback_error("optimize_image", "missing required 'image_path' argument")
+        try:
+            max_edge = _safe_int(args.get("max_edge"), 1024, lo=256, hi=4096)
+            from src.image_downscale import ImageDownscaler
+            res = ImageDownscaler.optimize(img_path, max_edge=max_edge)
+            if not res.get("success"):
+                return _fallback_error("optimize_image", res.get("error", "optimization failed"))
+            if res.get("was_downscaled"):
+                tracker.record_event(
+                    session_id=_mcp_session_id(),
+                    event_type="IMAGE_OPTIMIZATION",
+                    original_tokens=res.get("orig_tokens", 1000),
+                    optimized_tokens=res.get("new_tokens", 500),
+                    details={"path": os.path.basename(img_path), "saved": res.get("saved_tokens", 0)}
+                )
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("optimize_image", f"error optimizing image: {e}")
+
+    elif name == "prune_superseded":
+        t_path = str(args.get("transcript_path") or "").strip()
+        if not t_path:
+            return _fallback_error("prune_superseded", "missing required 'transcript_path' argument")
+        try:
+            from src.superseded import SupersededPruner
+            res = SupersededPruner.prune_transcript(t_path)
+            if not res.get("success"):
+                return _fallback_error("prune_superseded", res.get("error", "pruning failed"))
+            if res.get("saved_tokens", 0) > 0:
+                tracker.record_event(
+                    session_id=_mcp_session_id(),
+                    event_type="SUPERSEDED_PRUNE",
+                    original_tokens=res.get("orig_tokens", 0),
+                    optimized_tokens=res.get("pruned_tokens", 0),
+                    details={"pruned_count": res.get("pruned_count", 0), "saved": res.get("saved_tokens", 0)}
+                )
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("prune_superseded", f"error pruning transcript: {e}")
+
+    elif name == "get_mistakes":
+        proj_root = str(args.get("project_root") or "").strip() or None
+        if args.get("clear"):
+            from src.mistakes import MistakesLedger
+            cleared = MistakesLedger.clear_mistakes(project_root=proj_root)
+            return {"content": [{"type": "text", "text": json.dumps({"cleared": cleared}, indent=2)}]}
+        try:
+            from src.mistakes import MistakesLedger
+            entries = MistakesLedger.list_mistakes(project_root=proj_root)
+            guard = MistakesLedger.get_guard_prompt(project_root=proj_root)
+            return {"content": [{"type": "text", "text": json.dumps({
+                "count": len(entries),
+                "entries": entries,
+                "active_guard": guard
+            }, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("get_mistakes", f"error reading mistakes ledger: {e}")
 
     return _fallback_error(name, f"unknown tool '{name}'")
 
