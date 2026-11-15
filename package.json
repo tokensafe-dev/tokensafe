@@ -2,7 +2,7 @@
   "name": "tokensafe",
   "mcpName": "dev.tokensafe/tokensafe",
   "version": "3.1.5",
-  "description": "Make AI coding agents 3x faster and stop burning team quotas. Smart code slicing, prompt cache locking, and pre-git security for Cursor, Claude Code, and Codex.",
+  "description": "Make AI coding agents 3x faster without burning team quotas. Exact code context. Fewer tokens. Safer changes.",
   "main": "bin/tokensafe.js",
   "bin": {
     "tokensafe": "bin/tokensafe.js"

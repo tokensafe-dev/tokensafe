@@ -6,9 +6,9 @@
 <!-- mcp-name: dev.tokensafe/tokensafe -->
 
 <p align="center">
-  <b>Make AI coding agents 3x faster and stop burning team quotas.</b><br>
-  Precise code context, zero hallucinated methods, and pre-git security. Runs 100% locally on your machine in under 30ms.<br>
-  When an agent reads 200 lines of typed contracts instead of 3,000 lines of boilerplate, turns drop from 45 seconds to 3 seconds. Secrets stay out of LLM transcripts, prompt caches stay warm, and your team ships releases without 5-hour quota lockouts.<br>
+  <b>Make AI coding agents 3x faster without burning team quotas.</b><br>
+  Exact code context. Fewer tokens. Safer changes.<br>
+  TokenSafe intercepts AI tool calls locally, replacing thousands of lines of irrelevant code with precise function bodies and typed signatures. Preserve prompt caches and protect secrets before they reach your AI transcripts.<br>
   Works with <b>Cursor, Claude Code, Codex, Windsurf, Google Antigravity, Gemini CLI, and ChatGPT</b>.
 </p>
 
