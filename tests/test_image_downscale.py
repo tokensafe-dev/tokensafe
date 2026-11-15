@@ -6,7 +6,12 @@ import unittest
 import os
 import shutil
 import tempfile
-from PIL import Image
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    Image = None
+    HAS_PIL = False
 from src.image_downscale import ImageDownscaler, estimate_vision_tokens
 
 
@@ -26,6 +31,7 @@ class TestImageDownscaler(unittest.TestCase):
         # 0x0
         self.assertEqual(estimate_vision_tokens(0, 0), 0)
 
+    @unittest.skipUnless(HAS_PIL, "Pillow is not installed in environment")
     def test_downscale_oversized_image(self):
         # Create a mock 4K screenshot (3840x2160)
         img_path = os.path.join(self.tmp_dir, "screenshot.png")
@@ -45,6 +51,7 @@ class TestImageDownscaler(unittest.TestCase):
         with Image.open(img_path) as orig_check:
             self.assertEqual(orig_check.size, (3840, 2160))
 
+    @unittest.skipUnless(HAS_PIL, "Pillow is not installed in environment")
     def test_no_downscale_for_small_image(self):
         img_path = os.path.join(self.tmp_dir, "small.png")
         img = Image.new("RGB", (400, 300), color="red")
