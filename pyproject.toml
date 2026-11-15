@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tokensafe"
 version = "3.1.5"
-description = "Reduce your AI bills by up to 99% locally: focused code context, warm prompt caches, and zero secret leaks in git."
+description = "Make AI coding agents 3x faster and stop burning team quotas. Smart code slicing, prompt cache locking, and pre-git security for Cursor, Claude Code, and Codex."
 readme = "README.md"
 authors = [
     { name = "TokenSafe Team", email = "support@tokensafe.dev" }

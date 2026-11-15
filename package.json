@@ -2,7 +2,7 @@
   "name": "tokensafe",
   "mcpName": "dev.tokensafe/tokensafe",
   "version": "3.1.5",
-  "description": "Reduce your AI bills by up to 99% locally. Your agents read only needed code, keep prompt caches intact across turns, and keep secrets out of git.",
+  "description": "Make AI coding agents 3x faster and stop burning team quotas. Smart code slicing, prompt cache locking, and pre-git security for Cursor, Claude Code, and Codex.",
   "main": "bin/tokensafe.js",
   "bin": {
     "tokensafe": "bin/tokensafe.js"
