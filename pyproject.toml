@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokensafe"
-version = "4.0.0"
+version = "4.0.1"
 description = "Make AI coding agents 3x faster without burning team quotas. Exact code context. Fewer tokens. Safer changes."
 readme = "README.md"
 authors = [
@@ -52,6 +52,7 @@ dependencies = [
     "tree-sitter-php",
     "tree-sitter-kotlin",
     "tree-sitter-c-sharp",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
