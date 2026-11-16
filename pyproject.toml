@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tokensafe"
 version = "4.1.5"
-description = "Make AI coding agents 3x faster without burning team quotas. Exact code context. Fewer tokens. Safer changes."
+description = "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents."
 readme = "README.md"
 authors = [
     { name = "TokenSafe Team", email = "support@tokensafe.dev" }

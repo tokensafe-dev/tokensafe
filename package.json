@@ -2,7 +2,7 @@
   "name": "tokensafe",
   "mcpName": "dev.tokensafe/tokensafe",
   "version": "4.1.5",
-  "description": "Make AI coding agents 3x faster without burning team quotas. Exact code context. Fewer tokens. Safer changes.",
+  "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
   "main": "bin/tokensafe.js",
   "bin": {
     "tokensafe": "bin/tokensafe.js"
