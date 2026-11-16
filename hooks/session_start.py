@@ -61,8 +61,9 @@ def main():
     workspace_paths = raw_ws if isinstance(raw_ws, list) else []
     workspace_root = str(workspace_paths[0]) if workspace_paths else os.getcwd()
     try:
-        from src.paths import save_active_workspace
+        from src.paths import save_active_workspace, ensure_tokensafe_gitignore
         save_active_workspace(workspace_root)
+        ensure_tokensafe_gitignore(workspace_root)
     except Exception:
         pass
 

@@ -231,8 +231,8 @@ def handle(event: str, payload: dict) -> dict:
             return {
                 "decision": "block",
                 "reason": (
-                    f"[TokenSafe] {tool} succeeded (exit 0) — verbose stdout auto-compacted "
-                    f"({orig:,} → {new:,} chars). Command already completed; do not retry. Summary:\n{compacted}"
+                    f"[TokenSafe] {tool} output auto-compacted "
+                    f"({orig:,} → {new:,} chars). Output summary:\n{compacted}"
                 ),
             }
         return {}
