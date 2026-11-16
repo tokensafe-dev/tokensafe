@@ -121,7 +121,10 @@ class EnvironmentAuditor:
                     with open(plugin_cfg, "r", encoding="utf-8") as f:
                         loaded = json.load(f)
                     if isinstance(loaded, dict) and isinstance(loaded.get("mcpServers"), dict):
-                        configured.update(loaded["mcpServers"])
+                        for s_name, s_cfg in loaded["mcpServers"].items():
+                            configured[s_name] = s_cfg
+                            # Antigravity namespaces plugin MCP servers as <plugin_name>_<server_name>
+                            configured[f"{entry}_{s_name}"] = s_cfg
                 except Exception:
                     continue
         return configured
@@ -229,8 +232,14 @@ class EnvironmentAuditor:
                 }
 
         # Include configured servers that might not have a schema dir cached yet
+        # Skip un-namespaced aliases if their namespaced counterpart already matched a schema
+        seen_plugin_suffixes = {
+            s_name.split("_", 1)[1] for s_name in servers.keys() if "_" in s_name
+        }
         for srv_name in configured:
             if srv_name not in servers:
+                if srv_name in seen_plugin_suffixes:
+                    continue
                 servers[srv_name] = {
                     "name": srv_name,
                     "active": True,
