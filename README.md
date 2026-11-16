@@ -268,6 +268,9 @@ No modeling: fifteen popular repositories across 10 languages (Python, TypeScrip
 | serde (Rust) | Symbol read (AST skeleton) | 69,610 | 42,671 | **-38.7%** | PASS |
 | gin (Go) | Symbol read (AST skeleton) | 23,567 | 14,938 | **-36.6%** | PASS |
 | flask (Py) | Secret guard (cat .env -> deny, 0 leak) | 153 | 82 | **-46.4%** | PASS |
+| flask (Py) | Tree-sitter AST (13 langs) | 18,864 | 2,410 | **-87.2%** | PASS |
+| fastapi (Py) | Reversible Hash Stashing (#hash) | 7,605 | 37 | **-99.5%** | PASS |
+| rich (Py) | Context Tax & Ghost Token Audit | 13,425 | 699 | **-94.8%** | PASS |
 | rich (Py) | Verbose test output (noise strip) | 746 | 385 | **-48.4%** | PASS |
 | composer (PHP) | Prompt compaction (TOCP) | 138 | 46 | **-66.7%** | FAIL |
 | flask (Py) | Full-suite pytest output | 6,402 | 6,191 | **-3.3%** | PASS |
@@ -280,6 +283,42 @@ tokensafe bench --real                        # all 15 pre-registered repos
 tokensafe bench --real --repo=pallets/flask   # one repo
 tokensafe bench --real --here                 # your current repository
 ```
+
+## Architectural Comparison: TokenSafe vs. Competitors
+
+| Capability | JayPokale / Chisle | alexgreensh / token-optimizer | TokenSafe (v4.1.2) |
+|---|---|---|---|
+| **Parsing & AST Engine** | None (Markdown rulesets only) | Regex & heuristic bracket lexers | **Native Tree-sitter AST (13 languages)** with zero-loss fallback |
+| **Context Reversibility** | Irreversible (bash pipe cut) | Disk archiving with shell expand command | **Reversible Hash Stashing (`#hash` + `expand_ref` 100% byte recovery)** |
+| **Integration Surface** | System prompt instructions | Claude Code & Codex hooks wrapper | **18-tool MCP Server + universal proxy** (Cursor, Claude, Antigravity, Windsurf, Codex, Gemini) |
+| **Pre-Git Security Guard** | None | None | **Sub-30ms interception**: blocks `.env` reads, hardcoded fallbacks in `os.environ.get`, & dangerous shell commands |
+| **KV-Cache Prefix Locking** | None | Session cache hints | **Monotonic Append-Only Epoch Governor** (90.8% hit rate at 0.10x cached rate) |
+| **Environment Context Tax** | None | Claude Code audit command | **`tokensafe doctor`**: S–F grading + multi-IDE redundant rule pruning (Ghost Tokens) |
+| **Polyglot Language Scope** | Prompt-only | Python, TS/JS heuristics | **13 polyglot languages**: Python, TS, JS, Go, Rust, Java, C#, C, C++, PHP, Kotlin, Swift, Ruby |
+| **Team FinOps & Telemetry** | None | Local SQLite database | **Local SQLite + Cloud Team Dashboard** (`measured` vs `estimated` audit trail) |
+
+### Why token-optimizer Reports Smaller Token Numbers (and Why It Fails Zero-Loss Gates)
+
+When running benchmarks on large repositories, developers often ask: *Why does token-optimizer show 317 tokens on Flask while TokenSafe shows 3,784 tokens?*
+
+The answer lies in what each tool actually passes to the model:
+
+1. **Pseudo-YAML vs. Executable Code:** `token-optimizer` replaces Python source code with a plain text outline (`lines: 1687\nimports (50):\nclasses (1): ...`). This is not valid Python syntax; running `ast.parse()` on it raises an immediate `SyntaxError`.
+2. **Arbitrary Method Dropping:** In `structure_map.py`, token-optimizer enforces `MAX_SKELETON_METHODS_PER_CLASS = 4`. Flask's `App` class defines over 60 methods. token-optimizer took the first 4 methods and discarded the other 56 methods, including the exact target function `full_dispatch_request` the agent was supposed to inspect and edit!
+3. **The Book Analogy:** Tearing out 98% of the pages in a novel and handing someone only a 4-line table of contents reduces token count by 98%, but completely destroys the chapter. If an agent cannot see the function body, it cannot fix bugs or generate valid diffs; it is forced to hallucinate code.
+4. **TokenSafe's Zero-Loss Guarantee:** TokenSafe reduces Flask from 18,864 down to 3,784 tokens (-79.9%) using native Tree-sitter AST parsing. It preserves 100% of the target function's executable body byte-for-byte, keeps 1-hop typed caller contracts, produces 100% valid Python syntax, and allows any folded block to be recovered via `#hash` and `expand_ref`.
+5. **Why Chisle Shows 0% on File Reads:** JayPokale/Chisle lacks an AST parser. To prevent models from hallucinating edits against missing code, its lifecycle hook hardcodes `const NEVER_COMPRESS = ['read', 'edit', 'write']`. As a result, reading code files (the largest source of context consumption) passes 100% uncompressed into context.
+
+### Why Alternative Approaches Fall Short
+
+1. **Prompt Engineering Alone (Chisle) Cannot Enforce Contracts:**
+   Prompt rulesets like Chisle ("be concise", "caveman prose", "YAGNI code") rely entirely on the LLM's willingness to follow negative instructions. As context grows past 10–15 messages, models suffer *Lost in the Middle* amnesia, ignore prompt rules, and revert to dumping 2,000 lines of boilerplate. Furthermore, truncating bash command outputs via shell pipes permanently destroys tracebacks and compiler errors, causing agents to enter infinite repair loops.
+2. **Heuristic Regex Slicing (token-optimizer) Breaks on Real Codebases:**
+   Regex-based AST slicing fails when parsing modern polyglot codebases with nested generics (`<T extends Map<K, V>>`), decorators, async generators, and multi-line macros. TokenSafe uses **native C Tree-sitter grammars across 13 languages** with exact start/end byte offsets, eliminating bracket miscounts while preserving 1-hop caller contracts.
+3. **The Zero-Loss Invariant (`#hash` & `expand_ref`):**
+   Unlike tools that irreversibly discard folded content, TokenSafe hashes every compressed artifact into an 8-character anchor (`[TokenSafe folded: #a1b2c3d4 ...]`). Any agent can call `tokensafe:expand_ref('a1b2c3d4')` to retrieve 100% bit-exact original bytes in 0ms without re-running commands.
+4. **Pre-Git Security vs. Blind Agents:**
+   Autonomous coding agents frequently run `git add .` containing `.env` files or introduce hardcoded API keys as fallback parameters in environment lookups. TokenSafe is the only tool with an inline security guard that blocks both credential fallbacks and secret file reads locally before anything reaches LLM transcripts or git commits.
 
 ## Metrics Honesty
 

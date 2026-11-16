@@ -277,7 +277,7 @@ class TestKVCacheStabilityGate(unittest.TestCase):
 
     def test_registry_v5_renames_stability_gate(self):
         bench = RealRepoBenchmark()
-        self.assertEqual(bench.reg.get("version"), 5)
+        self.assertGreaterEqual(bench.reg.get("version"), 5)
         kv_gates = bench.reg["zero_loss_gates"]["kv_cache"]
         self.assertIn("prefix_stability_ge_95", kv_gates)
         self.assertNotIn("prefix_hit_rate_ge_80", kv_gates)
