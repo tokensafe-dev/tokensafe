@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokensafe"
-version = "4.1.0"
+version = "4.1.1"
 description = "Make AI coding agents 3x faster without burning team quotas. Exact code context. Fewer tokens. Safer changes."
 readme = "README.md"
 authors = [
