@@ -24,12 +24,17 @@ const CORE_DEPS = [
   'tree-sitter-java',
   'tree-sitter-php',
   'tree-sitter-kotlin',
-  'tree-sitter-c-sharp'
+  'tree-sitter-c-sharp',
+  'tree-sitter-c',
+  'tree-sitter-cpp',
+  'tree-sitter-ruby',
+  'tree-sitter-swift',
+  'Pillow>=10.0.0'
 ];
 
-function checkPython(cmd, requireCrypto) {
-  const probe = requireCrypto
-    ? 'import sys, cryptography; assert sys.version_info >= (3, 10)'
+function checkPython(cmd, requireDeps) {
+  const probe = requireDeps
+    ? 'import sys, cryptography, tree_sitter; assert sys.version_info >= (3, 10)'
     : 'import sys; assert sys.version_info >= (3, 10)';
   try {
     const res = spawnSync(cmd, ['-c', probe], { encoding: 'utf-8', stdio: 'pipe' });

@@ -17,6 +17,10 @@ tree-sitter-java
 tree-sitter-php
 tree-sitter-kotlin
 tree-sitter-c-sharp
+tree-sitter-c
+tree-sitter-cpp
+tree-sitter-ruby
+tree-sitter-swift
 
 # Vision optimization (Pillow for universal cross-platform image downscaling)
 Pillow>=10.0.0

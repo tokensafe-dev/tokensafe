@@ -273,6 +273,23 @@ class EnvironmentAuditor:
 
         bloated_servers = [s for s in servers.values() if s["is_bloat"]]
 
+        treesitter_info: Dict[str, Any] = {"available": False, "active": 0, "total": 0, "missing": []}
+        try:
+            from src.treesitter_backend import TreeSitterBackend
+            ts_status = TreeSitterBackend.check_all_languages()
+            ok_cnt = sum(1 for v in ts_status.values() if v)
+            tot_cnt = len(ts_status)
+            missing = [k for k, v in ts_status.items() if not v]
+            treesitter_info = {
+                "available": TreeSitterBackend.is_available(),
+                "active": ok_cnt,
+                "total": tot_cnt,
+                "all_ok": ok_cnt == tot_cnt and tot_cnt > 0,
+                "missing": missing,
+            }
+        except Exception:
+            pass
+
         return {
             "servers": servers,
             "total_active_servers": len([s for s in servers.values() if s["active"]]),
@@ -285,6 +302,7 @@ class EnvironmentAuditor:
             "has_critical_bloat": len(bloated_servers) > 0,
             "rules": rules,
             "ghost_tokens": ghost_tokens,
+            "treesitter": treesitter_info,
         }
 
     @classmethod
@@ -553,6 +571,14 @@ class EnvironmentAuditor:
             lines.append(f"  \033[1mRule Files:\033[0m {rules['files']} files, ~{rules['total_tokens']:,}/20,000 tokens [{budget_flag}]")
             for v in rules.get("violations", []):
                 lines.append(f"    \033[31m✖ {v['path']}: {v['effective_bytes']:,} bytes > {RULE_FILE_LIMIT_BYTES:,} cap\033[0m")
+
+        ts = report.get("treesitter") or {}
+        if ts.get("total", 0) > 0:
+            if ts.get("all_ok"):
+                lines.append(f"  \033[1mAST Engines (Tree-sitter):\033[0m \033[32m✔ {ts['active']}/{ts['total']} languages active\033[0m")
+            else:
+                missing_str = ", ".join(ts.get("missing", []))
+                lines.append(f"  \033[1mAST Engines (Tree-sitter):\033[0m \033[33m⚠ {ts['active']}/{ts['total']} active (missing: {missing_str})\033[0m")
 
         ghost = report.get("ghost_tokens") or {}
         if ghost.get("has_ghost_tokens"):

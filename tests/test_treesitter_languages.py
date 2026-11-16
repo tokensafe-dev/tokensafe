@@ -154,6 +154,91 @@ class CartManager(val storage: Storage) {
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_c_parsing_and_skeleton(self):
+        c_code = """#include <stdio.h>
+
+int compute_sum(int a, int b) {
+    printf("sum: %d\\n", a + b);
+    return a + b;
+}
+"""
+        data = TreeSitterBackend.extract_graph_data(c_code, ".c", "math.c")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("compute_sum", names)
+        calls = [c[1] for c in data["calls"]]
+        self.assertTrue(any("printf" in c for c in calls))
+
+        skeleton = TreeSitterBackend.skeletonize_braces(c_code, ".c")
+        self.assertIn("int compute_sum", skeleton)
+        self.assertIn("/* ... */", skeleton)
+
+    def test_cpp_parsing_and_skeleton(self):
+        cpp_code = """#include <iostream>
+
+class Engine {
+public:
+    void start() {
+        std::cout << "Engine started" << std::endl;
+    }
+};
+"""
+        data = TreeSitterBackend.extract_graph_data(cpp_code, ".cpp", "engine.cpp")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("Engine", names)
+        self.assertIn("start", names)
+
+        skeleton = TreeSitterBackend.skeletonize_braces(cpp_code, ".cpp")
+        self.assertIn("class Engine {", skeleton)
+        self.assertIn("void start() { /* ... */ }", skeleton)
+
+    def test_ruby_parsing_and_skeleton(self):
+        rb_code = """class AccountService
+  def transfer(from_id, to_id, amount)
+    log_event("transfer", amount)
+    return true
+  end
+end
+"""
+        data = TreeSitterBackend.extract_graph_data(rb_code, ".rb", "account.rb")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("AccountService", names)
+        self.assertIn("transfer", names)
+        calls = [c[1] for c in data["calls"]]
+        self.assertTrue(any("log_event" in c for c in calls))
+
+        skeleton = TreeSitterBackend.skeletonize_braces(rb_code, ".rb")
+        self.assertIn("class AccountService", skeleton)
+
+    def test_swift_parsing_and_skeleton(self):
+        swift_code = """import Foundation
+
+class NetworkClient {
+    func executeRequest(url: String) -> Bool {
+        print(url)
+        return true
+    }
+}
+"""
+        data = TreeSitterBackend.extract_graph_data(swift_code, ".swift", "client.swift")
+        self.assertIsNotNone(data)
+        names = [s["name"] for s in data["symbols"]]
+        self.assertIn("NetworkClient", names)
+        self.assertIn("executeRequest", names)
+
+        skeleton = TreeSitterBackend.skeletonize_braces(swift_code, ".swift")
+        self.assertIn("class NetworkClient {", skeleton)
+        self.assertIn("/* ... */", skeleton)
+
+    def test_check_all_languages(self):
+        status = TreeSitterBackend.check_all_languages()
+        self.assertEqual(len(status), 13)
+        for lang, ok in status.items():
+            self.assertTrue(ok, f"Expected grammar for {lang} to be available")
+        self.assertEqual(TreeSitterBackend.get_missing_languages(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

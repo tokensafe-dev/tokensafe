@@ -1,10 +1,13 @@
 """
-Optional Tree-sitter Backend for TokenSafe GraphEngine and Skeletonizer.
+Core Tree-sitter Backend for TokenSafe GraphEngine and Skeletonizer.
 
-Strictly optional: all imports of `tree_sitter` and `tree_sitter_*` grammars are
-lazy and fail-safe. When unavailable (or disabled via TOKENSAFE_TREESITTER=0),
-callers fall back seamlessly to TokenSafe's zero-dependency stdlib AST/BraceLexer
-engines.
+Provides high-performance, precise AST symbol extraction, call-graph tracking,
+import resolution, and syntax-aware brace folding across 13 major programming
+languages:
+  Python, JavaScript, TypeScript, Go, Rust, Java, C#, C, C++, PHP, Kotlin, Swift, Ruby.
+
+All language grammars are standard mandatory dependencies with pre-compiled wheels.
+Fail-safe fallback to stdlib ast / regex lexer is preserved if a grammar cannot load.
 """
 
 import importlib
@@ -174,6 +177,35 @@ class TreeSitterBackend:
         if not cls.is_available():
             return set()
         return {ext for ext in _LANGUAGE_SPECS if cls.get_parser(ext) is not None}
+
+    _CANONICAL_LANGUAGES: Dict[str, str] = {
+        "Python": ".py",
+        "JavaScript": ".js",
+        "TypeScript": ".ts",
+        "Go": ".go",
+        "Rust": ".rs",
+        "Java": ".java",
+        "C#": ".cs",
+        "C": ".c",
+        "C++": ".cpp",
+        "PHP": ".php",
+        "Kotlin": ".kt",
+        "Swift": ".swift",
+        "Ruby": ".rb",
+    }
+
+    @classmethod
+    def check_all_languages(cls) -> Dict[str, bool]:
+        """Verifies availability of all supported Tree-sitter language grammars."""
+        results: Dict[str, bool] = {}
+        for name, ext in cls._CANONICAL_LANGUAGES.items():
+            results[name] = cls.supports_ext(ext)
+        return results
+
+    @classmethod
+    def get_missing_languages(cls) -> List[str]:
+        """Returns names of supported languages whose grammars are missing or failed to load."""
+        return [lang for lang, ok in cls.check_all_languages().items() if not ok]
 
     @staticmethod
     def _node_text(node: Any, code_bytes: bytes) -> str:

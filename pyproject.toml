@@ -52,16 +52,15 @@ dependencies = [
     "tree-sitter-php",
     "tree-sitter-kotlin",
     "tree-sitter-c-sharp",
-    "Pillow>=10.0.0",
-]
-
-[project.optional-dependencies]
-treesitter_extra = [
     "tree-sitter-c",
     "tree-sitter-cpp",
     "tree-sitter-ruby",
     "tree-sitter-swift",
+    "Pillow>=10.0.0",
 ]
+
+[project.optional-dependencies]
+treesitter_extra = []
 
 [project.urls]
 Homepage = "https://tokensafe.dev"
