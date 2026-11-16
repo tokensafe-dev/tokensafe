@@ -105,7 +105,6 @@ def _print_help():
     print("  bench --real [--repo=key|--here]  Measured benchmark on real repos (zero-loss gates)")
     print("  graph / map / skeleton         Architecture graph / API surface / AST skeleton of a file")
     print("  test <prompt>                  Preview TOCP S-expression prompt compaction")
-    print("  digest [--send] [--email=...]  Compile (and optionally dispatch) the weekly team digest")
     print("  guard <command>                Pre-flight safety check for a shell command")
     print("  expand-ref <hash>              Restore folded tool/command/file result by its 8-char hash")
     print("  wrap <command>                 Run command with compact output folding (e.g. tests/logs)")
@@ -1109,69 +1108,6 @@ def main(argv: Optional[List[str]] = None):
         t.recalculate_sessions()
         b_after = (os.path.getsize(t.db_path) if os.path.exists(t.db_path) else 0) / 1024.0
         print(f"\033[32m✔ Database compacted + session aggregates rebuilt. Size: {b_before:.1f} KB ➔ {b_after:.1f} KB\033[0m\n")
-
-    elif command in ("digest", "weekly-digest"):
-        from src.weekly_digest import WeeklyDigestGenerator
-
-        target_email = None
-        do_send = "--send" in args
-
-        idx = 1
-        while idx < len(args):
-            a = args[idx]
-            if a.startswith("--email="):
-                target_email = a.split("=", 1)[1].strip()
-            elif a == "--email" and idx + 1 < len(args):
-                target_email = args[idx + 1].strip()
-                idx += 1
-            idx += 1
-
-        if not target_email:
-            from src.license_manager import LicenseManager
-            _, payload = LicenseManager.get_active_license()
-            target_email = payload.get("email") or "teamlead@example.com"
-
-        print(f"\n\033[1m\033[36m⚡ COMPILING FRIDAY TEAM ROI DIGEST ⚡\033[0m")
-        print(f"Target Teamlead: {target_email}")
-
-        stats = WeeklyDigestGenerator.get_team_weekly_stats(target_email)
-        if not stats:
-            stats = {
-                "owner_email": target_email,
-                "tier": "team",
-                "seats_total": 1,
-                "active_members_count": 0,
-                "total_members_count": 0,
-                "total_original_tokens": 0,
-                "total_saved_tokens": 0,
-                "total_saved_human": "0",
-                "total_usd_saved": 0.0,
-                "total_events": 0,
-                "reduction_pct": 0.0,
-                "leaderboard": [],
-            }
-
-        print(WeeklyDigestGenerator.render_email_text(stats))
-
-        from src.paths import resolve_data_dir
-        out_html = os.path.join(resolve_data_dir(), "weekly_digest_preview.html")
-        os.makedirs(os.path.dirname(out_html), exist_ok=True)
-        with open(out_html, "w", encoding="utf-8") as f:
-            f.write(WeeklyDigestGenerator.render_email_html(stats))
-        print(f"\n📧 Apple-style email HTML preview generated at: {out_html}")
-
-        if do_send:
-            try:
-                from src.mailer import TokenSafeMailer
-                ok = TokenSafeMailer.send_weekly_digest(target_email, stats, sync=True)
-                if ok:
-                    print(f"\033[32m✔ Weekly digest successfully dispatched to {target_email}!\033[0m\n")
-                else:
-                    print(f"\033[33m○ Digest dispatch queued (SMTP_PASS not configured in local environment).\033[0m\n")
-            except ImportError:
-                print("\n\033[33m○ Email delivery is handled by TokenSafe Cloud; preview HTML saved locally.\033[0m\n")
-        else:
-            print("Tip: Run with --send to dispatch email, or --email=<addr> to target specific team.\n")
 
     elif command in ("expand-ref", "expand_ref", "expand"):
         if len(args) < 2:

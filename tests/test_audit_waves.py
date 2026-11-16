@@ -322,10 +322,9 @@ class TestWave3IntelligenceMetricsAndCli(unittest.TestCase):
         self.assertNotIn("cache_control", thinking_block)
         self.assertIn("cache_control", text_block)
 
-    def test_dashboard_html_escapes_xss_and_weekly_digest_excludes_rollup(self):
+    def test_dashboard_html_escapes_xss(self):
         from src.dashboard import Dashboard
         from src.metrics import MetricsTracker
-        from src.weekly_digest import WeeklyDigestGenerator
 
         tmp = tempfile.mkdtemp(prefix="tokensafe_w3_dash_")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
@@ -334,44 +333,6 @@ class TestWave3IntelligenceMetricsAndCli(unittest.TestCase):
         html_out = Dashboard(tracker).render_html()
         self.assertNotIn("<script>alert(1)</script>", html_out)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;.py", html_out)
-
-        cloud_db = os.path.join(tmp, "cloud.db")
-        conn = sqlite3.connect(cloud_db)
-        conn.executescript("""
-            CREATE TABLE customers (email TEXT PRIMARY KEY, tier TEXT, status TEXT, seats_total INTEGER);
-            CREATE TABLE organizations (
-                id TEXT PRIMARY KEY, name TEXT, owner_email TEXT,
-                tier TEXT, status TEXT, seats_total INTEGER, is_primary INTEGER, created_at INTEGER
-            );
-            CREATE TABLE licenses (key TEXT PRIMARY KEY, customer_email TEXT, parent_email TEXT, org_id TEXT);
-            CREATE TABLE telemetry (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_email TEXT,
-                timestamp INTEGER,
-                event_type TEXT,
-                original_tokens INTEGER,
-                saved_tokens INTEGER,
-                usd_saved REAL
-            );
-        """)
-        now_ts = int(time.time())
-        conn.execute("INSERT INTO customers VALUES ('dev@acme.com', 'team', 'active', 5)")
-        conn.execute("INSERT INTO organizations VALUES ('org1', 'Acme', 'dev@acme.com', 'team', 'active', 5, 1, ?)", (now_ts,))
-        conn.execute("INSERT INTO licenses VALUES ('k1', 'dev@acme.com', 'dev@acme.com', 'org1')")
-        conn.execute(
-            "INSERT INTO telemetry (customer_email, timestamp, event_type, original_tokens, saved_tokens, usd_saved) VALUES ('dev@acme.com', ?, 'ROLLUP_LIFETIME', 99999, 99999, 99.0)",
-            (now_ts,),
-        )
-        conn.execute(
-            "INSERT INTO telemetry (customer_email, timestamp, event_type, original_tokens, saved_tokens, usd_saved) VALUES ('dev@acme.com', ?, 'TOOL_READ', 1000, 800, 0.01)",
-            (now_ts,),
-        )
-        conn.commit()
-        conn.close()
-
-        stats = WeeklyDigestGenerator.get_team_weekly_stats("dev@acme.com", now=now_ts, db_path=cloud_db, allow_any_tier=True)
-        self.assertIsNotNone(stats)
-        self.assertEqual(stats["total_saved_tokens"], 800)
 
     def test_team_cache_client_cooldown_and_secret_scrubbing(self):
         from src.team_cache import TeamCache

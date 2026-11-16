@@ -519,7 +519,7 @@ def sync_and_push_cloud_repo(cloud_root: str, next_v: str) -> Tuple[bool, str, O
         for item in os.listdir(cloud_src):
             s_path = os.path.join(cloud_src, item)
             d_path = os.path.join(overlay_src, item)
-            if item in ("cloud", "cloud_backend.py", "mailer.py"):
+            if item in ("cloud", "cloud_backend.py", "mailer.py", "weekly_digest.py"):
                 if os.path.isdir(s_path):
                     shutil.copytree(s_path, d_path, dirs_exist_ok=True)
                 else:
