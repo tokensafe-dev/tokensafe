@@ -1021,6 +1021,27 @@ def main(argv: Optional[List[str]] = None):
             print(compacted_build)
             sys.exit(proc.returncode)
 
+        # Container build reducer (docker build, docker compose build)
+        try:
+            from src.format_parsers.docker_k8s import ContainerAndK8sReducer
+            compacted_docker, was_docker = ContainerAndK8sReducer.reduce_docker_build(raw)
+            if was_docker:
+                print(compacted_docker)
+                sys.exit(proc.returncode)
+        except Exception:
+            pass
+
+        # Structured NDJSON / JSON log reducer
+        try:
+            from src.format_parsers.json_log import JSONLogReducer
+            if JSONLogReducer.is_ndjson_log(raw):
+                compacted_logs, was_logs = JSONLogReducer.reduce(raw)
+                if was_logs:
+                    print(compacted_logs)
+                    sys.exit(proc.returncode)
+        except Exception:
+            pass
+
         lines = raw.splitlines()
         if len(lines) > 40:
             head = lines[:15]

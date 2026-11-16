@@ -157,3 +157,47 @@ def get_active_workspace() -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def ensure_tokensafe_gitignore(project_root: Optional[str]) -> bool:
+    """
+    Ensures .tokensafe/ and local caches never leak into git.
+    1. If <project_root>/.tokensafe exists, drops an internal .gitignore (*\n!.gitignore\n).
+    2. If <project_root>/.gitignore exists, ensures .tokensafe/ is ignored.
+    """
+    if not project_root or not os.path.isdir(project_root):
+        return False
+
+    updated = False
+    proj_tokensafe = os.path.join(project_root, ".tokensafe")
+    if os.path.isdir(proj_tokensafe):
+        inner_ignore = os.path.join(proj_tokensafe, ".gitignore")
+        if not os.path.isfile(inner_ignore):
+            try:
+                with open(inner_ignore, "w", encoding="utf-8") as f:
+                    f.write("# TokenSafe local runtime artifacts & caches\n*\n!.gitignore\n")
+                updated = True
+            except Exception:
+                pass
+
+    root_gitignore = os.path.join(project_root, ".gitignore")
+    if os.path.isfile(root_gitignore):
+        try:
+            with open(root_gitignore, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            lines = [ln.strip() for ln in content.splitlines()]
+            has_entry = any(
+                ln in (".tokensafe", ".tokensafe/", "/.tokensafe", "/.tokensafe/")
+                for ln in lines
+            )
+            if not has_entry:
+                with open(root_gitignore, "a", encoding="utf-8") as f:
+                    if content and not content.endswith("\n"):
+                        f.write("\n")
+                    f.write("\n# TokenSafe local cache & runtime metrics\n.tokensafe/\n")
+                updated = True
+        except Exception:
+            pass
+
+    return updated
+

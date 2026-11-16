@@ -16,7 +16,7 @@ import time
 import hashlib
 import subprocess
 from typing import Dict, Any, List, Optional
-from src.paths import resolve_data_dir
+from src.paths import resolve_data_dir, ensure_tokensafe_gitignore
 
 
 def _find_project_mistakes_file(project_root: Optional[str] = None) -> str:
@@ -25,6 +25,7 @@ def _find_project_mistakes_file(project_root: Optional[str] = None) -> str:
         proj_dir = os.path.join(project_root, ".tokensafe")
         try:
             os.makedirs(proj_dir, exist_ok=True)
+            ensure_tokensafe_gitignore(project_root)
             return os.path.join(proj_dir, "mistakes.jsonl")
         except Exception:
             pass

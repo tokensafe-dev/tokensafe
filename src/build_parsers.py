@@ -153,6 +153,16 @@ class BuildOutputParser:
             error_lines.append(ln)
 
         result = "\n".join(error_lines).strip()
+        # If the build failure contains TypeScript compiler error cascades (e.g. vue-tsc, vite build type error),
+        # compact using CompilerErrorCompactor to save massive token cascades.
+        try:
+            from src.format_parsers.compiler_errors import CompilerErrorCompactor
+            if CompilerErrorCompactor.is_tsc_output(result or cleaned):
+                compacted_tsc, was_tsc = CompilerErrorCompactor.compact_tsc(result or cleaned)
+                if was_tsc:
+                    return compacted_tsc, True
+        except Exception:
+            pass
         return result or cleaned.strip(), True
 
     @classmethod

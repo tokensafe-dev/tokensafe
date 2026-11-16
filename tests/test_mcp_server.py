@@ -39,6 +39,16 @@ class TestMCPServer(unittest.TestCase):
         self.assertIn("':!package-lock.json'", data["sanitized_command"])
         self.assertFalse(data.get("blocked", False))
 
+    @patch("src.license_manager.LicenseManager.check_quota", return_value={"is_quota_exceeded": False})
+    def test_sanitize_command_cmd_alias_mcp(self, mock_quota):
+        res = handle_tool_call("sanitize_command", {"cmd": "npx tsc --noEmit"})
+        self.assertNotIn("isError", res)
+        content = res["content"][0]["text"]
+        data = json.loads(content)
+        self.assertIn("tokensafe wrap", data["sanitized_command"])
+        self.assertIn("npx tsc --noEmit", data["sanitized_command"])
+        self.assertFalse(data.get("blocked", False))
+
     def test_sanitize_command_guard_blocked_mcp(self):
         res = handle_tool_call("sanitize_command", {"command": "rm -rf /"})
         self.assertNotIn("isError", res)
@@ -49,6 +59,15 @@ class TestMCPServer(unittest.TestCase):
 
     def test_guard_inspect_command_mcp(self):
         res = handle_tool_call("guard_inspect", {"command": "git add .env"})
+        self.assertNotIn("isError", res)
+        content = res["content"][0]["text"]
+        data = json.loads(content)
+        self.assertTrue(data.get("blocked"))
+        self.assertFalse(data.get("passed"))
+        self.assertEqual(data["checks"][0]["check_name"], "GIT_SECRET_STAGING")
+
+    def test_guard_inspect_cmd_alias_mcp(self):
+        res = handle_tool_call("guard_inspect", {"cmd": "git add .env"})
         self.assertNotIn("isError", res)
         content = res["content"][0]["text"]
         data = json.loads(content)

@@ -113,12 +113,34 @@ def _compact_read_result(text: str, path: str) -> Optional[str]:
 
 
 def _compact_command_result(text: str) -> Optional[str]:
-    """Test summaries first (PASS: ...), log-style head/tail otherwise."""
+    """Test summaries first (PASS: ...), build/docker/log compaction next, log-style head/tail otherwise."""
     try:
         from src.test_parsers import TestOutputParser
         compacted, was_test = TestOutputParser.compact(text)
         if was_test:
             return compacted
+    except Exception:
+        pass
+    try:
+        from src.build_parsers import BuildOutputParser
+        compacted_b, was_b = BuildOutputParser.compact(text)
+        if was_b:
+            return compacted_b
+    except Exception:
+        pass
+    try:
+        from src.format_parsers.docker_k8s import ContainerAndK8sReducer
+        compacted_d, was_d = ContainerAndK8sReducer.reduce_docker_build(text)
+        if was_d:
+            return compacted_d
+    except Exception:
+        pass
+    try:
+        from src.format_parsers.json_log import JSONLogReducer
+        if JSONLogReducer.is_ndjson_log(text):
+            compacted_j, was_j = JSONLogReducer.reduce(text)
+            if was_j:
+                return compacted_j
     except Exception:
         pass
     try:

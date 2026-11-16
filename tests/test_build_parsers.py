@@ -109,6 +109,20 @@ class TestBuildParsers(unittest.TestCase):
         self.assertIsNotNone(new_cargo)
         self.assertTrue(new_cargo.startswith("tokensafe wrap "))
 
+        tsc_cmd = "npx tsc --noEmit"
+        new_tsc, saved_tsc, reason_tsc = CommandSanitizer.sanitize(tsc_cmd)
+        self.assertIsNotNone(new_tsc)
+        self.assertTrue(new_tsc.startswith("tokensafe wrap "))
+        self.assertIn("npx tsc --noEmit", new_tsc)
+        self.assertIn("compact error cascades", reason_tsc)
+
+        eslint_cmd = "npx eslint src/App.tsx"
+        new_eslint, saved_eslint, reason_eslint = CommandSanitizer.sanitize(eslint_cmd)
+        self.assertIsNotNone(new_eslint)
+        self.assertTrue(new_eslint.startswith("tokensafe wrap "))
+        self.assertIn("npx eslint src/App.tsx", new_eslint)
+        self.assertIn("linter", reason_eslint)
+
 
 if __name__ == "__main__":
     unittest.main()

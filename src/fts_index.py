@@ -13,6 +13,7 @@ import os
 import sqlite3
 import time
 import hashlib
+import shutil
 from typing import List, Dict, Any, Optional, Tuple
 
 from src.paths import resolve_data_dir
@@ -41,18 +42,36 @@ CODE_EXTS = {
 }
 
 
-def _resolve_fts_db_path(project_root: str) -> str:
-    """Returns path to the SQLite FTS database for a project."""
-    # Check if project has a .tokensafe directory
-    proj_tokensafe = os.path.join(project_root, ".tokensafe")
-    if os.path.isdir(proj_tokensafe):
-        return os.path.join(proj_tokensafe, "fts.db")
+from src.paths import resolve_data_dir, ensure_tokensafe_gitignore
 
-    # Otherwise store in ~/.tokensafe/cache/fts/<project_hash>.db
+
+def _resolve_fts_db_path(project_root: str) -> str:
+    """Returns path to the SQLite FTS database for a project.
+
+    Always stores index in global user cache ~/.tokensafe/cache/fts/<project_hash>.db
+    so the project working tree is never polluted with binary database files.
+    """
+    ensure_tokensafe_gitignore(project_root)
+
+    # Legacy cleanup: if fts.db was mistakenly created in project .tokensafe, migrate or remove
+    proj_tokensafe = os.path.join(project_root, ".tokensafe")
+    legacy_file = os.path.join(proj_tokensafe, "fts.db")
+
     cache_dir = os.path.join(resolve_data_dir(), "cache", "fts")
     os.makedirs(cache_dir, exist_ok=True)
     p_hash = hashlib.sha256(os.path.abspath(project_root).encode("utf-8")).hexdigest()[:16]
-    return os.path.join(cache_dir, f"fts_{p_hash}.db")
+    target_path = os.path.join(cache_dir, f"fts_{p_hash}.db")
+
+    if os.path.isfile(legacy_file) and not os.path.isfile(target_path):
+        try:
+            shutil.move(legacy_file, target_path)
+            for extra in (f"{legacy_file}-wal", f"{legacy_file}-shm"):
+                if os.path.isfile(extra):
+                    os.remove(extra)
+        except Exception:
+            pass
+
+    return target_path
 
 
 class CodeFTSIndex:

@@ -189,9 +189,9 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Raw bash command line"},
+                "cmd": {"type": "string", "description": "Alias for command"},
                 "cwd": {"type": "string", "description": "Optional working directory the command will run in; enables the package.json peek that identifies the runner behind opaque yarn/npm test scripts"}
-            },
-            "required": ["command"]
+            }
         }
     },
     {
@@ -221,6 +221,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Optional: Terminal command line to audit"},
+                "cmd": {"type": "string", "description": "Alias for command"},
                 "code": {"type": "string", "description": "Optional: Code snippet, replacement diff, or file content to audit"},
                 "file_path": {"type": "string", "description": "Optional: File path being written or modified"}
             }
@@ -735,8 +736,8 @@ def handle_tool_call(name: str, args: dict) -> dict:
         if name == "smart_read_file" and isinstance(result, dict) and not result.get("isError"):
             content_parts = result.get("content") or []
             text_out = "".join(p.get("text", "") for p in content_parts if isinstance(p, dict))
-            path = args.get("path", "")
-            symbol = (args.get("symbol") or "").strip()
+            path = args.get("path") or args.get("file_path") or args.get("file") or ""
+            symbol = (args.get("symbol") or args.get("sym") or args.get("target") or "").strip()
             _, eff_dep_mode = _resolve_dep_mode(args)
             cache_sym = f"{symbol}@{eff_dep_mode}" if (symbol and eff_dep_mode != "signature") else symbol
             is_ranged = args.get("start_line") is not None or args.get("end_line") is not None
@@ -779,8 +780,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
     is_quota_exceeded = bool(quota.get("is_quota_exceeded", False))
 
     if name == "smart_read_file":
-        path = args.get("path", "")
-        symbol = args.get("symbol", "")
+        path = args.get("path") or args.get("file_path") or args.get("file") or ""
+        symbol = args.get("symbol") or args.get("sym") or args.get("target") or ""
         inc_deps, eff_dep_mode = _resolve_dep_mode(args)
         force_full = bool(args.get("force_full", False))
         start_line = args.get("start_line")
@@ -877,6 +878,49 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                         details={"file": os.path.basename(path), "saved": orig_t - opt_t}
                     )
                     return {"content": [{"type": "text", "text": reduced_tab}]}
+            except Exception:
+                pass
+
+        # Kubernetes manifests (.yaml / .yml with multiple resources):
+        if path.lower().endswith((".yaml", ".yml")):
+            from src.format_parsers.docker_k8s import ContainerAndK8sReducer
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    raw_k8s_text = f.read()
+                reduced_k8s, was_k8s = ContainerAndK8sReducer.reduce_k8s_yaml(raw_k8s_text)
+                if was_k8s:
+                    orig_t = count_tokens(raw_k8s_text)
+                    opt_t = count_tokens(reduced_k8s)
+                    tracker.record_event(
+                        session_id=_mcp_session_id(),
+                        event_type="K8S_MANIFEST_REDUCE",
+                        original_tokens=orig_t,
+                        optimized_tokens=opt_t,
+                        details={"file": os.path.basename(path), "saved": orig_t - opt_t}
+                    )
+                    return {"content": [{"type": "text", "text": reduced_k8s}]}
+            except Exception:
+                pass
+
+        # Structured NDJSON / JSON log files (.ndjson, .log, .jsonl):
+        if path.lower().endswith((".ndjson", ".log", ".jsonl")):
+            from src.format_parsers.json_log import JSONLogReducer
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    raw_log_text = f.read()
+                if JSONLogReducer.is_ndjson_log(raw_log_text):
+                    reduced_log, was_log = JSONLogReducer.reduce(raw_log_text)
+                    if was_log:
+                        orig_t = count_tokens(raw_log_text)
+                        opt_t = count_tokens(reduced_log)
+                        tracker.record_event(
+                            session_id=_mcp_session_id(),
+                            event_type="JSON_LOG_REDUCE",
+                            original_tokens=orig_t,
+                            optimized_tokens=opt_t,
+                            details={"file": os.path.basename(path), "saved": orig_t - opt_t}
+                        )
+                        return {"content": [{"type": "text", "text": reduced_log}]}
             except Exception:
                 pass
 
@@ -1274,7 +1318,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         }, indent=2, ensure_ascii=False)}]}
 
     elif name == "sanitize_command":
-        cmd = args.get("command", "")
+        cmd = args.get("command") or args.get("cmd") or args.get("c") or ""
         # Step 1: TokenSafe Guard security inspection
         guard_res = TokenSafeGuard.inspect_command(cmd)
         if guard_res.blocked:
@@ -1323,9 +1367,9 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
     elif name == "guard_inspect":
-        cmd = args.get("command")
-        code = args.get("code")
-        file_path = args.get("file_path", "")
+        cmd = args.get("command") or args.get("cmd") or args.get("c")
+        code = args.get("code") or args.get("snippet")
+        file_path = args.get("file_path") or args.get("path") or args.get("file") or ""
 
         results = []
         if cmd is not None:
@@ -1618,7 +1662,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         return {"content": [{"type": "text", "text": tree_output}]}
 
     elif name == "scoped_search":
-        query = args.get("query", "")
+        query = args.get("query") or args.get("q") or args.get("pattern") or args.get("text") or ""
         if not query:
             return _fallback_error("scoped_search", "missing required 'query' argument")
 

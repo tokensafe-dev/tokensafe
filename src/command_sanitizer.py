@@ -540,6 +540,10 @@ class CommandSanitizer:
             return None
 
         is_build = False
+        saved = 1800
+        reason = "Wrapped build command with tokensafe wrap to fold progress noise and asset tables"
+
+        # 1. Build commands
         if cmd_tok == "npm":
             is_build = any(a in ("build", "build:prod", "build:cloud") or a.startswith("build:") for a in cmd_args) or (
                 "run" in cmd_args and any("build" in a for a in cmd_args)
@@ -555,6 +559,37 @@ class CommandSanitizer:
         elif cmd_tok == "cargo" and cmd_args[:1] == ["build"]:
             is_build = True
 
+        # 2. TypeScript compiler & type-checking commands (tsc, npx tsc, npm run typecheck)
+        if not is_build:
+            if cmd_tok == "tsc":
+                is_build = True
+                saved = 2500
+                reason = "Wrapped TypeScript compiler command with tokensafe wrap to compact error cascades"
+            elif cmd_tok in ("npx", "bunx") and "tsc" in cmd_args:
+                is_build = True
+                saved = 2500
+                reason = f"Wrapped {cmd_tok} tsc command with tokensafe wrap to compact error cascades"
+            elif cmd_tok in ("npm", "yarn", "pnpm", "bun"):
+                typecheck_hit = any(
+                    a in ("typecheck", "type-check", "tsc", "check-types") or "typecheck" in a or "type-check" in a
+                    for a in cmd_args
+                )
+                if typecheck_hit:
+                    is_build = True
+                    saved = 2500
+                    reason = f"Wrapped {cmd_tok} typecheck command with tokensafe wrap to compact error cascades"
+
+        # 3. Linter commands (eslint, npx eslint, biome, npx biome)
+        if not is_build:
+            if cmd_tok in ("eslint", "biome"):
+                is_build = True
+                saved = 1500
+                reason = f"Wrapped {cmd_tok} linter command with tokensafe wrap to bound output"
+            elif cmd_tok in ("npx", "bunx") and any(a in ("eslint", "biome") for a in cmd_args):
+                is_build = True
+                saved = 1500
+                reason = f"Wrapped {cmd_tok} linter command with tokensafe wrap to bound output"
+
         if not is_build:
             return None
 
@@ -562,15 +597,21 @@ class CommandSanitizer:
         import shutil
         has_tokensafe = bool(shutil.which("tokensafe"))
         if not has_tokensafe:
-            bin_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "tokensafe")
-            if os.path.exists(bin_path):
-                has_tokensafe = True
+            for candidate in (
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "tokensafe"),
+                os.path.expanduser("~/.tokensafe/bin/tokensafe"),
+                os.path.expanduser("~/.local/bin/tokensafe"),
+                "/usr/local/bin/tokensafe"
+            ):
+                if os.path.exists(candidate):
+                    has_tokensafe = True
+                    break
 
         if not has_tokensafe:
             return None
 
         wrapped = f"tokensafe wrap {shlex.quote(stage)}"
-        return wrapped, 1800, "Wrapped build command with tokensafe wrap to fold progress noise and asset tables", None
+        return wrapped, saved, reason, None
 
     @classmethod
     def sanitize(cls, command: str, cwd: Optional[str] = None) -> Tuple[Optional[str], int, str]:
@@ -787,6 +828,17 @@ class CommandSanitizer:
                 return None
             resolved_exit = 0
         elif resolved_exit != 0:
+            # Check test & compiler error compactor first (tsc error cascades, pytest failures)
+            from src.test_parsers import TestOutputParser
+            compacted_test, was_test = TestOutputParser.compact(raw)
+            if was_test and len(compacted_test) < len(raw) * 0.85:
+                return compacted_test, len(raw), len(compacted_test)
+
+            from src.build_parsers import BuildOutputParser
+            compacted_build, was_build = BuildOutputParser.compact(raw, resolved_exit)
+            if was_build and len(compacted_build) < len(raw) * 0.85:
+                return compacted_build, len(raw), len(compacted_build)
+
             # Failed run: failure noise (progress dots / blank runs / verbose PASSED lines)
             # is stripped while every traceback frame stays intact; skip when it saves <15%.
             stripped = cls._strip_failure_noise(raw)
