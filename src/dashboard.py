@@ -88,10 +88,10 @@ class Dashboard:
             q_pct = min(100.0, (monthly_saved / limit * 100.0))
             if monthly_saved >= limit:
                 out.append(f"  {BOLD}Subscription Tier:{RESET}   {YELLOW}COMMUNITY (Free){RESET} • {RED}{BOLD}500k Monthly Measured Quota Reached ({monthly_saved:,}/{limit:,}){RESET}")
-                out.append(f"  {BOLD}Quota Usage:{RESET}         {RED}{render_bar(q_pct)}{RESET} (Pro optimizations paused · Upgrade: tokensafe activate <key> | {CYAN}https://tokensafe.dev/signup{RESET})")
+                out.append(f"  {BOLD}Quota Usage:{RESET}         {RED}{render_bar(q_pct)}{RESET} (Pro optimizations paused · Upgrade: tokensafe activate <key> | https://tokensafe.dev/signup)")
             else:
                 out.append(f"  {BOLD}Subscription Tier:{RESET}   {YELLOW}COMMUNITY (Free){RESET} • {monthly_saved:,} / {limit:,} measured tokens this month")
-                out.append(f"  {BOLD}Quota Usage:{RESET}         {YELLOW}{render_bar(q_pct)}{RESET} (Upgrade to Solo for Unlimited · {CYAN}https://tokensafe.dev/signup{RESET})")
+                out.append(f"  {BOLD}Quota Usage:{RESET}         {YELLOW}{render_bar(q_pct)}{RESET} (Upgrade to Solo for Unlimited · https://tokensafe.dev/signup)")
         else:
             email_info = f" ({payload.get('email', '')})" if payload.get('email') else ""
             out.append(f"  {BOLD}Subscription Tier:{RESET}   {GREEN}{BOLD}{tier_upper} (Unlimited){RESET}{email_info}")

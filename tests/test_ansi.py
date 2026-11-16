@@ -57,6 +57,22 @@ class TestAnsiStripper(unittest.TestCase):
         plain = "Normal log without any escape codes at all.\nLine 2.\n"
         self.assertEqual(strip_ansi(plain), plain)
 
+    def test_cli_and_dashboard_urls_have_no_glued_ansi_sequences(self):
+        """Verifies that no HTTP/HTTPS URL in CLI or Dashboard output is directly glued to ANSI escape sequences."""
+        import os
+        import re
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Pattern detects any http/https URL immediately followed by \033, \x1b, or {RESET}
+        glued_pattern = re.compile(r'https?://[^\s\'"`,]+\\033|https?://[^\s\'"`,]+\{RESET\}')
+
+        for fname in ["src/cli.py", "src/dashboard.py"]:
+            fpath = os.path.join(project_root, fname)
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+            matches = glued_pattern.findall(content)
+            self.assertEqual(matches, [], f"Found URL glued to ANSI sequence in {fname}: {matches}")
+
 
 if __name__ == "__main__":
     unittest.main()

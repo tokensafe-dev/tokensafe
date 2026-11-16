@@ -195,7 +195,7 @@ def main(argv: Optional[List[str]] = None):
             q_pct = min(100, int(q_saved / q_limit * 100)) if q_limit else 0
             q_state = "\033[31mQUOTA REACHED — Pro optimizations paused\033[0m" if quota.get("is_quota_exceeded") else f"{q_pct}% of monthly measured quota"
             print(f"  Tier:      \033[33mCOMMUNITY (Free)\033[0m — {q_saved:,} / {q_limit:,} tokens ({q_state})")
-            print("  Upgrade:   \033[36mhttps://tokensafe.dev/signup\033[0m ($9/mo Solo · 7-Day Team Trial)")
+            print("  Upgrade:   https://tokensafe.dev/signup ($9/mo Solo · 7-Day Team Trial)")
         else:
             print(f"  Tier:      \033[32m{tier.upper()}\033[0m (Unlimited)")
         # Cloud heartbeat (non-blocking; keeps the machine visible server-side)
@@ -748,7 +748,7 @@ def main(argv: Optional[List[str]] = None):
 
         print("  To authorize this device and connect your account:")
         print(f"    1. Confirm code:  \033[1m\033[33m{user_code}\033[0m")
-        print(f"    2. In browser at: \033[36m{verif_url}\033[0m\n")
+        print(f"    2. In browser at: {verif_url}\n")
 
         # Attempt to open browser automatically
         try:
@@ -823,7 +823,7 @@ def main(argv: Optional[List[str]] = None):
                 print(f"  \033[32m✔ Team license activated (Unlimited tokens, organization workspace{org_msg}).\033[0m")
             else:
                 print("  \033[32m✔ Community Edition license activated (500,000 free tokens/month).\033[0m")
-            print(f"  \033[36m✔ Web dashboard unlocked at: https://tokensafe.dev/dashboard\033[0m\n")
+            print(f"  \033[36m✔ Web dashboard unlocked at:\033[0m https://tokensafe.dev/dashboard\n")
 
             # Sync local token metrics
             try:
@@ -953,7 +953,7 @@ def main(argv: Optional[List[str]] = None):
             print("  Managed Cloud Distillation (zero API keys) is reserved for Solo, Team, and Enterprise tiers.")
             print("  Free Community Edition operates with the zero-latency, zero-cost Local Regex Compactor.\n")
             print("  \033[1mTo unlock Cloud Distillation:\033[0m")
-            print("  1. Start 7-day free trial or upgrade at: \033[36mhttps://tokensafe.dev\033[0m")
+            print("  1. Start 7-day free trial or upgrade at: https://tokensafe.dev")
             print("  2. Activate your key: \033[32mtokensafe activate <KEY>\033[0m\n")
         elif not UniversalDistiller.is_self_hosted():
             print(f"  \033[32m✔\033[0m \033[1mTokenSafe Cloud Distiller\033[0m [Active: gemini-flash-lite-latest via Managed Cloud]")
