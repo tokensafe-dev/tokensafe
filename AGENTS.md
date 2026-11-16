@@ -7,6 +7,12 @@ This repository implements the TokenSafe local engine for AI coding agents.
 It intercepts user prompts via lifecycle hooks, compiles natural language into compact intent expressions,
 slices bulky tool calls (such as full-file reads), guards secrets and unsafe commands, and provides real-time SQLite metrics tracking.
 
+## STRICT REPOSITORY PRIVACY BOUNDARY (CONFIDENTIALITY DIRECTIVE)
+- This repository (`tokensafe`) is **STRICTLY PUBLIC OPEN-SOURCE**.
+- **NEVER** save, commit, or create internal architectural plans, marketing strategies, repositioning docs, roadmaps, design documents (`docs/plans/`), or internal notes in this repository!
+- All internal documents, plans, strategy files, roadmaps, and business design docs MUST live exclusively in the private repository (`tokensafe-cloud`, specifically `tokensafe-cloud/docs/plans/`).
+- If you find any internal planning or strategy document here, delete it immediately and move it to the private repository.
+
 ## Architecture Guidelines
 - `src/tokenizer.py`: Zero-dependency, calibrated BPE token counter.
 - `src/compactor.py`: Semantic intent extractor and S-expression serializer.
