@@ -1008,12 +1008,18 @@ def main(argv: Optional[List[str]] = None):
 
         from src.format_parsers.ansi import strip_ansi
         from src.test_parsers import TestOutputParser
+        from src.build_parsers import BuildOutputParser
         from src.stash import stash_block
 
         raw = strip_ansi(raw)
         compacted, was_test = TestOutputParser.compact(raw)
         if was_test:
             print(compacted)
+            sys.exit(proc.returncode)
+
+        compacted_build, was_build = BuildOutputParser.compact(raw, exit_code=proc.returncode, cmd=sub_cmd)
+        if was_build:
+            print(compacted_build)
             sys.exit(proc.returncode)
 
         lines = raw.splitlines()

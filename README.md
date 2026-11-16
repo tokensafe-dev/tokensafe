@@ -308,7 +308,7 @@ Deterministic **zero-loss gates** disqualify any output where the code fails to 
 
 ## Architectural Comparison: TokenSafe vs. Competitors
 
-| Capability | JayPokale / Chisle | alexgreensh / token-optimizer | TokenSafe (v4.1.2) |
+| Capability | JayPokale / Chisle | alexgreensh / token-optimizer | TokenSafe (v4.1.3) |
 |---|---|---|---|
 | **Parsing & AST Engine** | None (Markdown rulesets only) | Regex & heuristic bracket lexers | **Native Tree-sitter AST (13 languages)** with zero-loss fallback |
 | **Context Reversibility** | Irreversible (bash pipe cut) | Disk archiving with shell expand command | **Reversible Hash Stashing (`#hash` + `expand_ref` 100% byte recovery)** |

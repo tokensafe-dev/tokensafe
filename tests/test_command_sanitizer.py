@@ -200,7 +200,7 @@ class TestTestRunnerWatchGuard(unittest.TestCase):
         self.assertEqual(CommandSanitizer.sanitize("tokensafe tests"), (None, 0, ""))
 
     def test_non_test_commands_untouched(self):
-        for cmd in ("echo hello", "yarn build", "cat jest.config.json", "ls jest.config"):
+        for cmd in ("echo hello", "yarn lint", "cat jest.config.json", "ls jest.config"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(CommandSanitizer.sanitize(cmd), (None, 0, ""))
 

@@ -22,6 +22,7 @@ class CommandSanitizer:
     # can be forced into run-once mode (a watch-mode command never exits, and
     # an agent blocked on its completion waits forever)
     _TOKENSAFE_TESTS_RE = re.compile(r"\btokensafe\s+tests?\b")
+    _TOKENSAFE_WRAP_RE = re.compile(r"\btokensafe\s+wrap\b")
     _VITEST_RE = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:sudo\s+)?(?:npx\s+|yarn\s+|pnpm\s+|bunx\s+)?vitest(?:\s|$)")
     _JEST_RE = re.compile(r"^\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:sudo\s+)?(?:npx\s+|yarn\s+|pnpm\s+|bunx\s+)?jest(?:\s|$)")
     _JEST_SCRIPT_RE = re.compile(r"\b(?:react-scripts|craco)\s+test\b")
@@ -317,6 +318,11 @@ class CommandSanitizer:
         if guard:
             return guard
 
+        # build commands: fold verbose progress spam and multi-page asset tables
+        build_guard = cls._optimize_build_stage(stage, cwd)
+        if build_guard:
+            return build_guard
+
         # find: prune unbounded recursion on simple directory crawls (avoid breaking -o / -exec / -delete expressions)
         if cmd_tok == "find" and "node_modules" not in stage and ".git" not in stage:
             has_complex = any(a in ("-o", "-or", "-exec", "-execdir", "-delete", "(") for a in cmd_args)
@@ -515,6 +521,56 @@ class CommandSanitizer:
         if re.search(r"\bjest\b", script) or cls._JEST_SCRIPT_RE.search(script):
             return "jest"
         return None
+
+    @classmethod
+    def _optimize_build_stage(cls, stage: str, cwd: Optional[str] = None) -> Optional[Tuple[str, int, str, None]]:
+        """
+        Wraps long-output build commands (vite build, npm run build, next build, cargo build)
+        with `tokensafe wrap` so progress carriage-return spam and multi-page asset tables
+        are folded into a clean 3-4 line summary while preserving 100% of compiler errors
+        and the exact exit code.
+        """
+        if cls._TOKENSAFE_WRAP_RE.search(stage) or cls._TOKENSAFE_TESTS_RE.search(stage):
+            return None
+        if cls._has_redirect(stage) or "|" in stage:
+            return None
+
+        cmd_tok, cmd_args = cls._primary_cmd_and_args(stage)
+        if not cmd_tok:
+            return None
+
+        is_build = False
+        if cmd_tok == "npm":
+            is_build = any(a in ("build", "build:prod", "build:cloud") or a.startswith("build:") for a in cmd_args) or (
+                "run" in cmd_args and any("build" in a for a in cmd_args)
+            )
+        elif cmd_tok in ("yarn", "pnpm", "bun"):
+            is_build = any(a in ("build", "build:prod", "build:cloud") or "build" in a for a in cmd_args)
+        elif cmd_tok == "vite" and "build" in cmd_args:
+            is_build = True
+        elif cmd_tok in ("npx", "bunx"):
+            is_build = ("vite" in cmd_args and "build" in cmd_args) or ("next" in cmd_args and "build" in cmd_args)
+        elif cmd_tok == "next" and "build" in cmd_args:
+            is_build = True
+        elif cmd_tok == "cargo" and cmd_args[:1] == ["build"]:
+            is_build = True
+
+        if not is_build:
+            return None
+
+        # Check if `tokensafe` is available in PATH or local project bin
+        import shutil
+        has_tokensafe = bool(shutil.which("tokensafe"))
+        if not has_tokensafe:
+            bin_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "tokensafe")
+            if os.path.exists(bin_path):
+                has_tokensafe = True
+
+        if not has_tokensafe:
+            return None
+
+        wrapped = f"tokensafe wrap {shlex.quote(stage)}"
+        return wrapped, 1800, "Wrapped build command with tokensafe wrap to fold progress noise and asset tables", None
 
     @classmethod
     def sanitize(cls, command: str, cwd: Optional[str] = None) -> Tuple[Optional[str], int, str]:
@@ -737,6 +793,12 @@ class CommandSanitizer:
             if len(stripped) >= len(raw) * 0.85:
                 return None
             return stripped, len(raw), len(stripped)
+        # Check build output parser first (vite, next, webpack, cargo build)
+        from src.build_parsers import BuildOutputParser
+        compacted_build, was_build = BuildOutputParser.compact(raw, resolved_exit)
+        if was_build and len(compacted_build) < len(raw) * 0.8:
+            return compacted_build, len(raw), len(compacted_build)
+
         compacted = cls.compact_test_output(raw, resolved_exit)
         if compacted is raw or len(compacted) >= len(raw) * 0.6:
             return None
