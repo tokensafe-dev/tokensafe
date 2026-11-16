@@ -48,9 +48,9 @@ folds multi-turn conversation history, slices verbose tool outputs, and guards a
 7. **SECRET LEAK PREVENTION (ZERO HARDCODED FALLBACKS)**:
    - Never provide real private keys, API secrets, or credentials as fallback values in `os.environ.get()` or `process.env`. Real credentials must exist strictly in environment variables.
 
-8. **CONTEXT BUDGET BEFORE HEAVY WORK (`context_budget` → `compact_conversation`)**:
-   - Before large multi-step tasks, call `tokensafe:context_budget(model=...)` to check the window budget (tools/history/prompts breakdown, 50/80/95% thresholds).
-   - When it reports `warning` or `critical`, call `tokensafe:compact_conversation(transcript_path=...)` to fold past turns into a State Ledger before continuing — do not let context exhaustion degrade code quality mid-task.
+8. **CONTEXT BUDGET & HEALTH SCORE (`context_budget` → `compact_conversation`)**:
+   - Before large multi-step tasks, call `tokensafe:context_budget(model=...)` to check the window budget and Context Quality Score (Grade S/A/B/C/F, tools/history/prompts breakdown, 50/80/95% thresholds).
+   - When it reports `warning`, `critical`, or Grade C/F, call `tokensafe:compact_conversation(transcript_path=...)` to fold past turns into a Consolidated State Ledger with a 3-line Post-Compaction Orientation Digest (Active Goal, Last State, Next Focus) before continuing — resuming flow immediately without post-compaction disorientation.
 
 9. **REPEAT READ DEDUPLICATION & CACHE POINTERS**:
    - Never repeatedly re-read the same file or symbol within an active session.
@@ -94,10 +94,10 @@ Quick pointers:
 
 For long-running autonomous sessions, TokenSafe actively manages context bloat:
 
-1. **Multi-Turn History Compaction**:
-   - At conversation turn >= 3, automatically compiles past turns into a lean **Consolidated State Ledger**.
-   - Preserves active file paths, modified symbols, and pending tasks while discarding transient tool output noise.
-   - **Manual trigger**: call `tokensafe:compact_conversation` with the session's `transcript_path` any time you need to shed context between subtasks — it returns the ledger JSON plus exact original/folded token counts.
+1. **Multi-Turn History Compaction & Post-Compaction Orientation Digest**:
+   - At conversation turn >= 3, automatically compiles past turns into a lean **Consolidated State Ledger** paired with a deterministic 3-line **Post-Compaction Orientation Digest** (`1. Active Goal: ...`, `2. Last State: ...`, `3. Next Focus: ...`).
+   - Preserves active file paths, modified symbols, and pending tasks while discarding transient tool output noise and preventing post-compaction amnesia.
+   - **Manual trigger**: call `tokensafe:compact_conversation` with the session's `transcript_path` any time you need to shed context between subtasks — it returns the ledger JSON, orientation digest, and exact token counts.
 2. **Subagent Deduplication Firewall**:
    - Caches file reads across subagents and sessions using SHA-256 content hashes. Interactive MCP clients receive self-healing pointer hits on unchanged repeat reads inside the same session; fresh subagents or post-compaction callers recover automatically with `force_full=true`.
 3. **Loop Guard**:

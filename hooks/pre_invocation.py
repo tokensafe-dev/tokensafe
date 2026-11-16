@@ -172,7 +172,7 @@ def _handle(payload: dict) -> dict:
 
                 hist_badge = (
                     f"⚡ **History Compactor:** Stabilized {orig_hist_tokens:,} tokens of previous turns — "
-                    f"saved **{stats['saved_tokens']:,} tokens**."
+                    f"saved **{stats['saved_tokens']:,} tokens** (orientation digest active)."
                 )
 
                 inject_steps.append({

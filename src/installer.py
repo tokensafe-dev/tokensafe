@@ -55,7 +55,7 @@ UNIFIED_TOKENSAFE_RULE = (
     "7. **No Unconstrained Shell Grep/Find & No Verbose ls -la**: Strictly avoid running raw recursive grep/find across projects. Never run verbose `ls -la` or `ls -l`; use `tokensafe:list_dir(path='.', depth=2)` to inspect directory trees in clean markdown without permissions, timestamps, or lockfiles (-90% tokens). Supports relative subfolders (`path='src'`).\n"
     "8. **Command Sanitization & Compact Tests**: Use `sanitize_command` on high-output terminal commands (`git diff/log/show/blame`, `rg`, `find`, `grep`, `docker`/`kubectl logs`, `npm`/`pip install`, `cat` of lockfiles, `curl`) — compound commands (`a && b ; c`) are rewritten per stage. Run unit tests with concise flags or via the `tokensafe tests [cmd]` CLI (compact passing summary `PASS: ...`, full traceback only on failure) instead of raw verbose test crawls; never leave `vitest`/`jest` in watch mode — pass the optional `cwd` to `sanitize_command` for test commands so the package.json peek can identify the runner behind opaque `yarn/npm test` scripts.\n"
     "9. **Styles & Design Token Preservation**: When inspecting CSS, SCSS, LESS, or Tailwind, `smart_read_file` automatically preserves all design tokens (`:root`, `@theme`, CSS variables) in full while folding component selectors to protect project design integrity.\n"
-    "10. **Context Budget & Smart Compaction**: Before large multi-step tasks, call `tokensafe:context_budget(model=...)` to inspect window usage; when it reports `warning` or `critical`, call `tokensafe:compact_conversation(transcript_path=...)` before continuing.\n"
+    "10. **Context Budget & Smart Compaction**: Before large multi-step tasks, call `tokensafe:context_budget(model=...)` to inspect window usage and Context Quality Score (Grade S-F); when it reports `warning` or `critical` (or Grade C/F), call `tokensafe:compact_conversation(transcript_path=...)` to fold history into a State Ledger with a 3-line Post-Compaction Orientation Digest before continuing.\n"
     "11. **Secret Leak Prevention Directive (Zero Hardcoded Fallbacks)**:\n"
     "Never hardcode real private keys, API secrets, access tokens, or webhook secrets as default fallback arguments in `os.environ.get()`, `os.getenv()`, or `process.env`. If an environment variable is absent, raise an explicit configuration error or use an empty string / test mock. Whenever a secret fallback attempt is blocked, state:\n"
     "`🛡️ **TokenSafe Security Guard**: Prevented secret / private key leak into git (<target_file>: <details>)`\n"
@@ -73,8 +73,8 @@ POINTER_RULE = (
     "(~/.zcode/AGENTS.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md) and applies to this project. "
     "Core rules: never raw grep/find or `ls -la` — use `tokensafe:scoped_search`, "
     "`tokensafe:smart_read_file(path, symbol)`, `tokensafe:smart_bundle` and `tokensafe:list_dir`; "
-    "sanitize high-output commands via `tokensafe:sanitize_command`; check `tokensafe:context_budget` "
-    "before large tasks and compact via `tokensafe:compact_conversation`; never hardcode secret "
+    "sanitize high-output commands via `tokensafe:sanitize_command`; check `tokensafe:context_budget` (Grade S-F) "
+    "before large tasks and compact via `tokensafe:compact_conversation` (orientation digest active); never hardcode secret "
     "fallbacks; append the `⚡ TokenSafe Turn Savings` footer on tool-using turns.\n"
 )
 
@@ -599,12 +599,12 @@ WantedBy=default.target
             if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes") or "unittest" in sys.modules:
                 return
 
-            if context == "update" and is_anonymous:
-                print(f"\n  {YELLOW}→ Anonymous Community license detected (migrating to verified personal account).{RESET}")
-                print(f"    Connect your free account at {CYAN}https://tokensafe.dev{RESET} to unlock your web dashboard.")
-            else:
-                print(f"\n  {CYAN}→ Connect your free TokenSafe account (500,000 tokens/mo) to unlock your web dashboard:{RESET}")
+            if context == "update":
+                if is_anonymous or not email:
+                    print(f"  {CYAN}ℹ{RESET} Connect your account anytime with {BOLD}tokensafe login{RESET} to view your cloud dashboard.\n")
+                return
 
+            print(f"\n  {CYAN}→ Connect your free TokenSafe account (500,000 tokens/mo) to unlock your web dashboard:{RESET}")
             print(f"    Open browser to authorize? [{GREEN}Y{RESET}/n] ", end="", flush=True)
             answer = input().strip().lower()
             if answer in ("", "y", "yes"):

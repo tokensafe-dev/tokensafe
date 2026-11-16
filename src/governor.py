@@ -399,7 +399,7 @@ class ContextBudget:
             caveat = ("Floor estimate: only TokenSafe-instrumented flows are counted "
                       "(agent reasoning/output is invisible to local hooks).")
 
-        return {
+        res = {
             "window_tokens": window,
             "used_estimated": used,
             "used_pct": pct,
@@ -410,3 +410,9 @@ class ContextBudget:
             "caveat": caveat,
             "measurement": "estimated",
         }
+        try:
+            from src.quality_score import ContextQualityScore
+            res["quality_score"] = ContextQualityScore.calculate(budget=res)
+        except Exception:
+            pass
+        return res

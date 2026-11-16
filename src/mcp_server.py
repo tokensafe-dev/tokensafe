@@ -154,7 +154,7 @@ TOOLS = [
     },
     {
         "name": "context_budget",
-        "description": "Context Budget HUD: estimates how much of the model's context window this session has consumed (tools/history/prompts breakdown, 50/80/95% thresholds). Call before large multi-step tasks. When the threshold is warning or critical, immediately call tokensafe:compact_conversation on the session transcript.",
+        "description": "Context Budget HUD & Context Quality Score (Grade S/A/B/C/F): estimates context window usage, headroom %, static tool/skill tax, and outputs a unified health grade. Call before large multi-step tasks. When warning/critical or Grade C/F, call tokensafe:compact_conversation.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -167,7 +167,7 @@ TOOLS = [
     },
     {
         "name": "compact_conversation",
-        "description": "On-demand context compaction: folds a long agent conversation transcript into a compact Consolidated State Ledger. Use when tokensafe:context_budget reports warning/critical, when the context window feels heavy, or before starting a new subtask inside the same session. The transcript path comes from your host session (hook payload transcript_path / session start context).",
+        "description": "On-demand context compaction: folds a long agent conversation transcript into a Consolidated State Ledger with a 3-line Post-Compaction Orientation Digest (Active Goal, Last State, Next Focus) so the agent immediately resumes without losing flow. Use when context_budget reports warning/critical or Grade C/F.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1207,6 +1207,13 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             tracker, session_id=session_id, model=model, window_tokens=window_tokens,
             transcript_path=transcript_path
         )
+        try:
+            from src.quality_score import ContextQualityScore
+            from src.environment_auditor import EnvironmentAuditor
+            audit = EnvironmentAuditor.audit()
+            budget["quality_score"] = ContextQualityScore.calculate(budget=budget, audit=audit)
+        except Exception:
+            pass
         return {"content": [{"type": "text", "text": json.dumps(budget, indent=2, ensure_ascii=False)}]}
 
     elif name == "compact_conversation":
@@ -1254,13 +1261,15 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 details={"mode": "manual_compact_conversation", "turns": invocation_num,
                          "transcript_path": transcript_path, "total_accum_orig": orig_t, **stats}
             )
+        digest_dict = stats.get("orientation_digest") or {}
         return {"content": [{"type": "text", "text": json.dumps({
             "compactable": True,
             "ledger": ledger,
+            "orientation_digest": digest_dict,
             "original_tokens": orig_t,
             "folded_tokens": folded_t,
             "saved_tokens": saved,
-            "note": "Inject this ledger as a system message and start fresh context from it; savings are labeled estimated (digest injected, history not removed).",
+            "note": "Inject this ledger and 3-line orientation digest as a system message to resume flow instantly.",
             "stats": stats
         }, indent=2, ensure_ascii=False)}]}
 

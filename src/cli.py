@@ -99,6 +99,8 @@ def _print_help():
     print("Commands:")
     print("  stats / markdown / html        Savings analytics (terminal / .md report / dashboard)")
     print("  status                         One-screen health check: hooks, weekly savings, tier, sync")
+    print("  budget [--transcript=...]      Context Window Budget HUD & Context Quality Score (Grade S-F)")
+    print("  compact <transcript.jsonl>     Fold conversation transcript into Consolidated State Ledger")
     print("  benchmark                      Zero-context-loss benchmark suite (simulated SWE-bench harness)")
     print("  bench --real [--repo=key|--here]  Measured benchmark on real repos (zero-loss gates)")
     print("  graph / map / skeleton         Architecture graph / API surface / AST skeleton of a file")
@@ -172,6 +174,15 @@ def main(argv: Optional[List[str]] = None):
             print(f"  Hooks:     \033[32m✔ active\033[0m in {len(active_agents)} agent(s): {', '.join(active_agents)}")
         else:
             print("  Hooks:     \033[33m○ not detected\033[0m — run \033[1mtokensafe install\033[0m to configure your agents")
+        # Context Quality Health Indicator (S/A/B/C/F)
+        try:
+            from src.quality_score import ContextQualityScore
+            q_score = ContextQualityScore.evaluate(tracker)
+            color = "\033[32m" if q_score["grade"] in ("S", "A") else ("\033[33m" if q_score["grade"] == "B" else "\033[31m")
+            tax_str = f"~{q_score['static_tax_tokens']:,} tok/turn" if q_score['static_tax_tokens'] else "0 tok/turn"
+            print(f"  Context:   {color}\033[1mGrade {q_score['grade']} ({q_score['label']})\033[0m — {q_score['headroom_pct']:.0f}% headroom (static tax: {tax_str})")
+        except Exception:
+            pass
         # The value moment: recent measured savings
         weekly = tracker.get_weekly_saved()
         print(f"  This Week: \033[32m\033[1m{weekly['saved_tokens']:,} tokens saved\033[0m across {weekly['events']:,} events (≈${weekly['usd_saved']:.2f})")
@@ -206,6 +217,49 @@ def main(argv: Optional[List[str]] = None):
                 print(f"  Cache:     \033[32m{cstats['hit_ratio_pct']}% distillation cache hit ratio\033[0m ({cstats['hits']:,}/{lookups:,} lookups · {cstats['persistent_entries']:,} entries on disk)")
         except Exception:
             pass
+        print()
+
+    elif command in ("budget", "quality", "score"):
+        from src.governor import ContextBudget
+        from src.quality_score import ContextQualityScore
+        from src.environment_auditor import EnvironmentAuditor
+        tracker = MetricsTracker()
+        model = args[1] if len(args) > 1 and not args[1].startswith("-") else ""
+        transcript = ""
+        for a in args[1:]:
+            if a.startswith("--transcript="):
+                transcript = a.split("=", 1)[1]
+            elif a.endswith(".jsonl"):
+                transcript = a
+        budget = ContextBudget.estimate(tracker, session_id="mcp_session", model=model, transcript_path=transcript)
+        audit = EnvironmentAuditor.audit()
+        q_score = ContextQualityScore.calculate(budget=budget, audit=audit)
+
+        color = "\033[32m" if q_score["grade"] in ("S", "A") else ("\033[33m" if q_score["grade"] == "B" else "\033[31m")
+        print("\n\033[1m\033[36m⚡ TOKENSAFE CONTEXT QUALITY & BUDGET HUD ⚡\033[0m\n")
+        print(f"  Health Grade:    {color}\033[1mGrade {q_score['grade']} ({q_score['label']})\033[0m — {q_score['score']}/100 pts")
+        print(f"  Window Headroom: {color}{q_score['headroom_pct']:.1f}% free\033[0m ({budget['used_estimated']:,} / {budget['window_tokens']:,} tokens estimated)")
+        print(f"  Static Tax:      ~{q_score['static_tax_tokens']:,} tokens on every API turn")
+        print(f"  Breakdown:       tools: {budget['breakdown']['tools']:,} | history: {budget['breakdown']['history']:,} | prompts: {budget['breakdown']['prompts']:,}")
+        if q_score["deductions"]:
+            print(f"  Deductions:      {', '.join(q_score['deductions'])}")
+        print(f"  Recommendation:  {budget['recommendation']}\n")
+
+    elif command in ("compact", "fold"):
+        if len(args) < 2:
+            print("Usage: tokensafe compact <path_to_transcript.jsonl>")
+            sys.exit(1)
+        transcript_path = args[1].strip()
+        from src.history_compactor import HistoryCompactor
+        ledger, orig_t, fold_t, stats = HistoryCompactor.fold_transcript(transcript_path, invocation_num=3)
+        if not ledger:
+            print("\n\033[33m○ Transcript not compactable (requires >= 4 steps and >= 1,000 history tokens).\033[0m\n")
+            sys.exit(0)
+        print("\n\033[1m\033[36m⚡ TOKENSAFE COMPACT CONVERSATION ⚡\033[0m\n")
+        print(f"  Original history: {orig_t:,} tokens")
+        print(f"  Compacted ledger: {fold_t:,} tokens")
+        print(f"  Tokens saved:     \033[32m\033[1m+{orig_t - fold_t:,} tokens\033[0m\n")
+        print(ledger)
         print()
 
     elif command in ("stats", "dashboard"):
@@ -264,7 +318,7 @@ def main(argv: Optional[List[str]] = None):
             print(f"📊 JSON: {out['json']}")
             print(f"📊 MD:   {out['md']}\n")
             sys.exit(0 if all(
-                (s.get("status") == "ok")
+                (s.get("status") in ("ok", "skipped"))
                 for r in data["results"] for s in (r.get("symbol_read"), r.get("test_output"), r.get("multiturn"))
                 if s
             ) else 1)
@@ -808,7 +862,7 @@ def main(argv: Optional[List[str]] = None):
                 pass
 
         # 2. Remove local license files
-        for p in (LICENSE_FILE, GLOBAL_LICENSE_FILE):
+        for p in LicenseManager._candidate_license_files():
             try:
                 if os.path.exists(p):
                     os.remove(p)

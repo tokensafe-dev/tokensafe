@@ -96,8 +96,128 @@ def _extract_step_tool_calls(step: dict) -> List[Tuple[str, dict]]:
                     calls.append((str(block.get("name", "")), inp if isinstance(inp, dict) else {}))
     return calls
 
+def _clean_goal_text(text: str) -> str:
+    """Extracts a clean, single-sentence goal from raw user text or prompt."""
+    if not text:
+        return ""
+    # Strip XML-style wrapper tags commonly injected into agent transcripts
+    cleaned = re.sub(r"</?(?:USER_REQUEST|CONTEXT_SUMMARY|ADDITIONAL_METADATA|SYSTEM_MESSAGE)[^>]*>", " ", text)
+    # Remove markdown headers or bolding
+    cleaned = re.sub(r"^[#\s*\->]+", "", cleaned.strip())
+    # Take first meaningful non-empty line
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip() and not ln.strip().startswith(("//", "/*", "<!--"))]
+    if not lines:
+        return ""
+    first_line = lines[0]
+    # Remove leading numbering like "1. ", "1) "
+    first_line = re.sub(r"^\d+[\.\)]\s*", "", first_line).strip()
+    if len(first_line) > 120:
+        first_line = first_line[:117] + "..."
+    return first_line
+
 class HistoryCompactor:
-    """Folds past conversation tool steps into a compact state ledger."""
+    """Folds past conversation tool steps into a compact state ledger with an orientation digest."""
+
+    @classmethod
+    def build_orientation_digest(
+        cls,
+        steps: List[dict],
+        read_files: set,
+        edited_files: set,
+        executed_commands: List[str]
+    ) -> Tuple[str, Dict[str, str]]:
+        """
+        Builds a concise 3-line Post-Compaction Orientation Digest:
+        1. Active Goal: extracted from latest user prompt
+        2. Last State: the most recent action/operation performed
+        3. Next Focus: clear immediate resumption directive
+        """
+        # 1. Active Goal
+        active_goal = ""
+        for step in reversed(steps):
+            source = str(step.get("source") or "")
+            stype = str(step.get("type") or "")
+            role = str(step.get("role") or "")
+            if not role and isinstance(step.get("message"), dict):
+                role = str(step["message"].get("role") or "")
+
+            if source == "USER_EXPLICIT" or stype == "USER_INPUT" or role == "user":
+                raw_txt = _extract_step_text(step)
+                cleaned = _clean_goal_text(raw_txt)
+                if cleaned:
+                    active_goal = cleaned
+                    break
+
+        if not active_goal:
+            # Fallback to key turns if any
+            for step in steps:
+                raw_txt = _extract_step_text(step)
+                cleaned = _clean_goal_text(raw_txt)
+                if cleaned and len(cleaned) > 15:
+                    active_goal = cleaned
+                    break
+
+        if not active_goal:
+            active_goal = "Resume multi-step task execution"
+
+        # 2. Last State
+        last_state = ""
+        last_tool = None
+        # Find the last tool call executed across all steps
+        for step in reversed(steps):
+            tcs = _extract_step_tool_calls(step)
+            if tcs:
+                last_tool = tcs[-1]
+                break
+
+        if last_tool:
+            tname, targs = last_tool
+            p = _arg_value(targs, _PATH_KEYS)
+            base_p = os.path.basename(p) if p else ""
+            if tname in _EDIT_TOOLS:
+                last_state = f"Modified {base_p or 'target files'}; changes applied"
+            elif tname in _COMMAND_TOOLS:
+                cmd = _arg_value(targs, _COMMAND_KEYS)
+                short_cmd = cmd.split()[0] if cmd.split() else cmd
+                last_state = f"Executed {short_cmd}; output processed"
+            elif tname in _READ_TOOLS:
+                last_state = f"Inspected {base_p or 'target code'}; context gathered"
+            else:
+                last_state = f"Invoked tool {tname}"
+
+        if not last_state:
+            if edited_files:
+                last_state = f"Modified {', '.join(sorted(edited_files)[:3])}"
+            elif executed_commands:
+                last_state = f"Executed {', '.join(executed_commands[-2:])}"
+            elif read_files:
+                last_state = f"Inspected {', '.join(sorted(read_files)[:3])}"
+            else:
+                last_state = "Processed past conversation turns"
+
+        # 3. Next Focus
+        if edited_files:
+            next_focus = "Verify modifications with tests and check edge cases."
+        elif executed_commands and any("test" in c for c in executed_commands):
+            next_focus = "Proceed with remaining tasks or finalize changes."
+        elif read_files:
+            next_focus = "Apply surgical edits based on inspected symbols."
+        else:
+            next_focus = "Continue direct execution toward active goal without repeating past reads."
+
+        digest_dict = {
+            "active_goal": active_goal,
+            "last_state": last_state,
+            "next_focus": next_focus,
+        }
+
+        digest_lines = [
+            "[Post-Compaction Orientation Digest]:",
+            f"1. Active Goal: {active_goal}",
+            f"2. Last State: {last_state}",
+            f"3. Next Focus: {next_focus}",
+        ]
+        return "\n".join(digest_lines), digest_dict
 
     @classmethod
     def measure_transcript(cls, transcript_path: str) -> int:
@@ -188,7 +308,11 @@ class HistoryCompactor:
         if orig_tokens < 1000:
             return None, 0, 0, {}
 
-        # Build Consolidated State Ledger
+        # Build Consolidated State Ledger & Post-Compaction Orientation Digest
+        digest_text, digest_dict = cls.build_orientation_digest(
+            steps, read_files, edited_files, executed_commands
+        )
+
         ledger_lines = ["[TOCP State Ledger]:"]
         if read_files:
             ledger_lines.append(f"• Inspected: {', '.join(sorted(read_files))}")
@@ -202,6 +326,10 @@ class HistoryCompactor:
             for snippet in key_turns[:3]:
                 ledger_lines.append(f"• Context: {snippet}")
 
+        if digest_text:
+            ledger_lines.append("")
+            ledger_lines.append(digest_text)
+
         consolidated_text = "\n".join(ledger_lines)
         folded_tokens = count_tokens(consolidated_text)
 
@@ -212,7 +340,8 @@ class HistoryCompactor:
             "executed_commands_count": len(executed_commands),
             "saved_tokens": saved_tokens,
             "orig_tokens": orig_tokens,
-            "folded_tokens": folded_tokens
+            "folded_tokens": folded_tokens,
+            "orientation_digest": digest_dict,
         }
 
         return consolidated_text, orig_tokens, folded_tokens, stats

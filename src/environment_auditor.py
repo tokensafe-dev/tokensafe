@@ -513,11 +513,27 @@ class EnvironmentAuditor:
     def format_cli_report(cls, workspace_root: Optional[str] = None) -> str:
         """Formats visual CLI report for tokensafe doctor."""
         report = cls.audit(workspace_root)
+        score_line = ""
+        try:
+            from src.quality_score import ContextQualityScore
+            from src.governor import ContextBudget
+            from src.metrics import MetricsTracker
+            budget = ContextBudget.estimate(MetricsTracker(), session_id="mcp_session")
+            q_score = ContextQualityScore.calculate(budget=budget, audit=report)
+            color = "\033[32m" if q_score["grade"] in ("S", "A") else ("\033[33m" if q_score["grade"] == "B" else "\033[31m")
+            score_line = f"  \033[1mContext Quality Score:\033[0m {color}\033[1mGrade {q_score['grade']} ({q_score['label']})\033[0m — {q_score['headroom_pct']:.0f}% headroom, {q_score['score']}/100 pts\n"
+        except Exception:
+            score_line = ""
+
         lines = [
             "\n\033[1m\033[36m⚡ TOKENSAFE ENVIRONMENT AUDIT (CONTEXT TAX DOCTOR) ⚡\033[0m\n",
+        ]
+        if score_line:
+            lines.append(score_line)
+        lines.extend([
             f"  \033[1mTotal Base Context Tax:\033[0m ~{report['total_static_tokens_per_turn']:,} tokens on EVERY API turn\n",
             "  \033[1mActive MCP Servers:\033[0m"
-        ]
+        ])
 
         for name, s in sorted(report["servers"].items()):
             if s["active"]:

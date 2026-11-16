@@ -124,24 +124,33 @@ class TestCliLogin(unittest.TestCase):
 
     def test_cli_logout_command_flow(self):
         from src.cli import main as cli_main
-        from src.license_manager import LICENSE_FILE
+        import src.cli as cli_module
+        import src.license_manager as lm
 
-        # Setup an active license file
-        test_key = LicenseManager.generate_license(tier="free", email="dev@test.com", duration_days=30)
-        LicenseManager.save_license(test_key, device_token="ts_dev_active_123")
+        test_lic = os.path.join(self.test_dir, "data", "license.json")
+        test_global = os.path.join(self.test_dir, "global", "license.json")
+        os.makedirs(os.path.dirname(test_lic), exist_ok=True)
+        os.makedirs(os.path.dirname(test_global), exist_ok=True)
 
-        self.assertTrue(os.path.exists(LICENSE_FILE))
+        with mock.patch.object(lm, "LICENSE_FILE", test_lic), \
+             mock.patch.object(lm, "GLOBAL_LICENSE_FILE", test_global):
+            # Setup an active license file in isolated test dir
+            test_key = LicenseManager.generate_license(tier="free", email="dev@test.com", duration_days=30)
+            LicenseManager.save_license(test_key, device_token="ts_dev_active_123")
 
-        unlink_resp = mock.MagicMock()
-        unlink_resp.read.return_value = b'{"success": true}'
-        unlink_resp.__enter__.return_value = unlink_resp
+            self.assertTrue(os.path.exists(test_lic))
 
-        with mock.patch("urllib.request.urlopen", return_value=unlink_resp):
-            cli_main(["logout"])
+            unlink_resp = mock.MagicMock()
+            unlink_resp.read.return_value = b'{"success": true}'
+            unlink_resp.__enter__.return_value = unlink_resp
 
-        # File is removed and device is logged out
-        self.assertFalse(os.path.exists(LICENSE_FILE))
-        self.assertEqual(LicenseManager.get_device_token(), "")
+            with mock.patch("urllib.request.urlopen", return_value=unlink_resp):
+                cli_main(["logout"])
+
+            # File is removed and device is logged out
+            self.assertFalse(os.path.exists(test_lic))
+            self.assertFalse(os.path.exists(test_global))
+            self.assertEqual(LicenseManager.get_device_token(), "")
 
 
 if __name__ == "__main__":
