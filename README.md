@@ -284,6 +284,28 @@ tokensafe bench --real --repo=pallets/flask   # one repo
 tokensafe bench --real --here                 # your current repository
 ```
 
+## Head-to-Head Competitor Benchmark (Measured on Real Repositories)
+
+We cloned 8 popular open-source repositories across Python, Go, C, and Java, and tested **JayPokale/Chisle**, **alexgreensh/token-optimizer**, and **TokenSafe (v4.1.2)** on the exact same hub files and target functions. Every token was counted with a calibrated BPE tokenizer on real bytes.
+
+Deterministic **zero-loss gates** disqualify any output where the code fails to compile/parse, or where the targeted function is missing. Savings without code correctness are just destructive truncation.
+
+| Repository & Target File | Baseline Tokens | JayPokale / Chisle | alexgreensh / token-optimizer | TokenSafe (v4.1.2) | Zero-Loss Gate Result |
+|:---|---:|---:|---:|---:|:---|
+| **flask** (`src/flask/app.py`)<br>Target: `full_dispatch_request` | 18,864 | 18,864 (0.0%) | 317 (-98.3%)<br>❌ *GATE FAIL: SyntaxError / Symbol Dropped* | **3,784** (-79.9%) | **TokenSafe PASS**<br>Valid AST, target 100% intact |
+| **requests** (`src/requests/sessions.py`)<br>Target: `Session.request` | 9,743 | 9,743 (0.0%) | 651 (-93.3%)<br>✅ *Heuristic match* | **2,849** (-70.8%) | **TokenSafe PASS**<br>Valid AST, target 100% intact |
+| **fastapi** (`fastapi/routing.py`)<br>Target: `APIRouter.add_api_route` | 73,721 | 73,721 (0.0%) | 139 (-99.8%)<br>❌ *GATE FAIL: SyntaxError / Symbol Dropped* | **39,529** (-46.4%) | **TokenSafe PASS**<br>Valid AST, target 100% intact |
+| **rich** (`rich/console.py`)<br>Target: `Console.print` | 28,675 | 28,675 (0.0%) | 585 (-98.0%)<br>❌ *GATE FAIL: SyntaxError / Symbol Dropped* | **7,710** (-73.1%) | **TokenSafe PASS**<br>Valid AST, target 100% intact |
+| **httpie** (`httpie/core.py`)<br>Target: `main` | 2,933 | 2,933 (0.0%) | 266 (-90.9%)<br>✅ *Heuristic match* | **689** (-76.5%) | **TokenSafe PASS**<br>Valid AST, target 100% intact |
+| **gin** (`context.go`, Go)<br>Target: `Context.Next` | 15,032 | 15,032 (0.0%) | 115 (-99.2%)<br>❌ *GATE FAIL: Unsupported Lang / Truncated* | **9,904** (-34.1%) | **TokenSafe PASS**<br>Native Tree-sitter Go grammar |
+| **curl** (`lib/url.c`, C)<br>Target: `Curl_connect` | 23,246 | 23,246 (0.0%) | 204 (-99.1%)<br>❌ *GATE FAIL: Unsupported Lang / Truncated* | **5,343** (-77.0%) | **TokenSafe PASS**<br>Native Tree-sitter C grammar |
+| **retrofit** (`Retrofit.java`, Java)<br>Target: `Retrofit.create` | 8,189 | 8,189 (0.0%) | 127 (-98.4%)<br>❌ *GATE FAIL: Unsupported Lang / Truncated* | **4,617** (-43.6%) | **TokenSafe PASS**<br>Native Tree-sitter Java grammar |
+
+> **Key empirical takeaways:**
+> - **Chisle scores 0.0% reduction on code reads**: its lifecycle hook hardcodes `const NEVER_COMPRESS = ['read', 'edit', 'write']` to avoid breaking diffs without an AST parser.
+> - **token-optimizer failed 6 out of 8 zero-loss gates**: on Python files, its `structure_map.py` emits invalid pseudo-YAML text outlines and caps methods at 4 (`MAX_SKELETON_METHODS_PER_CLASS = 4`), discarding up to 56 methods including the target function. On Go, C, and Java, it performs blind regex truncation.
+> - **TokenSafe achieves 34.1% to 79.9% real token reduction with a 100% Gate PASS rate**: using native Tree-sitter AST polyglot grammars, TokenSafe keeps 100% of the target function's executable body intact byte-for-byte, produces valid syntax, and enables 0ms bit-exact restoration via `#hash` and `expand_ref`.
+
 ## Architectural Comparison: TokenSafe vs. Competitors
 
 | Capability | JayPokale / Chisle | alexgreensh / token-optimizer | TokenSafe (v4.1.2) |
