@@ -42,6 +42,23 @@ _CARGO_DUR_RE = re.compile(r"finished in\s+(?P<dur>[0-9.]+[a-zA-Z]*)", re.IGNORE
 _GO_TEST_OK_RE = re.compile(r"^ok\s+(\S+)\s+([0-9.]+[ms]+)", re.MULTILINE)
 _GO_TEST_FAIL_RE = re.compile(r"^FAIL\s+(\S+)\s+([0-9.]+[ms]+)", re.MULTILINE)
 
+# bun test regexes
+_BUN_FILES_SUMMARY_RE = re.compile(
+    r"(?P<passed_files>\d+)/(?P<total_files>\d+)\s+test files passed in\s+(?P<dur>[0-9.]+[a-zA-Z]*)",
+    re.IGNORECASE
+)
+_BUN_RAN_RE = re.compile(
+    r"Ran\s+(?P<tests>\d+)\s+tests?\s+across\s+(?P<files>\d+)\s+files?\.?\s*\[(?P<dur>[0-9.]+[a-zA-Z]*)\]",
+    re.IGNORECASE
+)
+_BUN_PASS_RE = re.compile(r"^\s*(?P<pass>\d+)\s+pass\b", re.MULTILINE | re.IGNORECASE)
+_BUN_FAIL_RE = re.compile(r"^\s*(?P<fail>\d+)\s+fail\b", re.MULTILINE | re.IGNORECASE)
+_BUN_EXPECTS_RE = re.compile(r"^\s*(?P<expects>\d+)\s+expect\(\)\s+calls\b", re.MULTILINE | re.IGNORECASE)
+_GIT_COMMIT_CONFIRM_RE = re.compile(
+    r"(\[[^\]\r\n]+\s+[0-9a-f]{7,40}\][^\r\n]*(?:\n\s*\d+\s+files?\s+changed[^\r\n]*)?)",
+    re.IGNORECASE
+)
+
 
 class TestOutputParser:
     """Parses and folds test runner terminal outputs."""
@@ -49,6 +66,14 @@ class TestOutputParser:
     @classmethod
     def detect_runner(cls, cmd_or_output: str) -> Optional[str]:
         s = cmd_or_output.lower()
+        if "bun test" in s or "bun:test" in s:
+            return "bun test"
+        if "expect() calls" in s and ("pass\n" in s or " pass" in s):
+            return "bun test"
+        if "test files passed in" in s:
+            return "bun test"
+        if re.search(r"\bran\s+\d+\s+tests?\s+across\s+\d+\s+files?", s):
+            return "bun test"
         if "pytest" in s:
             return "pytest"
         if "unittest" in s or ("ran " in s and " tests in " in s):
@@ -80,7 +105,9 @@ class TestOutputParser:
         if not detected:
             return raw, False
 
-        if detected == "pytest":
+        if detected == "bun test":
+            return cls._compact_bun_test(raw)
+        elif detected == "pytest":
             return cls._compact_pytest(raw)
         elif detected == "unittest":
             return cls._compact_unittest(raw)
@@ -140,6 +167,86 @@ class TestOutputParser:
         return "\n".join(res), True
 
     @classmethod
+    def _compact_bun_test(cls, raw: str) -> Tuple[str, bool]:
+        files_m = _BUN_FILES_SUMMARY_RE.search(raw)
+        ran_m = _BUN_RAN_RE.search(raw)
+        pass_matches = _BUN_PASS_RE.findall(raw)
+        fail_matches = _BUN_FAIL_RE.findall(raw)
+        expects_matches = _BUN_EXPECTS_RE.findall(raw)
+
+        if not files_m and not ran_m and not pass_matches:
+            return raw, False
+
+        passed = int(pass_matches[-1]) if pass_matches else 0
+        failed = int(fail_matches[-1]) if fail_matches else 0
+
+        if files_m:
+            passed_files = int(files_m.group("passed_files"))
+            total_files = int(files_m.group("total_files"))
+            dur = files_m.group("dur")
+            if passed_files < total_files:
+                failed = max(failed, total_files - passed_files)
+        else:
+            passed_files = total_files = 0
+            dur = ran_m.group("dur") if ran_m else ""
+
+        commit_m = _GIT_COMMIT_CONFIRM_RE.search(raw)
+        commit_suffix = f"\n{commit_m.group(1)}" if commit_m else ""
+
+        if failed == 0:
+            if files_m:
+                if ran_m:
+                    tests = ran_m.group("tests")
+                    exp_str = f", {expects_matches[-1]} expects" if expects_matches else ""
+                    summary = f"✓ PASS: {passed_files}/{total_files} test files passed ({tests} pass{exp_str} in {dur}) [bun test]{commit_suffix}"
+                else:
+                    summary = f"✓ PASS: {passed_files}/{total_files} test files passed in {dur} [bun test]{commit_suffix}"
+            elif ran_m:
+                tests = ran_m.group("tests")
+                files = ran_m.group("files")
+                dur = ran_m.group("dur")
+                exp_str = f" ({expects_matches[-1]} expects)" if expects_matches else ""
+                summary = f"✓ PASS: {tests} tests passed across {files} file(s) in {dur}{exp_str} [bun test]{commit_suffix}"
+            else:
+                exp_str = f" ({expects_matches[-1]} expects)" if expects_matches else ""
+                summary = f"✓ PASS: {passed} tests passed{exp_str} [bun test]{commit_suffix}"
+            return summary, True
+
+        # Failed run: extract failures and stash full output
+        _, marker = stash_block(raw, source="bun_test")
+        lines = raw.splitlines()
+        failures = []
+        cur_fail = []
+        in_fail = False
+
+        for ln in lines:
+            s = ln.strip()
+            if "✗ " in ln or ln.startswith("error: ") or "Expected:" in ln or "Received:" in ln:
+                in_fail = True
+            if in_fail:
+                cur_fail.append(ln)
+                if len(cur_fail) >= 8 or ("✗ " in ln and len(cur_fail) > 1):
+                    failures.append("\n".join(cur_fail))
+                    cur_fail = []
+                    in_fail = False
+                    if len(failures) >= 5:
+                        break
+        if cur_fail and len(failures) < 5:
+            failures.append("\n".join(cur_fail))
+
+        dur_str = f" in {dur}" if dur else ""
+        out = [
+            f"✗ FAIL: {failed} failed, {passed} passed{dur_str} [bun test]",
+            "Failures excerpt:"
+        ]
+        for fb in failures:
+            out.append(f"  {fb}")
+        out.append(marker)
+        if commit_suffix:
+            out.append(commit_suffix.strip())
+        return "\n".join(out), True
+
+    @classmethod
     def _compact_unittest(cls, raw: str) -> Tuple[str, bool]:
         lines = raw.splitlines()
         ran = status = ""
@@ -154,7 +261,8 @@ class TestOutputParser:
             return raw, False
 
         if status.startswith("OK"):
-            return f"✓ {ran} — all tests passed", True
+            status_clean = f" ({status})" if status else ""
+            return f"✓ {ran} — all tests passed{status_clean}", True
 
         # Extract failure blocks
         _, marker = stash_block(raw, source="unittest")

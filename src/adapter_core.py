@@ -79,7 +79,7 @@ _INFINITE_PATTERNS = [
     r"\bdocker\s+attach\b",
     # vitest runs an interactive watcher unless the `run` subcommand is given
     r"\bvitest\b(?![^|;&]*\brun\b)",
-    r"\b(?:jest|vitest)\b[^|;&]*--watch\b",
+    r"\b(?:jest|vitest|bun)\b[^|;&]*--watch\b",
 ]
 
 # Lockfiles/junk that must never be dumped into an agent context.

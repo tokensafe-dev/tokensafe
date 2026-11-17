@@ -334,6 +334,81 @@ class TestTestRunnerWatchGuard(unittest.TestCase):
         raw = "some verbose output\n" + "e" * 500
         self.assertIsNone(CommandSanitizer.compact_tool_output("Bash", {"stdout": raw, "error": "oom"}))
 
+    def test_git_push_no_progress(self):
+        cmd = "git push origin main"
+        new_cmd, saved, reason = CommandSanitizer.sanitize(cmd)
+        self.assertIsNotNone(new_cmd)
+        self.assertIn("--no-progress", new_cmd)
+        self.assertGreater(saved, 0)
+
+    def test_git_push_already_has_quiet_or_no_progress(self):
+        for cmd in ("git push --no-progress origin main", "git push -q origin main", "git push --quiet"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(CommandSanitizer.sanitize(cmd)[0])
+
+    def test_git_commit_wrapped_when_message_provided(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            husky_dir = os.path.join(tmp, ".husky")
+            os.mkdir(husky_dir)
+            with open(os.path.join(husky_dir, "pre-commit"), "w") as f:
+                f.write("npm test\n")
+            cmd = 'git commit -m "feat(ads): add ad network"'
+            new_cmd, saved, reason = CommandSanitizer.sanitize(cmd, cwd=tmp)
+            self.assertIsNotNone(new_cmd)
+            self.assertTrue(new_cmd.startswith("tokensafe wrap "))
+            self.assertIn("git commit", new_cmd)
+
+    def test_git_commit_without_message_not_wrapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            husky_dir = os.path.join(tmp, ".husky")
+            os.mkdir(husky_dir)
+            with open(os.path.join(husky_dir, "pre-commit"), "w") as f:
+                f.write("npm test\n")
+            cmd = "git commit"
+            new_cmd, saved, reason = CommandSanitizer.sanitize(cmd, cwd=tmp)
+            self.assertIsNone(new_cmd)
+
+    def test_git_commit_without_hooks_not_wrapped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cmd = 'git commit -m "feat: no hooks"'
+            new_cmd, saved, reason = CommandSanitizer.sanitize(cmd, cwd=tmp)
+            self.assertIsNone(new_cmd)
+
+    def test_bun_test_wrapped(self):
+        cmd = "bun test src/modules/ads/ads.test.ts"
+        new_cmd, saved, reason = CommandSanitizer.sanitize(cmd)
+        self.assertIsNotNone(new_cmd)
+        self.assertTrue(new_cmd.startswith("tokensafe wrap "))
+        self.assertIn("bun test", new_cmd)
+        self.assertIn("CI=true", new_cmd)
+
+    def test_python_unittest_wrapped(self):
+        cmd = "python3 -m unittest discover tests"
+        new_cmd, saved, reason = CommandSanitizer.sanitize(cmd)
+        self.assertIsNotNone(new_cmd)
+        self.assertTrue(new_cmd.startswith("tokensafe wrap "))
+        self.assertIn("python3 -m unittest discover tests", new_cmd)
+
+    def test_compound_git_pipeline_sanitization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = os.path.join(tmp, "app")
+            os.mkdir(app_dir)
+            husky_dir = os.path.join(app_dir, ".husky")
+            os.mkdir(husky_dir)
+            with open(os.path.join(husky_dir, "pre-commit"), "w") as f:
+                f.write("npm test\n")
+            cmd = 'cd app && git add . && git commit -m "feat: test" && git push origin main'
+            new_cmd, saved, reason = CommandSanitizer.sanitize(cmd, cwd=tmp)
+            self.assertIsNotNone(new_cmd)
+            self.assertIn("tokensafe wrap 'git commit -m \"feat: test\"'", new_cmd)
+            self.assertIn("git push --no-progress origin main", new_cmd)
+        self.assertIn("git push --no-progress origin main", new_cmd)
+
+    def test_compact_test_output_bun(self):
+        raw = "47 pass\n0 fail\n207 expect() calls\nRan 47 tests across 1 file. [1125.00ms]"
+        res = CommandSanitizer.compact_test_output(raw, exit_code=0)
+        self.assertEqual(res, "PASS: Ran 47 tests across 1 file. [1125.00ms] (bun test)")
+
 
 if __name__ == "__main__":
     unittest.main()

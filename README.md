@@ -406,7 +406,7 @@ All hook adapters fail open: an internal error never stalls your agent. Failures
 | `get_mistakes` | Anti-stuck persistent ledger: retrieves past dead-ends, loop guard trips, and git reverts to prevent repeating failed paths |
 | `list_dir` | Clean directory tree without permissions, timestamps, or lockfiles |
 | `slice_diff` | Unified diff slicing omitting lockfiles and minimizing context lines |
-| `sanitize_command` | Per-stage shell command rewrites with bounded output and ANSI escape sequence stripping |
+| `sanitize_command` | Per-stage shell command rewrites (`git push` --no-progress, `git commit` hook wrapping, bun/python/jest test folding, lockfile exclusions, bounded logs) |
 | `guard_inspect` | Pre-flight security and hygiene audit for commands or code snippets |
 | `context_budget` | Context window usage estimate with thresholds and recommendations |
 | `compress_prompt` | Compiles a verbose developer prompt into a compact S-expression |

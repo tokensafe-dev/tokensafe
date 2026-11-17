@@ -228,6 +228,42 @@ class CommandSanitizer:
         return cmd_tok, tokens[idx + 1 :]
 
     @classmethod
+    def _has_git_hooks(cls, cwd: Optional[str] = None) -> bool:
+        """Checks if pre-commit hooks exist in cwd or git root."""
+        base = os.path.abspath(os.path.expanduser(cwd)) if cwd else os.getcwd()
+        cur = base
+        for _ in range(5):
+            if os.path.isfile(os.path.join(cur, ".husky", "pre-commit")):
+                return True
+            if os.path.isfile(os.path.join(cur, ".git", "hooks", "pre-commit")):
+                return True
+            if os.path.isfile(os.path.join(cur, ".pre-commit-config.yaml")):
+                return True
+            if os.path.isfile(os.path.join(cur, "lefthook.yml")):
+                return True
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        return False
+
+    @classmethod
+    def _is_tokensafe_available(cls) -> bool:
+        """Returns True if tokensafe executable is in PATH or known install locations."""
+        import shutil
+        if shutil.which("tokensafe"):
+            return True
+        for candidate in (
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "tokensafe"),
+            os.path.expanduser("~/.tokensafe/bin/tokensafe"),
+            os.path.expanduser("~/.local/bin/tokensafe"),
+            "/usr/local/bin/tokensafe",
+        ):
+            if os.path.exists(candidate):
+                return True
+        return False
+
+    @classmethod
     def _optimize_stage(cls, stage: str, cwd: Optional[str] = None) -> Optional[Tuple[str, int, str, Optional[Tuple[str, int]]]]:
         """
         Applies one rewrite rule to a single stage (command-position aware).
@@ -303,10 +339,33 @@ class CommandSanitizer:
                 if "-L" not in sub_args and not any(a.startswith("-L") for a in sub_args):
                     return stage, 1500, "Capped git blame output", cls._CAP_LINES_200
 
+            # git push: eliminate interactive progress animation spam (Counting objects, Writing objects)
+            elif subcmd == "push":
+                if "--no-progress" not in sub_args and "-q" not in sub_args and "--quiet" not in sub_args:
+                    new_stage = re.sub(r"\b(git(?:\s+-C\s+\S+)?\s+push)\b", r"\1 --no-progress", stage, count=1)
+                    return new_stage, 800, "Added --no-progress to git push to eliminate object counting animation spam", None
+
+            # git commit: wrap with tokensafe wrap when hooks exist and message is provided
+            elif subcmd == "commit":
+                has_msg = any(
+                    a in ("-m", "--message", "-F", "--file", "--no-edit")
+                    or a.startswith(("-m=", "--message=", "-F=", "--file="))
+                    for a in sub_args
+                )
+                if has_msg and cls._has_git_hooks(cwd) and cls._is_tokensafe_available() and not cls._TOKENSAFE_WRAP_RE.search(stage):
+                    wrapped = f"tokensafe wrap {shlex.quote(stage)}"
+                    return wrapped, 2500, "Wrapped git commit with tokensafe wrap to compact pre-commit hooks and test output", None
+
         # pytest (or python -m pytest): compact quiet traceback
         if cmd_tok == "pytest" or (cmd_tok.startswith("python") and "-m" in cmd_args and "pytest" in cmd_args):
             if "--tb=" not in stage and "-q" not in cmd_args and "--quiet" not in cmd_args:
                 return f"{stage} -q --tb=short", 800, "Applied short traceback to pytest", None
+
+        # python -m unittest (or python3 -m unittest): wrap with tokensafe wrap to fold test noise
+        if cmd_tok.startswith("python") and "-m" in cmd_args and "unittest" in cmd_args:
+            if cls._is_tokensafe_available() and not cls._TOKENSAFE_WRAP_RE.search(stage):
+                wrapped = f"tokensafe wrap {shlex.quote(stage)}"
+                return wrapped, 2000, "Wrapped python unittest with tokensafe wrap to compact test results into one-line summary", None
 
         # cargo test: quiet test runner by default when not specified
         if cmd_tok == "cargo" and cmd_args[:1] == ["test"]:
@@ -425,9 +484,13 @@ class CommandSanitizer:
             runner = "vitest"
         elif cls._JEST_RE.match(stage) or cls._JEST_SCRIPT_RE.search(stage):
             runner = "jest"
+        elif (cmd_tok == "bun" and cmd_args[:1] == ["test"]) or (cmd_tok in ("bunx",) and cmd_args[1:2] == ["test"]):
+            runner = "bun"
         elif cls._PKG_MANAGER_TEST_RE.match(cls._strip_cmd_prefix(stage)):
             if cls._JEST_FINGERPRINT_RE.search(stage):
                 runner = "jest"
+            elif cls._strip_cmd_prefix(stage).startswith("bun "):
+                runner = "bun"
             else:
                 script_runner = cls._peek_test_script_runner(cwd)
                 runner = {"jest": "script-jest", "vitest": "script-vitest"}.get(script_runner, "generic")
@@ -437,6 +500,21 @@ class CommandSanitizer:
         new_stage = stage
         reasons: List[str] = []
         saved = 0
+
+        if runner == "bun":
+            if cls._BARE_WATCH_RE.search(new_stage):
+                new_stage = cls._BARE_WATCH_RE.sub("", new_stage)
+                reasons.append("Dropped bare --watch from bun test command")
+                saved += 300
+            if not re.search(r"\bCI=", new_stage):
+                new_stage = f"CI=true {new_stage}"
+                saved += 300
+                reasons.append("Prepended CI=true for bun test run-once mode")
+            if cls._is_tokensafe_available() and not cls._TOKENSAFE_WRAP_RE.search(new_stage):
+                new_stage = f"tokensafe wrap {shlex.quote(new_stage)}"
+                saved += 2000
+                reasons.append("Wrapped bun test with tokensafe wrap to fold passing tests into compact summary")
+            return new_stage, saved, "; ".join(reasons), None
 
         if runner in ("vitest", "script-vitest"):
             if cls._BARE_WATCH_RE.search(new_stage):
@@ -593,21 +671,7 @@ class CommandSanitizer:
         if not is_build:
             return None
 
-        # Check if `tokensafe` is available in PATH or local project bin
-        import shutil
-        has_tokensafe = bool(shutil.which("tokensafe"))
-        if not has_tokensafe:
-            for candidate in (
-                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "tokensafe"),
-                os.path.expanduser("~/.tokensafe/bin/tokensafe"),
-                os.path.expanduser("~/.local/bin/tokensafe"),
-                "/usr/local/bin/tokensafe"
-            ):
-                if os.path.exists(candidate):
-                    has_tokensafe = True
-                    break
-
-        if not has_tokensafe:
+        if not cls._is_tokensafe_available():
             return None
 
         wrapped = f"tokensafe wrap {shlex.quote(stage)}"
@@ -754,6 +818,15 @@ class CommandSanitizer:
         for line in reversed(lines):
             if line.startswith("ok  \t") or line.startswith("PASS"):
                 return f"PASS: {line}"
+
+        # 6. bun test check
+        for line in reversed(lines):
+            if "test files passed in" in line:
+                return f"PASS: {line} (bun test)"
+            if line.startswith("Ran ") and "tests across" in line and "file" in line:
+                return f"PASS: {line} (bun test)"
+            if re.search(r"^\d+\s+pass\b", line):
+                return f"PASS: {line} (bun test)"
 
         # Fallback for verbose outputs: if > 12 lines, cap to first line + last line
         if len(lines) > 12:

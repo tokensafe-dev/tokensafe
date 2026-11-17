@@ -128,6 +128,93 @@ ok  	github.com/org/repo/pkg/api	0.045s
         self.assertTrue(was_compacted)
         self.assertIn("✓ PASS: all 2 packages passed (go test)", compacted)
 
+    def test_bun_test_pass_single_file(self):
+        raw = """
+bun test v1.3.10 (30e609e0)
+
+src/modules/ads/ads.test.ts:
+✓ Ads Controller & API > GET /ads/networks should return networks list even without token [16.85ms]
+✓ Ads Controller & API > POST /ads/start and /ads/watch should reject AdLoop direct watch [9.51ms]
+
+ 47 pass
+ 0 fail
+ 207 expect() calls
+Ran 47 tests across 1 file. [1125.00ms]
+"""
+        compacted, was_compacted = TestOutputParser.compact(raw)
+        self.assertTrue(was_compacted)
+        self.assertIn("✓ PASS: 47 tests passed across 1 file(s) in 1125.00ms (207 expects) [bun test]", compacted)
+
+    def test_bun_test_pass_multi_file(self):
+        raw = """
+ 8 pass
+ 0 fail
+ 27 expect() calls
+Ran 8 tests across 1 file. [57.00ms]
+✅ src/lib/violation-ledger-refresh.test.ts
+bun test v1.3.10 (30e609e0)
+
+55/55 test files passed in 57.0s
+"""
+        compacted, was_compacted = TestOutputParser.compact(raw)
+        self.assertTrue(was_compacted)
+        self.assertIn("✓ PASS: 55/55 test files passed", compacted)
+        self.assertIn("[bun test]", compacted)
+
+    def test_bun_test_pass_with_commit_info(self):
+        raw = """
+ 55/55 test files passed in 57.0s
+[main 6bf2fd0] feat(ads): add TeleMonix ad network configuration and velocity thresholds
+ 5 files changed, 43 insertions(+), 3 deletions(-)
+ create mode 100644 scripts/seed_telemonix.ts
+"""
+        compacted, was_compacted = TestOutputParser.compact(raw)
+        self.assertTrue(was_compacted)
+        self.assertIn("✓ PASS: 55/55 test files passed in 57.0s [bun test]", compacted)
+        self.assertIn("[main 6bf2fd0] feat(ads): add TeleMonix ad network configuration and velocity thresholds", compacted)
+        self.assertIn("5 files changed, 43 insertions(+), 3 deletions(-)", compacted)
+
+    def test_bun_test_fail(self):
+        raw = """
+bun test v1.3.10 (30e609e0)
+
+sample.test.ts:
+✓ passes
+error: expect(received).toBe(expected)
+
+Expected: 3
+Received: 2
+
+      at <anonymous> (/tmp/sample.test.ts:6:17)
+✗ fails [0.69ms]
+
+ 1 pass
+ 1 fail
+ 2 expect() calls
+Ran 2 tests across 1 file. [12.00ms]
+"""
+        compacted, was_compacted = TestOutputParser.compact(raw)
+        self.assertTrue(was_compacted)
+        self.assertIn("✗ FAIL: 1 failed, 1 passed in 12.00ms [bun test]", compacted)
+        self.assertIn("Expected: 3", compacted)
+        self.assertIn("Received: 2", compacted)
+        self.assertIn("[TokenSafe folded: #", compacted)
+
+        restored = retrieve_block(compacted)
+        self.assertEqual(restored, raw)
+
+    def test_unittest_pass_with_status(self):
+        raw = """
+....................
+----------------------------------------------------------------------
+Ran 710 tests in 23.009s
+
+OK (skipped=16)
+"""
+        compacted, was_compacted = TestOutputParser.compact(raw)
+        self.assertTrue(was_compacted)
+        self.assertIn("✓ Ran 710 tests in 23.009s — all tests passed (OK (skipped=16))", compacted)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,7 +28,7 @@ tokensafe guard "<command>"   # Pre-flight check command safety (rm, secrets, gr
 tokensafe guard audit [path]  # Recursively audit project files for security violations
 tokensafe doctor [--cleanup]  # Audit MCP tool overhead, token tax & clean competitor conflicts
 tokensafe expand-ref <hash>   # Restore original raw content of any folded block by its 8-char hash
-tokensafe wrap "<cmd>"        # Run noisy command with compact output folding (e.g. tests, tsc, builds)
+tokensafe wrap "<cmd>"        # Run noisy command with compact output folding (e.g. bun/python/jest tests, git commit hooks, tsc, builds)
 tokensafe web <url>           # Fetch web page/docs and print clean compact Markdown
 tokensafe optimize-image <img># Downscale oversized screenshot to max 1024px (-50-75% vision tokens)
 tokensafe prune-superseded <t># Prune outdated intermediate reads from conversation transcript

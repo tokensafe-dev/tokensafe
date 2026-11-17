@@ -180,11 +180,12 @@ TOOLS = [
     {
         "name": "sanitize_command",
         "description": "Per-stage shell command rewrites: prunes lockfiles, caps unbounded git log/show/blame/rg "
-                     "and docker/kubectl logs, quiets npm/pip installs, bounds cat/curl output. Compound commands "
-                     "(a && b ; c) are optimized per stage without breaking operators. For unit-test runs prefer "
-                     "the `tests` CLI wrapper (tokensafe tests [pytest]) over raw `python3 -m unittest discover`. "
-                     "Pass cwd for test-runner commands: the guard reads <cwd>/package.json to force jest/vitest "
-                     "into run-once mode (CI=true, --watch=false, --forceExit) so agents never hang on watch mode.",
+                     "and docker/kubectl logs, strips git push progress animations (--no-progress), wraps git commit "
+                     "with tokensafe wrap when pre-commit/husky hooks exist, and quiets npm/pip installs, bounds cat/curl output. "
+                     "Compound commands (a && b ; c) are optimized per stage without breaking operators. Test commands "
+                     "(bun test, pytest, python -m unittest, vitest, jest) are automatically wrapped or forced into run-once mode "
+                     "(CI=true, --watch=false, --forceExit) so passing suites emit a clean 1-line summary and agents never hang on watch mode. "
+                     "Pass optional cwd for test commands to unlock package.json runner detection for opaque yarn/npm test scripts.",
         "inputSchema": {
             "type": "object",
             "properties": {

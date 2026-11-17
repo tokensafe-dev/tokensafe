@@ -60,8 +60,9 @@ folds multi-turn conversation history, slices verbose tool outputs, and guards a
     - Eliminate conversational preambles, courtesy fillers, and trailing sign-offs.
     - Never reprint full unmodified files or lengthy boilerplate; cite line ranges and provide targeted diffs.
 
-11. **COMPACT TEST EXECUTION**:
-    - Run unit tests with concise flags or via `tokensafe tests [cmd]` so passing test suites emit a single-line summary (`PASS: ...`) rather than flooding `Messages` history with hundreds of verbose log lines. Full traceback is strictly preserved on failure.
+11. **COMPACT TEST EXECUTION & PIPELINE SANITIZATION**:
+    - Run unit tests with concise flags or via `tokensafe wrap '<cmd>'` or `tokensafe tests [cmd]`. Native support for `bun test`, `pytest`, `python -m unittest`, `vitest`, `jest`, `cargo test`, and `go test` collapses passing test suites into a single-line summary (`✓ PASS: ...`) rather than flooding `Messages` history with hundreds of verbose log lines. Full traceback is strictly preserved on failure.
+    - Commands like `git push` automatically strip interactive object-counting progress spam (`--no-progress`), and `git commit` is wrapped when pre-commit/husky hooks exist.
 
 ---
 
@@ -82,7 +83,7 @@ Quick pointers:
 - Bundle: `tokensafe:smart_bundle(targets=[{path, symbol}])` — 3-8 related symbols across files in one call, shared imports deduplicated.
 - Navigate: `tokensafe:get_architecture_graph(project_path)` / `tokensafe:get_api_surface(project_path)`.
 - Directory: `tokensafe:list_dir(path, depth=2)` — clean tree, never verbose `ls -la`.
-- Terminal: `tokensafe:sanitize_command(command, cwd)` or run via `tokensafe wrap '<cmd>'`.
+- Terminal: `tokensafe:sanitize_command(command, cwd)` or run via `tokensafe wrap '<cmd>'` — rewrites git push (--no-progress), wraps git commit hooks, and folds test suites (bun, python unittest/pytest, vitest, jest, cargo, go) to 1-line summaries.
 - Context: `tokensafe:compact_conversation(transcript_path)` / `tokensafe:context_budget`.
 - Vision: `tokensafe:optimize_image(image_path, max_edge=1024)` — downscale images >1024px (-50-75% vision tokens).
 - Prune Reads: `tokensafe:prune_superseded(transcript_path)` — drops obsolete intermediate file reads (-30-40% context).
