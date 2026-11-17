@@ -21,7 +21,7 @@ Execute the specified action directly based on these extracted parameters.
 
 ### 2. Zero-Fluff Output Directives (Egress Optimization)
 1. **No Conversational Filler**: Never include courtesy greetings or sign-offs (e.g., "Certainly!", "Sure, I can help", "Let me know if you need anything else").
-2. **Surgical Code Edits**: Prefer `edit_file` with concise `Target` and `Replacement` over `write_file` on large existing files.
+2. **Surgical Code Edits & Zero In-Place Stream Editing**: Prefer `edit_file` with concise `Target` and `Replacement` over `write_file` on large existing files. NEVER run terminal stream editors (`sed -i`, `perl -i`, `awk -i`) to edit or delete source code — blind numeric ranges cause line-drift and silent code loss (hard-blocked by TokenSafe Guard). NEVER suppress errors (`2>/dev/null`) on file modifications.
 3. **Diff-Centric Responses**: Never reprint entire unmodified files or long boilerplate blocks. Reference file lines instead (e.g., `wallet.ts#L42-L50`).
 4. **Dense Formatting**: Use compact bullet points and direct technical prose.
 5. **Repeat Read Deduplication**: Never re-read unchanged files or symbols in the same session. Reuse the skeleton or pointer reference (`// [TokenSafe: Pointer Hit ...]`) returned earlier; only pass `force_full=true` if your context was compacted or you are a fresh subagent.

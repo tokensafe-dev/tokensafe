@@ -10,6 +10,7 @@ TokenSafe Guard automatically intercepts dangerous operations in `PreToolUse`:
 | **SQL_INJECTION** | Unsafe f-string / template string interpolation in queries | **Blocked** (`decision: deny`), enforces parameterized queries |
 | **GIT_SECRET_STAGING** | `git add .env` or blanket staging with unignored secrets | **Blocked** (`decision: deny`), prevents staging credentials |
 | **DESTRUCTIVE_RM** | `rm -rf /`, `rm -rf ~`, `rm -rf *` | **Blocked** (`decision: deny`), prevents catastrophic deletion |
+| **INPLACE_STREAM_EDIT** | `sed -i`, `perl -i`, `awk -i` on source code or with numeric line ranges (`'10,20d'`) | **Blocked** (`decision: deny`), prevents line-drift and code loss; directs to `edit_file` |
 | **DATA_EXFILTRATION** | Piping `.env` or private keys to `curl`/`wget` | **Blocked** (`decision: deny`), prevents secret leakage |
 | **PACKAGE_TYPOSQUAT** | Installing known typosquatted packages | **Warning** injected into turn context |
 | **INFINITE_STREAM** (adapters) | Never-terminating commands: `tail -f`, `watch`, `docker attach`, `docker/kubectl logs -f`, `vitest` (watch by default — use `vitest run`), `jest`/`vitest --watch` | **Asked** (`decision: ask`) — intentional runs proceed via confirmation |

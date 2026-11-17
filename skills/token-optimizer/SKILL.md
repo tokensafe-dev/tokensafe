@@ -42,8 +42,10 @@ folds multi-turn conversation history, slices verbose tool outputs, and guards a
    - NEVER run `ls -la` or `ls -l` in terminal.
    - Call `tokensafe:list_dir(path=".", depth=2)` for clean directory trees without permissions, timestamps, or lockfiles (-90% tokens). Supports relative subfolders (`path="src"`).
 
-6. **SURGICAL FILE EDITS (`edit_file`)**:
+6. **SURGICAL FILE EDITS (`edit_file`) & IN-PLACE STREAM MUTATION GUARD (`sed -i` HARD-BLOCKED)**:
    - On existing files with >= 40 lines, wholesale rewrites via `write_file` are blocked by **Output Guard**. Always use `edit_file` with precise `Target` and `Replacement` blocks.
+   - Strictly NEVER run `sed -i`, `perl -i`, `awk -i`, or terminal stream editors on source files (`.ts`, `.tsx`, `.py`, `.js`, etc.) or with numeric line ranges (`'10,20d'`). Blind numeric editing causes line-drift and catastrophic accidental code deletion. These commands are hard-blocked by **TokenSafe Guard** (`decision: deny`).
+   - NEVER suppress errors with `2>/dev/null` or `&>/dev/null` on file modifications or build commands; failures must fail fast and loud.
 
 7. **SECRET LEAK PREVENTION (ZERO HARDCODED FALLBACKS)**:
    - Never provide real private keys, API secrets, or credentials as fallback values in `os.environ.get()` or `process.env`. Real credentials must exist strictly in environment variables.
