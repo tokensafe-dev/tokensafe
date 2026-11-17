@@ -50,6 +50,8 @@ class SupersededPruner:
         # action_type: "READ" or "EDIT"
         file_actions: Dict[str, List[Tuple[int, str]]] = {}
         step_read_files: Dict[int, str] = {}
+        # Claude Code: tool_use ids map reads to their (later) result step
+        read_tool_ids: Dict[str, int] = {}
 
         for idx, step in enumerate(steps):
             if not isinstance(step, dict):
@@ -87,6 +89,9 @@ class SupersededPruner:
                             if tname in _READ_TOOLS:
                                 file_actions.setdefault(fpath, []).append((idx, "READ"))
                                 step_read_files[idx] = fpath
+                                tool_use_id = str(b.get("id") or "")
+                                if tool_use_id:
+                                    read_tool_ids[tool_use_id] = idx
                             elif tname in _EDIT_TOOLS:
                                 file_actions.setdefault(fpath, []).append((idx, "EDIT"))
 
@@ -107,25 +112,52 @@ class SupersededPruner:
         if not superseded_map:
             return steps, 0, 0, {"pruned_count": 0, "saved_tokens": 0}
 
+        # Claude Code transcripts: the tool RESULT for a read lives in a LATER
+        # step's tool_result block (matched by tool_use_id), so the tombstone
+        # must land there, not in the read's own (tool_use-only) step.
+        superseded_ids: Dict[str, Tuple[int, str, str]] = {}
+        for tid, step_idx in read_tool_ids.items():
+            if step_idx in superseded_map:
+                superseded_ids[tid] = superseded_map[step_idx]
+
         # Apply tombstoning to the tool results of the superseded steps
         pruned_steps: List[dict] = []
         orig_tokens_total = 0
         pruned_tokens_total = 0
         pruned_count = 0
 
+        def _carries_super_result(s: dict) -> bool:
+            """True when this step holds a tool_result whose tool_use_id is superseded."""
+            msg = s.get("message") if isinstance(s, dict) else None
+            mc = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(mc, list):
+                return False
+            return any(
+                isinstance(b, dict) and str(b.get("tool_use_id") or "") in superseded_ids
+                for b in mc
+            )
+
         for idx, step in enumerate(steps):
-            if idx not in superseded_map:
+            if idx not in superseded_map and not (
+                superseded_ids and isinstance(step, dict) and _carries_super_result(step)
+            ):
                 pruned_steps.append(step)
                 continue
 
-            by_step, by_action, fpath = superseded_map[idx]
-            fname = os.path.basename(fpath)
+            same_step = superseded_map.get(idx)
+            if same_step:
+                by_step, by_action, fpath = same_step
+            else:
+                # Result-only step (Claude Code): tombstones are chosen per
+                # tool_use_id below; the step-level fields stay unused.
+                by_step, by_action, fpath = None, None, None
+            fname = os.path.basename(fpath) if fpath else ""
             new_step = json.loads(json.dumps(step))  # deep copy
             modified = False
 
             # Check Antigravity output/content in this step or subsequent tool response step
             content = new_step.get("content")
-            if isinstance(content, str) and len(content) > 150:
+            if same_step and isinstance(content, str) and len(content) > 150:
                 orig_t = count_tokens(content)
                 _, marker = stash_block(content, source="superseded_read")
                 tombstone = (
@@ -137,17 +169,45 @@ class SupersededPruner:
                 pruned_tokens_total += pruned_t
                 modified = True
 
-            # Claude Code message content tool_result blocks
+            # Claude Code message content tool_result blocks. Priority: match by
+            # tool_use_id (result trails the tool_use across steps); fall back to
+            # the same-step rule only for id-less formats (Antigravity exports).
             msg = new_step.get("message")
             if isinstance(msg, dict):
                 mc = msg.get("content")
                 if isinstance(mc, list):
                     for block in mc:
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
-                            tc = block.get("content")
-                            if isinstance(tc, str) and len(tc) > 150:
-                                orig_t = count_tokens(tc)
-                                _, marker = stash_block(tc, source="superseded_read")
+                        if not isinstance(block, dict) or block.get("type") != "tool_result":
+                            continue
+                        tid = str(block.get("tool_use_id") or "")
+                        mapping = superseded_ids.get(tid) if tid else None
+                        if mapping is None and not tid:
+                            mapping = superseded_map.get(idx)
+                        if mapping is None:
+                            continue
+                        by_step, by_action, fpath = mapping
+                        fname = os.path.basename(fpath)
+                        tc = block.get("content")
+                        if isinstance(tc, str) and len(tc) > 150:
+                            orig_t = count_tokens(tc)
+                            _, marker = stash_block(tc, source="superseded_read")
+                            tombstone = (
+                                f"[TokenSafe: Output superseded by step #{by_step + 1} ({by_action.lower()} {fname}) — {marker}]"
+                            )
+                            block["content"] = tombstone
+                            pruned_t = count_tokens(tombstone)
+                            orig_tokens_total += orig_t
+                            pruned_tokens_total += pruned_t
+                            modified = True
+                        elif isinstance(tc, list) and tc:
+                            # tool_result content can be a list of text blocks
+                            text = "\n".join(
+                                (b.get("text", "") if isinstance(b, dict) else str(b))
+                                for b in tc
+                            )
+                            if len(text) > 150:
+                                orig_t = count_tokens(text)
+                                _, marker = stash_block(text, source="superseded_read")
                                 tombstone = (
                                     f"[TokenSafe: Output superseded by step #{by_step + 1} ({by_action.lower()} {fname}) — {marker}]"
                                 )

@@ -55,6 +55,25 @@ class TestFTSIndex(unittest.TestCase):
         self.assertGreater(len(results), 0)
         self.assertEqual(results[0]["file"], "src/gateway.py")
 
+    def test_max_files_cap_does_not_prune_unseen_files(self):
+        """The per-run cap bounds INDEXING work, not the walk — files beyond the
+        cap must stay in found_paths or the prune step deletes them every run."""
+        for i in range(12):
+            with open(os.path.join(self.tmp_dir, f"m{i}.py"), "w") as f:
+                f.write(f"def marker_{i}():\n    return {i}\n")
+        index = CodeFTSIndex(self.tmp_dir)
+        stats1 = index.index_files(max_files=5)
+        self.assertEqual(stats1["updated_files"], 5)
+        stats2 = index.index_files(max_files=5)
+        self.assertEqual(stats2["updated_files"], 5)
+        self.assertEqual(stats2["pruned_files"], 0)  # the old bug pruned 7 here
+        stats3 = index.index_files(max_files=5)
+        # m10 + m11 + the two src/ files (walk now completes past the cap)
+        self.assertEqual(stats3["updated_files"], 4)
+        self.assertEqual(stats3["pruned_files"], 0)
+        self.assertGreater(len(index.search("marker_11")), 0)
+        self.assertEqual(len(index.search("marker_")), 12)
+
     def test_incremental_indexing(self):
         index = CodeFTSIndex(self.tmp_dir)
         stats1 = index.index_files()

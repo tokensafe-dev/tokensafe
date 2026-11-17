@@ -179,9 +179,13 @@ class CodeFTSIndex:
                             continue  # File unchanged
 
                         files_to_index.append((rel_path, full_path, f_mtime, f_size))
-                        if scanned_files >= max_files:
+                        # Cap the INDEXING work per run, never the walk: files
+                        # beyond the cap must still enter found_paths, or the
+                        # prune step below would treat them as deleted on every
+                        # run (repos > max_files lost their tail permanently).
+                        if len(files_to_index) >= max_files:
                             break
-                    if scanned_files >= max_files:
+                    if len(files_to_index) >= max_files:
                         break
 
                 # Index modified/new files in batches

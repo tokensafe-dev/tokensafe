@@ -58,8 +58,14 @@ def stash_block(content: str, source: str = "tool") -> Tuple[str, str]:
     )
 
     if chars_count > MAX_STASH_CHARS:
-        # Don't exhaust local disk on massive blobs > 5MB
-        return hash8, marker
+        # Don't exhaust local disk on massive blobs > 5MB — and don't advertise
+        # a restore path that would dead-end: without the stored file,
+        # expand_ref would return None ("not found or expired").
+        honest_marker = (
+            f"[TokenSafe folded: #{hash8} ({lines_count} lines / {chars_count} chars omitted) "
+            f"— content exceeds the 5 MB stash cap and was not archived]"
+        )
+        return hash8, honest_marker
 
     try:
         stash_dir = get_stash_dir()

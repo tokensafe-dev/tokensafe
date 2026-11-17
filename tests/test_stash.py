@@ -66,6 +66,15 @@ class TestStash(unittest.TestCase):
         self.assertEqual(pruned, 1)
         self.assertIsNone(retrieve_block(hash8))
 
+    def test_oversized_block_not_advertised_as_restorable(self):
+        """Content over the 5 MB cap is not archived — the marker must not
+        promise a restore path that would dead-end in expand_ref."""
+        big = "x" * (5 * 1024 * 1024 + 100)
+        hash8, marker = stash_block(big, source="test_oversize")
+        self.assertIn("was not archived", marker)
+        self.assertNotIn("expand_ref", marker)
+        self.assertIsNone(retrieve_block(hash8))
+
 
 if __name__ == "__main__":
     unittest.main()

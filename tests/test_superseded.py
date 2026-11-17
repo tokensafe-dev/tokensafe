@@ -76,6 +76,71 @@ class TestSupersededPruner(unittest.TestCase):
 
         self.assertIn("superseded", lines[0]["content"])
 
+    def test_claude_code_trailing_tool_result_pruned(self):
+        """CC transcripts: the read's tool_use and its tool_result live in
+        DIFFERENT steps — the tombstone must land on the result step."""
+        big = "export const legacy = {};\n" * 40  # ~1000 chars
+        steps = [
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "/app/a.ts"}}]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": big}]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_2", "name": "Edit", "input": {"file_path": "/app/a.ts"}}]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_2", "content": "ok"}]}},
+        ]
+        pruned, orig_t, new_t, stats = SupersededPruner.prune_steps(steps)
+        self.assertEqual(stats["pruned_count"], 1, stats)
+        block = pruned[1]["message"]["content"][0]
+        self.assertIn("superseded by step #3", block["content"])
+        self.assertIn("TokenSafe folded: #", block["content"])
+        self.assertIn("edit a.ts", block["content"])
+        # The edit's own result must stay untouched
+        self.assertEqual(pruned[3]["message"]["content"][0]["content"], "ok")
+        # Reversibility: the stashed original is retrievable
+        import re as _re
+        m = _re.search(r"#([0-9a-f]{8})", block["content"])
+        self.assertIsNotNone(m)
+        self.assertEqual(retrieve_block(m.group(1)), big)
+
+    def test_claude_code_list_content_tool_result_pruned(self):
+        """tool_result.content can be a list of text blocks — tombstone it too."""
+        big_text = "def old_impl():\n    pass\n" * 45
+        steps = [
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/x/f.py"}}]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": big_text}]}]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t2", "name": "Write", "input": {"file_path": "/x/f.py"}}]}},
+        ]
+        pruned, _, _, stats = SupersededPruner.prune_steps(steps)
+        self.assertEqual(stats["pruned_count"], 1, stats)
+        block = pruned[1]["message"]["content"][0]
+        self.assertIsInstance(block["content"], str)
+        self.assertIn("superseded by step #3", block["content"])
+
+    def test_unrelated_results_stay_untouched(self):
+        """A superseded READ must not tombstone results of OTHER tool_use ids."""
+        steps = [
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "ls"}},
+                {"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "/app/a.ts"}}]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "b1", "content": "file1\nfile2\n" * 30},
+                {"type": "tool_result", "tool_use_id": "r1", "content": "old body " * 100}]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "w1", "name": "Write", "input": {"file_path": "/app/a.ts"}}]}},
+        ]
+        pruned, _, _, stats = SupersededPruner.prune_steps(steps)
+        self.assertEqual(stats["pruned_count"], 1, stats)
+        # content[0] = bash result (NOT a read — stays intact),
+        # content[1] = superseded read result (tombstoned)
+        self.assertIn("file1", pruned[1]["message"]["content"][0]["content"])
+        self.assertNotIn("superseded", pruned[1]["message"]["content"][0]["content"])
+        self.assertIn("superseded", pruned[1]["message"]["content"][1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
