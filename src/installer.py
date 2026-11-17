@@ -70,7 +70,7 @@ UNIFIED_TOKENSAFE_RULE = (
 POINTER_RULE = (
     "## TOKENSAFE GRAPH-FIRST OPTIMIZATION PROTOCOL\n"
     "The full 12-point protocol is installed globally in the agent-level instructions "
-    "(~/.zcode/AGENTS.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md) and applies to this project. "
+    "(~/.zcode/AGENTS.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.kimi-code/AGENTS.md) and applies to this project. "
     "Core rules: never raw grep/find or `ls -la` — use `tokensafe:scoped_search`, "
     "`tokensafe:smart_read_file(path, symbol)`, `tokensafe:smart_bundle` and `tokensafe:list_dir`; "
     "sanitize high-output commands via `tokensafe:sanitize_command`; check `tokensafe:context_budget` (Grade S-F) "
@@ -146,6 +146,16 @@ AGENTS_REGISTRY = {
         "plugin_path": os.path.join(HOME, ".zcode", "cli", "plugins", "tokensafe"),
         "agents_md_path": os.path.join(HOME, ".zcode", "AGENTS.md"),
         "detect_path": os.path.join(HOME, ".zcode")
+    },
+    "kimi": {
+        "name": "Kimi Code",
+        "type": "kimi_plugin",
+        "config_path": os.path.join(HOME, ".kimi-code", "mcp.json"),
+        "installed_json_path": os.path.join(HOME, ".kimi-code", "plugins", "installed.json"),
+        "managed_plugin_path": os.path.join(HOME, ".kimi-code", "plugins", "managed", "tokensafe"),
+        "skills_path": os.path.join(HOME, ".kimi-code", "skills", "token-optimizer"),
+        "agents_md_path": os.path.join(HOME, ".kimi-code", "AGENTS.md"),
+        "detect_path": os.path.join(HOME, ".kimi-code")
     }
 }
 
@@ -161,6 +171,12 @@ class AgentInstaller:
             # Fallback for cursor / windsurf on macOS
             if not is_present and key == "cursor":
                 is_present = os.path.exists(os.path.join(HOME, "Library", "Application Support", "Cursor"))
+            if not is_present and key == "kimi":
+                is_present = (
+                    os.path.exists("/Applications/Kimi Code.app")
+                    or os.path.exists(os.path.join(HOME, "Applications", "Kimi Code.app"))
+                    or shutil.which("kimi") is not None
+                )
             detected[key] = {
                 **info,
                 "installed": is_present
@@ -211,11 +227,62 @@ class AgentInstaller:
         Codex has no lifecycle hooks (MCP + AGENTS.md remain the integration)."""
         if agent_key == "codex":
             return False, "Codex CLI has no lifecycle hooks — MCP + AGENTS.md stay the integration"
-        if agent_key not in ("claude_code", "cursor"):
+        if agent_key not in ("claude_code", "cursor", "kimi"):
             return False, "hooks not applicable for this agent"
 
         claude_cmd = cls._tokensafe_hook_command("claude_code_hook.py")
         cursor_cmd = cls._tokensafe_hook_command("cursor_hook.py")
+        kimi_cmd = cls._tokensafe_hook_command("kimi_hook.py")
+
+        if agent_key == "kimi":
+            config_file = os.path.join(HOME, ".kimi-code", "config.toml")
+            os.makedirs(os.path.dirname(config_file), exist_ok=True)
+            content = ""
+            if os.path.exists(config_file):
+                try:
+                    shutil.copy2(config_file, f"{config_file}.backup")
+                except Exception:
+                    pass
+                try:
+                    with open(config_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+                except Exception:
+                    pass
+
+            if "kimi_hook.py" in content:
+                return True, "TokenSafe Kimi Code hooks already registered in config.toml"
+
+            toml_hook_cmd = json.dumps(kimi_cmd)
+            hook_sections = (
+                f'\n# TokenSafe Lifecycle Hooks\n'
+                f'[[hooks]]\n'
+                f'event = "SessionStart"\n'
+                f'command = {toml_hook_cmd}\n'
+                f'timeout = 10\n\n'
+                f'[[hooks]]\n'
+                f'event = "UserPromptSubmit"\n'
+                f'command = {toml_hook_cmd}\n'
+                f'timeout = 10\n\n'
+                f'[[hooks]]\n'
+                f'event = "PreToolUse"\n'
+                f'matcher = "Bash"\n'
+                f'command = {toml_hook_cmd}\n'
+                f'timeout = 10\n\n'
+                f'[[hooks]]\n'
+                f'event = "PreToolUse"\n'
+                f'matcher = "Write"\n'
+                f'command = {toml_hook_cmd}\n'
+                f'timeout = 10\n\n'
+                f'[[hooks]]\n'
+                f'event = "PreToolUse"\n'
+                f'matcher = "Read"\n'
+                f'command = {toml_hook_cmd}\n'
+                f'timeout = 10\n'
+            )
+            content = (content.rstrip() + "\n" + hook_sections) if content.strip() else hook_sections.lstrip()
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True, "hooks registered in ~/.kimi-code/config.toml (SessionStart + UserPromptSubmit + PreToolUse Bash/Write/Read)"
 
         if agent_key == "claude_code":
             config_file = os.path.join(HOME, ".claude", "settings.json")
@@ -833,6 +900,67 @@ WantedBy=default.target
                 cls._inject_global_rule(info["agents_md_path"], UNIFIED_TOKENSAFE_RULE)
 
             return True, f"Configured MCP, Plugin, Skill & AGENTS.md in {config_file}"
+
+        elif info["type"] == "kimi_plugin":
+            mcp_file = info.get("config_path")
+            if mcp_file:
+                os.makedirs(os.path.dirname(mcp_file), exist_ok=True)
+                data, err = cls._load_json_with_backup(mcp_file)
+                if err or data is None:
+                    data = {}
+                if "mcpServers" not in data or not isinstance(data["mcpServers"], dict):
+                    data["mcpServers"] = {}
+                data["mcpServers"]["tokensafe"] = {
+                    "command": PYTHON_BIN,
+                    "args": [MCP_SERVER_PATH]
+                }
+                cls._atomic_write_json(mcp_file, data)
+
+            managed_plugin_path = info.get("managed_plugin_path")
+            if managed_plugin_path:
+                cls._symlink_dir(PROJECT_ROOT, managed_plugin_path)
+
+            installed_json = info.get("installed_json_path")
+            if installed_json:
+                os.makedirs(os.path.dirname(installed_json), exist_ok=True)
+                inst_data, err = cls._load_json_with_backup(installed_json)
+                if err or inst_data is None:
+                    inst_data = {"version": 1, "plugins": []}
+                if "plugins" not in inst_data or not isinstance(inst_data["plugins"], list):
+                    inst_data["plugins"] = []
+
+                import datetime
+                iso_now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                plugin_root = managed_plugin_path or PROJECT_ROOT
+
+                entry_found = False
+                for p in inst_data["plugins"]:
+                    if isinstance(p, dict) and p.get("id") == "tokensafe":
+                        p["root"] = plugin_root
+                        p["enabled"] = True
+                        p["updatedAt"] = iso_now
+                        p["originalSource"] = PROJECT_ROOT
+                        entry_found = True
+                        break
+                if not entry_found:
+                    inst_data["plugins"].append({
+                        "id": "tokensafe",
+                        "root": plugin_root,
+                        "enabled": True,
+                        "installedAt": iso_now,
+                        "updatedAt": iso_now,
+                        "originalSource": PROJECT_ROOT,
+                        "origin": "custom"
+                    })
+                cls._atomic_write_json(installed_json, inst_data)
+
+            if "skills_path" in info:
+                cls._symlink_skill(info["skills_path"])
+
+            if "agents_md_path" in info:
+                cls._inject_global_rule(info["agents_md_path"], UNIFIED_TOKENSAFE_RULE)
+
+            return True, f"Configured MCP, Plugin, Skill & AGENTS.md for Kimi Code"
 
         return False, "Unsupported type"
 

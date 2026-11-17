@@ -1,7 +1,7 @@
 {
   "version": "4.1.7",
   "name": "tokensafe",
-  "description": "Reduce your AI bills by up to 99% locally. Your agents read only needed code, keep prompt caches intact across turns, and keep secrets out of git.",
+  "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
   "author": {
     "name": "Oleg Savelev",
     "url": "https://github.com/NekoSin4eG"
@@ -20,8 +20,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "TokenSafe",
-    "shortDescription": "Reduce your AI bills by up to 99% locally with zero secret leaks",
-    "longDescription": "TokenSafe provides autonomous token compression, AST code skeletonization, prompt cache locking, and pre-commit secret leak prevention for AI coding agents.",
+    "shortDescription": "Stop coding agent context rot, destructive rewrites & secret leaks",
+    "longDescription": "TokenSafe is a local context firewall that strips massive lockfiles, verbose build logs, and repetitive file reads before they reach model attention. Zero-loss AST slicing, prompt cache prefix locking, and pre-commit secret guard for AI coding agents.",
     "developerName": "TokenSafe",
     "category": "Engineering",
     "capabilities": [

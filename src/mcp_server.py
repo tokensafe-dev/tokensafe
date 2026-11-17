@@ -54,7 +54,7 @@ _EPOCH_GEN = 0
 _IN_PROCESS_DELIVERED = {}
 _KNOWN_POINTER_CLIENTS = (
     "antigravity", "claude", "cursor", "windsurf", "cline", "roo",
-    "codex", "zcode", "copilot", "gemini", "zed", "vscode",
+    "codex", "zcode", "kimi", "copilot", "gemini", "zed", "vscode",
 )
 
 

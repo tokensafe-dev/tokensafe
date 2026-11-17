@@ -30,6 +30,7 @@ The installer detects which AI coding agents live on your machine, registers the
 | **Cline / Roo Code (VS Code)** | MCP registration | Stdio server |
 | **GitHub Copilot** | MCP registration | Stdio server |
 | **Z.ai Code** | MCP registration | Stdio server |
+| **Kimi Code** | Native Plugin (`kimi.plugin.json`) + MCP + Lifecycle Hooks + rules | Auto-installed via `tokensafe setup` or Kimi Code UI (Settings → Plugins) |
 | **ChatGPT** | Cloud connector, nothing to install | Uses `https://api.tokensafe.dev/mcp` |
 | **Gemini CLI** | MCP registration | Stdio server |
 
@@ -46,6 +47,7 @@ Beyond MCP, `tokensafe setup` installs native hook adapters inside the agent loo
 | **Claude Code** | `PreToolUse` (Bash) | Blocks secret-bearing and destructive commands; prompts for confirmation on TLS-verification bypasses |
 | **Cursor** | `beforeShellExecution` | Same shell guard: blocks secret leaks and destructive actions, asks on `-k` / `--insecure` |
 | **Cursor** | `beforeReadFile` | Blocks raw lockfile, bundle, and `dist/` reads that would burn ~50k context tokens |
+| **Kimi Code** | `SessionStart` / `UserPromptSubmit` / `PreToolUse` | Injects protocol directives, compacts prompts (TOCP), blocks secret leaks, destructive operations and oversized file reads |
 
 All adapters **fail open**: an internal error never stalls the host agent. Hook failures are logged locally, never surfaced as agent-blocking errors.
 

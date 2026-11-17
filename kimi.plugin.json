@@ -1,7 +1,7 @@
 {
   "name": "tokensafe",
   "version": "4.1.7",
-  "description": "Token-optimized AST slicing, graph-first navigation, and lifecycle guard for AI coding agents",
+  "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
   "homepage": "https://tokensafe.dev",
   "license": "MIT",
   "author": {
@@ -9,7 +9,7 @@
   },
   "interface": {
     "displayName": "TokenSafe",
-    "shortDescription": "Zero-loss AST slicing, secret leaks prevention & local token optimization",
+    "shortDescription": "Stop coding agent context rot, destructive rewrites & secret leaks",
     "developerName": "Oleg Savelev",
     "websiteURL": "https://tokensafe.dev"
   },
