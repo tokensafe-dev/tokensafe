@@ -563,7 +563,11 @@ class AgentInstaller:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(routes, f, indent=2)
             return True
-        except Exception:
+        except Exception as e:
+            try:
+                sys.stderr.write(f"[TokenSafe] WARN: proxy route registration failed ({label}): {e}\n")
+            except Exception:
+                pass
             return False
 
     @classmethod
