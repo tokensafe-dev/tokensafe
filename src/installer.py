@@ -940,6 +940,8 @@ WantedBy=default.target
                         p["enabled"] = True
                         p["updatedAt"] = iso_now
                         p["originalSource"] = PROJECT_ROOT
+                        p["iconUrl"] = "https://tokensafe.dev/logo.png"
+                        p["logo"] = "https://tokensafe.dev/logo.png"
                         entry_found = True
                         break
                 if not entry_found:
@@ -950,7 +952,9 @@ WantedBy=default.target
                         "installedAt": iso_now,
                         "updatedAt": iso_now,
                         "originalSource": PROJECT_ROOT,
-                        "origin": "custom"
+                        "origin": "custom",
+                        "iconUrl": "https://tokensafe.dev/logo.png",
+                        "logo": "https://tokensafe.dev/logo.png"
                     })
                 cls._atomic_write_json(installed_json, inst_data)
 

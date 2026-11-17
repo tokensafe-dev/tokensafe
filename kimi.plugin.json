@@ -4,14 +4,19 @@
   "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
   "homepage": "https://tokensafe.dev",
   "license": "MIT",
+  "logo": "https://tokensafe.dev/logo.png",
+  "icon": "https://tokensafe.dev/logo.png",
+  "iconUrl": "https://tokensafe.dev/logo.png",
   "author": {
-    "name": "Oleg Savelev"
+    "name": "TokenSafe"
   },
   "interface": {
     "displayName": "TokenSafe",
     "shortDescription": "Stop coding agent context rot, destructive rewrites & secret leaks",
-    "developerName": "Oleg Savelev",
-    "websiteURL": "https://tokensafe.dev"
+    "developerName": "TokenSafe",
+    "websiteURL": "https://tokensafe.dev",
+    "logo": "https://tokensafe.dev/logo.png",
+    "iconUrl": "https://tokensafe.dev/logo.png"
   },
   "skills": [
     "skills/token-optimizer"

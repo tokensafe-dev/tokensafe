@@ -162,6 +162,12 @@ def bump_version(target: str) -> str:
         rf'\g<1>"{new_version}"',
         optional=True,
     )
+    replace_in_file(
+        "kimi.plugin.json",
+        r'("version"\s*:\s*)"[^"]+"',
+        rf'\g<1>"{new_version}"',
+        optional=True,
+    )
 
     # 4. src/version_checker.py
     replace_in_file(
@@ -274,6 +280,7 @@ def verify_version_consistency(expected: Optional[str] = None) -> Tuple[bool, Li
     problems: List[str] = []
     optional_files = {
         ".codex-plugin/plugin.json",
+        "kimi.plugin.json",
         "src/cloud/config.py",
         "src/cloud/services.py",
         "src/cloud/stripe.py",
@@ -294,6 +301,7 @@ def verify_version_consistency(expected: Optional[str] = None) -> Tuple[bool, Li
     check("pyproject.toml", f'version = "{version}"', "python version")
     check("plugin.json", f'"version": "{version}"', "plugin version")
     check(".codex-plugin/plugin.json", f'"version": "{version}"', "codex plugin version")
+    check("kimi.plugin.json", f'"version": "{version}"', "kimi plugin version")
     check("src/version_checker.py", f'CURRENT_VERSION = "{version}"', "client version")
     check("src/cloud/config.py", f'HARDCODED_VERSION = "{version}"', "backend version")
     check("src/cloud/services.py", "HARDCODED_VERSION", "services UA constant")

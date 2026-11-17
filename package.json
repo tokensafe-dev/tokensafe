@@ -28,6 +28,7 @@
     "assets/",
     ".codex-plugin/",
     "plugin.json",
+    "kimi.plugin.json",
     "server.json",
     "README.md",
     "LICENSE"

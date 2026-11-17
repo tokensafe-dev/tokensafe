@@ -4,9 +4,10 @@
   "version": "4.1.7",
   "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
   "logo": "https://tokensafe.dev/logo.png",
+  "developerName": "TokenSafe",
   "author": {
-    "name": "Oleg Savelev",
-    "url": "https://github.com/NekoSin4eG"
+    "name": "TokenSafe",
+    "url": "https://tokensafe.dev"
   },
   "homepage": "https://tokensafe.dev",
   "repository": {
