@@ -1,7 +1,7 @@
 {
   "name": "tokensafe",
   "version": "4.2.4",
-  "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
+  "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall for Cursor, Claude Code, and autonomous agents.",
   "homepage": "https://tokensafe.dev",
   "license": "MIT",
   "logo": "https://tokensafe.dev/logo.png",
