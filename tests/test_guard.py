@@ -194,5 +194,40 @@ class TestTokenSafeGuard(unittest.TestCase):
         self.assertFalse(TokenSafeGuard.inspect_command("npm test | grep passing").blocked)
         self.assertFalse(TokenSafeGuard.inspect_command("docker ps | grep paidz").blocked)
 
+    def test_inplace_stream_edit_blocked(self):
+        # 1. Exact incident command with sed -i, numeric range and 2>/dev/null
+        res = TokenSafeGuard.inspect_command(
+            "sed -i '' '606,696d' src/.../CreateCampaignModal.tsx 2>/dev/null; sed -i '' '606,696d' /Users/.../payments.section.ts"
+        )
+        self.assertTrue(res.blocked)
+        self.assertEqual(res.check_name, "INPLACE_STREAM_EDIT")
+        self.assertIn("edit_file", res.reason)
+        self.assertIn("2>/dev/null", res.reason)
+
+        # 2. sed -i on source file with pattern replacement
+        res2 = TokenSafeGuard.inspect_command("sed -i 's/foo/bar/g' src/service.ts")
+        self.assertTrue(res2.blocked)
+        self.assertEqual(res2.check_name, "INPLACE_STREAM_EDIT")
+        self.assertIn("edit_file", res2.reason)
+
+        # 3. sed with blind line-number deletion
+        res3 = TokenSafeGuard.inspect_command("sed -i '50,100d' components/Button.tsx")
+        self.assertTrue(res3.blocked)
+        self.assertEqual(res3.check_name, "INPLACE_STREAM_EDIT")
+
+        # 4. perl -i on code file
+        res4 = TokenSafeGuard.inspect_command("perl -pi -e 's/old/new/g' lib/utils.py")
+        self.assertTrue(res4.blocked)
+        self.assertEqual(res4.check_name, "INPLACE_STREAM_EDIT")
+
+        # 5. awk -i inplace on code file
+        res5 = TokenSafeGuard.inspect_command("awk -i inplace '{print}' app/main.go")
+        self.assertTrue(res5.blocked)
+        self.assertEqual(res5.check_name, "INPLACE_STREAM_EDIT")
+
+        # 6. Safe read-only sed commands allowed
+        self.assertFalse(TokenSafeGuard.inspect_command("sed -n '1,10p' file.txt").blocked)
+        self.assertFalse(TokenSafeGuard.inspect_command("cat log.txt | sed 's/foo/bar/'").blocked)
+
 if __name__ == "__main__":
     unittest.main()

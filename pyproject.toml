@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tokensafe"
 version = "4.2.4"
-description = "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall for Cursor, Claude Code, and autonomous agents."
+description = "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall & zero-loss context optimizer for AI coding agents."
 readme = "README.md"
 authors = [
     { name = "TokenSafe Team", email = "support@tokensafe.dev" }

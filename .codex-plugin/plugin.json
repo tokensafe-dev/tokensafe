@@ -1,7 +1,7 @@
 {
   "version": "4.2.4",
   "name": "tokensafe",
-  "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall for Cursor, Claude Code, and autonomous agents.",
+  "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall & zero-loss context optimizer for AI coding agents.",
   "author": {
     "name": "TokenSafe",
     "url": "https://tokensafe.dev"

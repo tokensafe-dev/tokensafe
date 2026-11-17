@@ -42,6 +42,7 @@ TOKENSAFE_DIRECTIVES = (
     "• To inspect all exported types/interfaces: call 'tokensafe:get_api_surface(project_path)'.\n"
     "• Before large multi-step tasks: call 'tokensafe:context_budget(model=...)' to check context headroom and Quality Score (Grade S-F).\n"
     "• When context_budget reports warning/critical or Grade C/F: call 'tokensafe:compact_conversation(transcript_path=...)' to fold history before continuing.\n"
+    "• Prohibited File Edits: NEVER use 'sed -i', 'perl -i', or stream editors to modify source files; ALWAYS use 'edit_file' with exact string targets. NEVER suppress errors with '2>/dev/null'.\n"
     "• Prefer 'edit_file' over 'write_file' for existing files."
 )
 

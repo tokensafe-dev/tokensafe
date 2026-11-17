@@ -9,6 +9,7 @@ Protects local workspaces and repository integrity by intercepting dangerous ope
 6. Destructive Shell Command & Unbounded Deletion Prevention (rm -rf /)
 7. Network Data Exfiltration Prevention (piping secrets to curl/wget)
 8. Package Typosquatting & Hallucination Early Warning
+9. In-Place Stream Editing & Blind Line Deletion Prevention (sed -i, perl -i, awk -i inplace)
 """
 
 import os
@@ -315,6 +316,36 @@ class TokenSafeGuard:
                                 f"Running 'rm -rf' on root, home, parent directories, or wildcards poses catastrophic data loss risk."
                             )
                         )
+
+        # 1b. In-Place Stream Editing & Blind Line Mutation Prevention (sed -i, perl -i, awk -i inplace)
+        _NUMERIC_RANGE_RE = re.compile(r"""['"]?\s*\d+\s*(?:,\s*\d+)?\s*[ds]\b""")
+        for stage in stages:
+            cmd_tok, cmd_args = cls._stage_cmd_tokens(stage)
+            if cmd_tok in ("sed", "perl", "awk", "gawk"):
+                has_inplace = False
+                if cmd_tok == "sed":
+                    has_inplace = any(a == "-i" or a.startswith("-i") or a == "--in-place" or a.startswith("--in-place=") for a in cmd_args)
+                elif cmd_tok == "perl":
+                    has_inplace = any(a == "-i" or a.startswith("-i") or (a.startswith("-") and not a.startswith("--") and "i" in a) for a in cmd_args)
+                elif cmd_tok in ("awk", "gawk"):
+                    has_inplace = any(a in ("inplace", "--include=inplace") or a.startswith("-i") for a in cmd_args)
+
+                has_code_target = cls._has_code_target_in_args(cmd_tok, cmd_args)
+                has_numeric_range = bool(_NUMERIC_RANGE_RE.search(stage))
+
+                if (has_inplace and (has_code_target or has_numeric_range)) or (has_numeric_range and has_code_target):
+                    reason = (
+                        f"In-place stream editing of source files blocked: '{stage}'. "
+                        f"Modifying code with sed/perl/awk or blind line ranges causes line-drift and catastrophic code deletion. "
+                        f"Use the structured 'edit_file' tool with exact target matching instead."
+                    )
+                    if "2>/dev/null" in stage or "&>/dev/null" in stage:
+                        reason += " Stderr suppression ('2>/dev/null') was also detected, which hides execution failures."
+                    return GuardResult(
+                        blocked=True,
+                        check_name="INPLACE_STREAM_EDIT",
+                        reason=reason
+                    )
 
         # 2. Git Staging Protection for Sensitive Files (.env, private keys)
         for stage in stages:
