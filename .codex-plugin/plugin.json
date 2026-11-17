@@ -1,5 +1,5 @@
 {
-  "version": "4.1.9",
+  "version": "4.1.10",
   "name": "tokensafe",
   "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
   "author": {
