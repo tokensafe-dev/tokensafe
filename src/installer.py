@@ -13,6 +13,7 @@ Scans and automatically configures MCP integration for:
 import os
 import sys
 import json
+import hashlib
 import shutil
 import re
 import shlex
@@ -381,6 +382,10 @@ class AgentInstaller:
     _PLIST_LABEL = "dev.tokensafe.proxy"
     _SERVICE_NAME = "tokensafe-proxy"
     _WIRING_BACKUP = "proxy_wiring_backup.json"
+    # ZCode desktop provider registry (separate from the CLI's ~/.zcode/cli/config.json
+    # which only holds mcp/plugins): model providers live in the v2 config.
+    ZCODE_V2_CONFIG = os.path.join(HOME, ".zcode", "v2", "config.json")
+    _ZCODE_CLONE_SUFFIX = "-tokensafe"
 
     @classmethod
     def proxy_health(cls, timeout: float = 1.5) -> bool:
@@ -463,6 +468,148 @@ class AgentInstaller:
             data.pop("env", None)
         cls._atomic_write_json(config_file, data)
         return True, "Claude Code unwired (previous base URL restored)"
+
+    # ---- Multi-agent proxy wiring (one daemon, per-key upstream routes) ----
+
+    @staticmethod
+    def _proxy_routes_path() -> str:
+        try:
+            from src.paths import resolve_data_dir
+            return os.path.join(resolve_data_dir(), "proxy_routes.json")
+        except Exception:
+            return os.path.join(HOME, ".tokensafe", "data", "proxy_routes.json")
+
+    @classmethod
+    def _register_proxy_route(cls, label: str, upstream_url: str, api_key: str) -> bool:
+        """Registers a key-fingerprint -> upstream route so the proxy forwards
+        this agent's traffic to the provider the key belongs to. Only the key
+        FINGERPRINT is stored — the key itself never touches the routes file."""
+        if not api_key or not upstream_url:
+            return False
+        try:
+            fp = hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()[:16]
+            path = cls._proxy_routes_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            routes: Dict[str, Any] = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        routes = json.load(f)
+                except Exception:
+                    routes = {}
+            if not isinstance(routes, dict):
+                routes = {}
+            routes[fp] = {"upstream_url": upstream_url, "label": label, "added_at": int(time.time())}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(routes, f, indent=2)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def _wire_zcode_provider(cls) -> Tuple[bool, str]:
+        """Points the ZCode desktop app at the local proxy by ADDING a clone of the
+        currently enabled provider entry (baseURL swapped, apiKey kept). The original
+        entry is only disabled, never mutated — rollback removes the clone and
+        re-enables the original. Requires an app restart to take effect."""
+        if not cls.proxy_health():
+            return (False, "proxy is not running on 127.0.0.1:8765 — start it first")
+        if not os.path.isfile(cls.ZCODE_V2_CONFIG):
+            return (False, f"{cls.ZCODE_V2_CONFIG} not found — ZCode desktop provider registry missing")
+        data, err = cls._load_json_with_backup(cls.ZCODE_V2_CONFIG)
+        if err or not isinstance(data, dict):
+            return (False, err or f"Failed to parse {cls.ZCODE_V2_CONFIG}")
+        providers = data.get("provider")
+        if not isinstance(providers, dict):
+            return (False, "no provider entries in the ZCode v2 config")
+
+        # Fast path: a proxy clone already exists. Re-assert its flags (app updates
+        # may re-enable the original entry), but respect a deliberate provider
+        # switch (user enabled a different provider while the clone was disabled).
+        existing_clone_key = next(
+            (k for k, v in providers.items() if isinstance(v, dict) and k.endswith(cls._ZCODE_CLONE_SUFFIX)),
+            None,
+        )
+        if existing_clone_key:
+            clone = providers[existing_clone_key]
+            base_ok = str((clone.get("options") or {}).get("baseURL", "")).rstrip("/") == cls.PROXY_BASE_URL
+            origin = providers.get(existing_clone_key[: -len(cls._ZCODE_CLONE_SUFFIX)])
+            other_enabled = any(
+                k
+                for k, v in providers.items()
+                if isinstance(v, dict)
+                and v.get("enabled") is True
+                and k != existing_clone_key
+                and not k.endswith(cls._ZCODE_CLONE_SUFFIX)
+            )
+            if base_ok and clone.get("enabled") is True and isinstance(origin, dict) and origin.get("enabled") is not True and not other_enabled:
+                return (True, "ZCode already wired to the local proxy (provider clone present)")
+            # Drift after an app update OR deliberate switch — drop the clone and
+            # re-derive the wiring from whatever the user has enabled now.
+            del providers[existing_clone_key]
+
+        enabled_key = next(
+            (
+                k
+                for k, v in providers.items()
+                if isinstance(v, dict) and v.get("enabled") is True and not k.endswith(cls._ZCODE_CLONE_SUFFIX)
+            ),
+            None,
+        )
+        if not enabled_key:
+            return (False, "no enabled provider entry found in the ZCode v2 config")
+        src = providers[enabled_key]
+        opts = src.get("options") if isinstance(src.get("options"), dict) else {}
+        api_key = str(opts.get("apiKey") or "")
+        base_url = str(opts.get("baseURL") or "").rstrip("/")
+        if not api_key or not base_url:
+            return (False, f"enabled provider '{enabled_key}' lacks apiKey/baseURL")
+        clone_key = f"{enabled_key}{cls._ZCODE_CLONE_SUFFIX}"
+        # Anthropic-kind mirrors need the full messages endpoint on the route.
+        upstream = base_url
+        if str(src.get("kind") or "").lower() == "anthropic" and "/anthropic" in upstream and not upstream.endswith("/v1/messages"):
+            upstream = f"{upstream}/v1/messages"
+        route_ok = cls._register_proxy_route(f"zcode:{enabled_key}", upstream, api_key)
+        clone = json.loads(json.dumps(src))
+        clone["enabled"] = True
+        clone["name"] = f"{src.get('name') or enabled_key} — TokenSafe Proxy"
+        if not isinstance(clone.get("options"), dict):
+            clone["options"] = {}
+        clone["options"]["baseURL"] = cls.PROXY_BASE_URL
+        providers[clone_key] = clone
+        src["enabled"] = False
+        cls._atomic_write_json(cls.ZCODE_V2_CONFIG, data)
+        msg = (
+            f"ZCode wired: provider clone '{clone_key}' -> {cls.PROXY_BASE_URL} "
+            f"(original '{enabled_key}' disabled; rollback: tokensafe proxy off; "
+            f"restart the ZCode app to pick up the new provider)"
+        )
+        if not route_ok:
+            msg += " [WARN: upstream route registration failed — proxy will use its default upstream]"
+        return (True, msg)
+
+    @classmethod
+    def _unwire_zcode_provider(cls) -> Tuple[bool, str]:
+        """Removes the TokenSafe provider clone and re-enables the original entry."""
+        if not os.path.isfile(cls.ZCODE_V2_CONFIG):
+            return (True, "ZCode v2 config not found — nothing to unwire")
+        data, err = cls._load_json_with_backup(cls.ZCODE_V2_CONFIG)
+        if err or not isinstance(data, dict):
+            return (False, err or f"Failed to parse {cls.ZCODE_V2_CONFIG}")
+        providers = data.get("provider")
+        if not isinstance(providers, dict):
+            return (True, "ZCode not wired (no provider entries)")
+        clone_keys = [k for k, v in providers.items() if isinstance(v, dict) and k.endswith(cls._ZCODE_CLONE_SUFFIX)]
+        if not clone_keys:
+            return (True, "ZCode not wired (no provider clone present)")
+        for ck in clone_keys:
+            origin_key = ck[: -len(cls._ZCODE_CLONE_SUFFIX)]
+            del providers[ck]
+            origin = providers.get(origin_key)
+            if isinstance(origin, dict):
+                origin["enabled"] = True
+        cls._atomic_write_json(cls.ZCODE_V2_CONFIG, data)
+        return (True, "ZCode unwired: clone removed, original provider re-enabled (restart the app)")
 
     @classmethod
     def install_proxy_daemon(cls) -> Tuple[bool, str]:
@@ -564,11 +711,14 @@ WantedBy=default.target
         if report["health"]:
             w_ok, w_msg = cls.wire_proxy_config()
             report["wiring"] = {"ok": w_ok, "message": w_msg}
+            z_ok, z_msg = cls._wire_zcode_provider()
+            report["wiring_zcode"] = {"ok": z_ok, "message": z_msg}
         else:
             report["wiring"] = {"ok": False, "message": "proxy not reachable; agents NOT rewired"}
         report["manual_steps"] = [
             "Cursor: Settings → Models → add OpenAI-compatible model with base URL http://127.0.0.1:8765/v1",
             "Cline/Aider: set OpenAI-compatible base URL to http://127.0.0.1:8765/v1",
+            "Codex: add a model_providers entry in ~/.codex/config.toml with base_url http://127.0.0.1:8765/v1",
         ]
         return report
 
@@ -577,6 +727,8 @@ WantedBy=default.target
         report: Dict[str, Any] = {}
         u_ok, u_msg = cls.unwire_proxy_config()
         report["unwired"] = {"ok": u_ok, "message": u_msg}
+        z_ok, z_msg = cls._unwire_zcode_provider()
+        report["unwired_zcode"] = {"ok": z_ok, "message": z_msg}
         r_ok, r_msg = cls.remove_proxy_daemon()
         report["daemon"] = {"ok": r_ok, "message": r_msg}
         return report
@@ -1661,12 +1813,38 @@ WantedBy=default.target
             print(f"  {GREEN}✔{RESET} Restarted {restarted_count} running TokenSafe MCP daemon(s).")
             print(f"    {CYAN}ℹ{RESET} Antigravity/Cursor/Claude Code reconnect automatically; reload MCP in Claude Desktop/VS Code if disconnected.")
 
+        # 7. Proxy re-assertion (ultimate): TokenSafe is the default LLM route for
+        # every wire-able agent. Agent/app updates are known to rewrite their own
+        # configs and drop third-party routing, so after every update we reinstall
+        # the daemon with the FRESH engine binary and re-claim the wiring.
+        try:
+            ensure_bin = None
+            for npm_bin in upgraded_npm_bins:
+                cand_bin = os.path.join(os.path.dirname(npm_bin), "tokensafe.cmd" if os.name == "nt" else "tokensafe")
+                if os.path.isfile(cand_bin) and os.access(cand_bin, os.X_OK):
+                    ensure_bin = cand_bin
+                    break
+            if ensure_bin:
+                # Re-assert via the freshly upgraded binary so the daemon plist
+                # points at the new engine path, not this (old) process.
+                subprocess.run(
+                    [ensure_bin, "proxy", "on"],
+                    env=cls._npm_subprocess_env(ensure_bin), capture_output=True, text=True, timeout=30,
+                )
+            else:
+                cls.proxy_on()
+            if cls.proxy_health(timeout=3.0):
+                print(f"  {GREEN}✔{RESET} TokenSafe proxy daemon active — Claude Code / ZCode routed through the local optimizer.")
+            else:
+                print(f"  {YELLOW}⚠{RESET} TokenSafe proxy did not answer after update — run {BOLD}tokensafe proxy on{RESET} to retry.")
+        except Exception:
+            pass
+
         print(f"\n{BOLD}{GREEN}✅ Self-update complete!{RESET}")
         print(f"   Synchronized {synced_count} agent environments with zero-loss AST & God Nodes rules.")
         print(f"   Run {BOLD}tokensafe stats{RESET} to view token savings.")
         print(f"   {CYAN}ℹ{RESET} If your terminal still shows the old version, open a new window or run {BOLD}hash -r{RESET}.")
         cls.maybe_prompt_account_login(context="update")
-        cls.maybe_prompt_proxy_enable(context="update")
 
 def main():
     args = sys.argv[1:]

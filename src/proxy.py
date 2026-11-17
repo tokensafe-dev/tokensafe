@@ -971,7 +971,13 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
 
         # 4. Resolve Multi-Provider Upstream & API Key (needed before provider-aware cache breakpoints)
         auth_header = self.headers.get("Authorization", "")
-        custom_url = os.environ.get("TOKENSAFE_UPSTREAM_URL", "")
+        incoming_key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        if not incoming_key:
+            try:
+                incoming_key = self.headers.get("x-api-key", "") or ""
+            except Exception:
+                incoming_key = ""
+        custom_url = _apply_route_override(incoming_key, os.environ.get("TOKENSAFE_UPSTREAM_URL", ""))
 
         data_dir = resolve_data_dir()
         conf_keys = {}
@@ -1258,6 +1264,39 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
         if "googleapis.com" in custom_url:
             return custom_url, (gemini_key or generic_upstream_key)
         return custom_url, (deepseek_key or generic_upstream_key or openai_key)
+
+def _key_fingerprint(api_key: str) -> str:
+    """Stable fingerprint of a client API key (never store the key itself)."""
+    import hashlib
+    return hashlib.sha256((api_key or "").strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _load_proxy_routes() -> Dict[str, Any]:
+    """Per-agent upstream route table written by the installer
+    (fingerprint -> {upstream_url, label}). Read per request so routes
+    added by `tokensafe proxy on` are picked up without a daemon restart."""
+    try:
+        path = os.path.join(resolve_data_dir(), "proxy_routes.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+    except Exception:
+        pass
+    return {}
+
+
+def _apply_route_override(incoming_key: str, custom_url: str) -> str:
+    """Returns the upstream URL for this client key: installer-registered route
+    first (one proxy serves several agents with different providers), then the
+    TOKENSAFE_UPSTREAM_URL env, then the default provider resolution."""
+    if incoming_key:
+        route = _load_proxy_routes().get(_key_fingerprint(incoming_key))
+        if isinstance(route, dict) and route.get("upstream_url"):
+            return str(route["upstream_url"])
+    return custom_url
+
 
 def run_proxy(port: int = DEFAULT_PORT, host: str = DEFAULT_HOST):
     # Auto-initialize Knowledge Graph & API Surface on startup
