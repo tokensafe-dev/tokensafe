@@ -417,8 +417,10 @@ Rules:
     @classmethod
     def _call_gemini(cls, conf: Dict[str, Any], raw_text: str) -> Optional[str]:
         # Key goes in the x-goog-api-key header, never in the URL (URLs end up in
-        # proxy/access logs; headers do not).
-        endpoint = conf["endpoint"].format(model=conf["model"])
+        # proxy/access logs; headers do not). Legacy endpoint templates that still
+        # embed {key} are tolerated: the placeholder is stripped, never filled.
+        endpoint_template = conf["endpoint"].replace("?key={key}", "").replace("{key}", "")
+        endpoint = endpoint_template.format(model=conf["model"])
         payload = {
             "systemInstruction": {
                 "parts": [{"text": cls.SYSTEM_PROMPT}]
