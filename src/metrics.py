@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Any, Generator
 
 from src.paths import resolve_data_dir
 
-USD_PER_TOKEN = 1.50 / 1_000_000.0
+USD_PER_TOKEN = 3.00 / 1_000_000.0  # Claude Sonnet baseline ($3.00 / 1M tokens)
 
 # Event types whose `original_tokens` baseline is a counterfactual estimate rather
 # than literally metered I/O (see METRICS.md). Everything else counts as measured.
@@ -618,7 +618,7 @@ class MetricsTracker:
             "total_saved_tokens_estimated": saved_estimated,
             "overall_reduction_pct": round(overall_reduction, 1),
             "total_usd_saved": round(total_usd, 4),
-            "total_usd_saved_approx": True,  # USD is a derived estimate (~$1.5/M blended), never a bill
+            "total_usd_saved_approx": True,  # USD is a derived estimate (~$3.0/M Claude Sonnet baseline), never a bill
             "by_agent": self.get_by_agent(),
             "breakdown": combined_breakdown
         }

@@ -43,7 +43,7 @@ Both labels appear in every surface that aggregates savings:
 1. **No synthetic fallback numbers.** If a live value (e.g. npm weekly downloads) is unavailable, the API returns `null` and the UI renders `—` — never a plausible-looking constant. Zero is a value; a fabricated number is a lie.
 2. **Injection ≠ replacement.** An optimization only graduates from `estimated` to `measured` when the compact form *replaces* the original bytes in what the model actually sees.
 3. **Lifetime rollups are conservative.** `lifetime_aggregates` (local) and `ROLLUP_LIFETIME` (cloud) carry pruned event mass of mixed provenance and are always labelled `estimated`.
-4. **USD figures are derived**, not billed: `saved_tokens × $1.50 / 1M` (blended frontier-model pricing). They approximate developer cost avoided, not an invoice.
+4. **USD figures are derived**, not billed: `saved_tokens × $3.00 / 1M` (Claude Sonnet baseline). They approximate developer cost avoided, not an invoice.
 5. **Benchmarks are labelled.** See `BENCHMARK_REPORT.md`: sections are explicitly `MEASURED` (deterministic tool I/O deltas on real files) or `SIMULATED` (modeled agent behavior). We never present a simulated number as a measured one.
 
 ## Data flow

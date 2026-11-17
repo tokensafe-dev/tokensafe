@@ -99,7 +99,7 @@ class Dashboard:
 
         out.append(f"  {BOLD}Total Tokens Saved:{RESET}  {GREEN}{BOLD}{total_saved:,}{RESET} tokens")
         out.append(f"  {BOLD}Efficiency Gain:{RESET}     {YELLOW}{BOLD}{render_bar(pct)}{RESET}")
-        out.append(f"  {BOLD}Estimated Savings:{RESET}   {GREEN}≈${usd:.4f} USD{RESET} {DIM}(derived: tokens × $1.5/M — approximation, not a bill){RESET}")
+        out.append(f"  {BOLD}Estimated Savings:{RESET}   {GREEN}≈${usd:.4f} USD{RESET} {DIM}(derived: tokens × $3.0/M Claude Sonnet baseline — approximation, not a bill){RESET}")
         weekly = self.tracker.get_weekly_saved()
         out.append(f"  {BOLD}This Week:{RESET}          {GREEN}{BOLD}{weekly['saved_tokens']:,}{RESET} tokens saved across {weekly['events']:,} events (≈${weekly['usd_saved']:.2f})")
 
