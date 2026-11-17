@@ -486,6 +486,7 @@ def update_cloud_repo_version(cloud_root: str, next_v: str) -> None:
     replace_in_file("package.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root)
     replace_in_file("plugin.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root)
     replace_in_file(".codex-plugin/plugin.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
+    replace_in_file("kimi.plugin.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
     replace_in_file("pyproject.toml", r'(version\s*=\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root)
     replace_in_file("src/version_checker.py", r'(CURRENT_VERSION\s*=\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
     replace_in_file("src/mcp_server.py", r'("name"\s*:\s*"tokensafe-mcp",\s*"version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
@@ -537,7 +538,7 @@ def sync_and_push_cloud_repo(cloud_root: str, next_v: str) -> Tuple[bool, str, O
             d_src = os.path.join(cloud_root, dname)
             if os.path.isdir(d_src):
                 shutil.copytree(d_src, os.path.join(overlay_dir, dname))
-        for fname in ("package.json", "plugin.json", "pyproject.toml", "server.json", "Dockerfile.cloud"):
+        for fname in ("package.json", "plugin.json", "kimi.plugin.json", "pyproject.toml", "server.json", "Dockerfile.cloud"):
             fpath = os.path.join(cloud_root, fname)
             if os.path.exists(fpath):
                 shutil.copy2(fpath, os.path.join(overlay_dir, fname))
@@ -547,7 +548,7 @@ def sync_and_push_cloud_repo(cloud_root: str, next_v: str) -> Tuple[bool, str, O
         return False, "tokensafe-cloud tests failed", None
 
     _sh(["git", "add", "src/cloud/config.py", "Dockerfile.cloud", ".github/workflows/test.yml",
-         "package.json", "plugin.json", ".codex-plugin/plugin.json", "pyproject.toml", "server.json"], cwd=cloud_root)
+         "package.json", "plugin.json", "kimi.plugin.json", ".codex-plugin/plugin.json", "pyproject.toml", "server.json", "hooks/kimi_hook.py"], cwd=cloud_root)
     c_code, c_out = _sh(["git", "commit", "-m", f"chore(release): align cloud backend and manifests to v{next_v}"], cwd=cloud_root)
     if c_code != 0:
         return False, f"commit failed: {c_out[-300:]}", None
