@@ -371,6 +371,17 @@ def main(argv: Optional[List[str]] = None):
         latest = info.get("latest_version", CURRENT_VERSION)
         avail = info.get("update_available", False)
         print(f"  Latest version:  v{latest}")
+        try:
+            from src.license_manager import LicenseManager
+            tier, lic = LicenseManager.get_active_license()
+            if tier == "guest":
+                from src.metrics import MetricsTracker
+                quota = LicenseManager.check_quota(MetricsTracker())
+                saved = int(quota.get("monthly_saved", 0))
+                pct = min(100.0, (saved / 50_000) * 100) if 50_000 > 0 else 0.0
+                print(f"  \033[2mQuota:\033[0m           \033[33mGuest Mode\033[0m ({saved:,} / 50,000 tokens used, {pct:.1f}%) • Run '\033[36mtokensafe login\033[0m' for 500k/mo.")
+        except Exception:
+            pass
         banner = VersionChecker.get_banner()
         if banner:
             print(banner)

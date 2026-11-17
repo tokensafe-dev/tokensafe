@@ -682,7 +682,39 @@ WantedBy=default.target
                 raise EOFError("No interactive TTY")
 
             if context == "update":
-                print(f"  {CYAN}ℹ{RESET} Connect your account anytime with {BOLD}tokensafe login{RESET} to upgrade from 50k to 500k tokens/mo.\n")
+                used_tokens = 0
+                try:
+                    from src.metrics import MetricsTracker
+                    quota = LicenseManager.check_quota(MetricsTracker())
+                    used_tokens = int(quota.get("monthly_saved", 0))
+                except Exception:
+                    used_tokens = 0
+                pct = min(100.0, (used_tokens / 50_000) * 100) if 50_000 > 0 else 0.0
+                try:
+                    from src.version_checker import CURRENT_VERSION
+                    ver_label = f"v{CURRENT_VERSION}"
+                except Exception:
+                    ver_label = ""
+                header_text = f"⚡ TOKENSAFE UPDATED {ver_label} ⚡".strip()
+
+                print(f"\n{BOLD}{CYAN}╔════════════════════════════════════════════════════════════════════╗{RESET}")
+                print(f"{BOLD}{CYAN}║{header_text.center(68)}║{RESET}")
+                print(f"{BOLD}{CYAN}╚════════════════════════════════════════════════════════════════════╝{RESET}\n")
+                print(f"  • Current Status:  Local Guest (50,000 tokens/month)  [{GREEN}Active Now{RESET}]")
+                print(f"  • Monthly Usage:   {used_tokens:,} / 50,000 tokens used ({pct:.1f}%)\n")
+                print("  Connect your free account to unlock:")
+                print("  ✔ 500,000 free tokens every month (10x boost)")
+                print("  ✔ Cloud Web Dashboard & live analytics (tokensafe.dev/dashboard)")
+                print("  ✔ Full code search & AST slicing across all AI agents\n")
+
+                answer = _read_input(f"  {CYAN}→ Activate your free 500k Community license now? [{GREEN}Y{RESET}/n]: {RESET}").lower()
+                if answer in ("", "y", "yes"):
+                    from src.cli import main as cli_main
+                    cli_main(["login"])
+                else:
+                    # Strict 1-step polite decline (no nagging on update)
+                    print(f"\n  {CYAN}ℹ{RESET} Continuing in Guest Mode (50,000 tokens/mo limit).")
+                    print(f"    Run {BOLD}tokensafe login{RESET} anytime in your terminal to unlock 500,000 free tokens/mo!\n")
                 return
 
             print(f"\n{BOLD}{CYAN}╔════════════════════════════════════════════════════════════════════╗{RESET}")
