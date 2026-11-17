@@ -1,7 +1,7 @@
 {
   "name": "tokensafe",
   "mcpName": "dev.tokensafe/tokensafe",
-  "version": "4.2.3",
+  "version": "4.2.4",
   "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
   "main": "bin/tokensafe.js",
   "bin": {
