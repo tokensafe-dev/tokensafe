@@ -53,6 +53,26 @@ class TestGhostTokensAudit(unittest.TestCase):
         file_names = {gf["file"] for gf in res["ghost_files"]}
         self.assertTrue(".cursorrules" in file_names or "CLAUDE.md" in file_names)
 
+    def test_pointer_sized_cross_ide_files_not_flagged(self):
+        # Canonical AGENTS.md + pointer stubs that merely redirect to it (the dedup
+        # pattern written by the installer and repo hygiene) must not count as ghosts.
+        with open(os.path.join(self.test_dir, "AGENTS.md"), "w") as f:
+            f.write("Project instructions.\nFollow zero-loss guidelines.\n" * 20)
+
+        pointer = (
+            "# TokenSafe Project Rules (Pointer)\n\n"
+            "The canonical project rules live in AGENTS.md in this repository — "
+            "read that file now and follow it for this repo.\n"
+        )
+        for name in ("CLAUDE.md", ".cursorrules", ".clinerules"):
+            with open(os.path.join(self.test_dir, name), "w") as f:
+                f.write(pointer)
+
+        res = EnvironmentAuditor.audit_ghost_tokens(self.test_dir)
+        self.assertFalse(res["has_ghost_tokens"])
+        self.assertEqual(res["ghost_tokens_per_turn"], 0)
+        self.assertEqual(len(res["ghost_files"]), 0)
+
     def test_dead_commented_blocks_detected(self):
         # A rule file containing a large block of old disabled/commented-out rules
         dead_comment = "<!--\nOld rules from 2024:\n" + ("- Do not use feature X\n" * 30) + "-->\n"

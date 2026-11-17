@@ -17,6 +17,11 @@ EST_TOKENS_PER_TOOL = 25
 EST_TOKENS_PER_SKILL = 180
 CRITICAL_TOOL_COUNT_THRESHOLD = 40
 
+# Cross-IDE rule files at or below this size that mention AGENTS.md are pointer
+# stubs ("rules live in AGENTS.md") — the canonical dedup pattern written by the
+# installer and repo hygiene, not ghost mass.
+POINTER_RULE_MAX_TOKENS = 250
+
 # rules.md contract limits
 RULE_FILE_LIMIT_BYTES = 24000   # per rule file, after @[label](path) expansion
 RULES_BUDGET_TOKENS = 20000     # shared always-on/global rules budget
@@ -362,6 +367,11 @@ class EnvironmentAuditor:
             canonical = next((r for r in found_rules if r["name"] in ("AGENTS.md", "CLAUDE.md")), found_rules[0])
             for r in found_rules:
                 if r != canonical:
+                    if (
+                        r["tokens"] <= POINTER_RULE_MAX_TOKENS
+                        and "agents.md" in r["content"].lower()
+                    ):
+                        continue
                     ghost_files.append({
                         "file": r["rel_path"],
                         "type": "DUPLICATE_CROSS_IDE_RULE",
