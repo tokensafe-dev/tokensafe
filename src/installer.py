@@ -762,38 +762,32 @@ WantedBy=default.target
         }
 
     @classmethod
-    def maybe_prompt_proxy_enable(cls, context: str = "install") -> None:
-        """Interactive opt-in prompt shown at the end of install/update flows.
-        Strictly fail-open and non-nagging: skipped entirely for non-TTY runs
-        (scripts, CI, background updaters) and when the proxy is already wired."""
+    def _ensure_proxy_default(cls, context: str = "install", fresh_bin: Optional[str] = None) -> None:
+        """Ultimate default-on proxy assertion for install/update flows: TokenSafe
+        is the primary LLM route for every wire-able agent. Daemon is installed and
+        agents are wired WITHOUT asking (the old interactive prompt is retired).
+        Emergency brake: TOKENSAFE_PROXY_DISABLED=1 leaves everything untouched.
+        Fail-open: a proxy problem never breaks install/update itself."""
         try:
-            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            if os.environ.get("TOKENSAFE_PROXY_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+                print(f"  {DIM}ℹ TokenSafe proxy left off (TOKENSAFE_PROXY_DISABLED is set). Enable anytime: tokensafe proxy on{RESET}")
                 return
-            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes"):
-                return
-            if "unittest" in sys.modules and not os.environ.get("TOKENSAFE_TEST_PROMPT"):
-                return
-            st = cls.proxy_status()
-            if st.get("claude_code_wired"):
-                return  # already wired — never nag
-            print(f"\n  {BOLD}?{RESET} Enable the local AI proxy now? [y/N] ", end="", flush=True)
-            answer = input().strip().lower()
-            if answer not in ("y", "yes"):
-                print(f"    {DIM}Skipped — enable anytime with:{RESET} {BOLD}tokensafe proxy on{RESET}")
-                return
-            report = cls.proxy_on()
-            d, w = report["daemon"], report["wiring"]
-            print(f"    Daemon:  {'✔ ' + d['message'] if d['ok'] else '✖ ' + d['message']}")
-            print(f"    Health:  {'✔ 127.0.0.1:8765 answering' if report['health'] else '✖ not reachable — agents NOT rewired'}")
-            print(f"    Wiring:  {'✔ ' + w['message'] if w['ok'] else '✖ ' + w['message']}")
-            for step in report.get("manual_steps") or []:
-                print(f"    Manual:  {step}")
-            print(f"    Rollback: {BOLD}tokensafe proxy off{RESET}")
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
+            if fresh_bin:
+                # Re-assert via the freshly upgraded binary so the daemon plist
+                # points at the new engine path, not this (old) process.
+                subprocess.run(
+                    [fresh_bin, "proxy", "on"],
+                    env=cls._npm_subprocess_env(fresh_bin), capture_output=True, text=True, timeout=30,
+                )
+            else:
+                cls.proxy_on()
+            if cls.proxy_health(timeout=3.0):
+                print(f"  {GREEN}✔{RESET} TokenSafe proxy daemon active — Claude Code / ZCode routed through the local optimizer.")
+                print(f"    {DIM}Rollback: tokensafe proxy off{RESET}")
+            else:
+                print(f"  {YELLOW}⚠{RESET} TokenSafe proxy did not answer — run {BOLD}tokensafe proxy on{RESET} to retry.")
         except Exception:
-            return  # fail-open: a prompt problem never breaks install/update
+            pass  # fail-open: a proxy problem never breaks install/update
 
     @classmethod
     def maybe_prompt_account_login(cls, context: str = "install") -> None:
@@ -1471,7 +1465,7 @@ WantedBy=default.target
         print(f"\n\033[32m\033[1m✅ TokenSafe successfully connected to {installed_count} agent(s)!\033[0m")
         print("   Restart your IDE / Agent to start saving tokens automatically.\n")
         cls.maybe_prompt_account_login(context="install")
-        cls.maybe_prompt_proxy_enable(context="install")
+        cls._ensure_proxy_default("install")
 
     @staticmethod
     def _is_tokensafe_mcp_command(cmd: str) -> bool:
@@ -1813,32 +1807,17 @@ WantedBy=default.target
             print(f"  {GREEN}✔{RESET} Restarted {restarted_count} running TokenSafe MCP daemon(s).")
             print(f"    {CYAN}ℹ{RESET} Antigravity/Cursor/Claude Code reconnect automatically; reload MCP in Claude Desktop/VS Code if disconnected.")
 
-        # 7. Proxy re-assertion (ultimate): TokenSafe is the default LLM route for
-        # every wire-able agent. Agent/app updates are known to rewrite their own
-        # configs and drop third-party routing, so after every update we reinstall
-        # the daemon with the FRESH engine binary and re-claim the wiring.
-        try:
-            ensure_bin = None
-            for npm_bin in upgraded_npm_bins:
-                cand_bin = os.path.join(os.path.dirname(npm_bin), "tokensafe.cmd" if os.name == "nt" else "tokensafe")
-                if os.path.isfile(cand_bin) and os.access(cand_bin, os.X_OK):
-                    ensure_bin = cand_bin
-                    break
-            if ensure_bin:
-                # Re-assert via the freshly upgraded binary so the daemon plist
-                # points at the new engine path, not this (old) process.
-                subprocess.run(
-                    [ensure_bin, "proxy", "on"],
-                    env=cls._npm_subprocess_env(ensure_bin), capture_output=True, text=True, timeout=30,
-                )
-            else:
-                cls.proxy_on()
-            if cls.proxy_health(timeout=3.0):
-                print(f"  {GREEN}✔{RESET} TokenSafe proxy daemon active — Claude Code / ZCode routed through the local optimizer.")
-            else:
-                print(f"  {YELLOW}⚠{RESET} TokenSafe proxy did not answer after update — run {BOLD}tokensafe proxy on{RESET} to retry.")
-        except Exception:
-            pass
+        # 7. Proxy re-assertion (ultimate, default-on): TokenSafe is the default LLM
+        # route for every wire-able agent. Agent/app updates are known to rewrite
+        # their own configs and drop third-party routing, so after every update we
+        # reinstall the daemon with the FRESH engine binary and re-claim the wiring.
+        ensure_bin = None
+        for npm_bin in upgraded_npm_bins:
+            cand_bin = os.path.join(os.path.dirname(npm_bin), "tokensafe.cmd" if os.name == "nt" else "tokensafe")
+            if os.path.isfile(cand_bin) and os.access(cand_bin, os.X_OK):
+                ensure_bin = cand_bin
+                break
+        cls._ensure_proxy_default("update", fresh_bin=ensure_bin)
 
         print(f"\n{BOLD}{GREEN}✅ Self-update complete!{RESET}")
         print(f"   Synchronized {synced_count} agent environments with zero-loss AST & God Nodes rules.")
