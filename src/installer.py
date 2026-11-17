@@ -228,7 +228,7 @@ class AgentInstaller:
         Codex has no lifecycle hooks (MCP + AGENTS.md remain the integration)."""
         if agent_key == "codex":
             return False, "Codex CLI has no lifecycle hooks — MCP + AGENTS.md stay the integration"
-        if agent_key not in ("claude_code", "cursor", "kimi"):
+        if agent_key not in ("claude_code", "cursor", "kimi", "zcode"):
             return False, "hooks not applicable for this agent"
 
         claude_cmd = cls._tokensafe_hook_command("claude_code_hook.py")
@@ -330,6 +330,66 @@ class AgentInstaller:
             data["hooks"] = hooks
             cls._atomic_write_json(config_file, data)
             return True, "hooks registered (SessionStart + UserPromptSubmit + PreToolUse guard/write + PostToolUse stdout compact)"
+
+        if agent_key == "zcode":
+            config_file = os.path.join(HOME, ".zcode", "cli", "config.json")
+            data, err = cls._load_json_with_backup(config_file)
+            if err or data is None:
+                return False, err or f"Failed to parse {config_file}"
+            # ZCode configuration-file hooks are disabled by default and only run
+            # with enabled=true. The bundled hook scripts already speak the ZCode
+            # contract (injectSteps/systemMessage outputs + decision/reason), so
+            # registration is pure plumbing — no adapter shim needed.
+            hooks_block = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
+            hooks_block["enabled"] = True
+            events = hooks_block.get("events") if isinstance(hooks_block.get("events"), dict) else {}
+
+            def _zcode_entry(script_name: str) -> dict:
+                return {"hooks": [{
+                    "type": "process",
+                    "command": PYTHON_BIN,
+                    "args": [os.path.join(PROJECT_ROOT, "hooks", script_name)],
+                    "timeoutMs": 10000,
+                }]}
+
+            def _sync_zcode_event(event_name: str, script_name: str) -> bool:
+                entry = _zcode_entry(script_name)
+                expected = os.path.join(PROJECT_ROOT, "hooks", script_name)
+                entries = events.get(event_name)
+                if not isinstance(entries, list):
+                    events[event_name] = [entry]
+                    return True
+                seen = False
+                dirty = False
+                for e in entries:
+                    if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+                        for h in e["hooks"]:
+                            args = h.get("args") if isinstance(h, dict) else None
+                            if not isinstance(args, list):
+                                continue
+                            if any(isinstance(a, str) and a.endswith(script_name) for a in args):
+                                seen = True
+                                if args[-1] != expected:
+                                    args[-1] = expected
+                                    dirty = True
+                if not seen:
+                    entries.append(entry)
+                    dirty = True
+                return dirty
+
+            changed = any([
+                _sync_zcode_event("SessionStart", "session_start.py"),
+                _sync_zcode_event("UserPromptSubmit", "pre_invocation.py"),
+                _sync_zcode_event("PreToolUse", "pre_tool_use.py"),
+                _sync_zcode_event("PostToolUse", "post_tool_use.py"),
+                _sync_zcode_event("Stop", "stop_hook.py"),
+            ])
+            if changed:
+                hooks_block["events"] = events
+                data["hooks"] = hooks_block
+                cls._atomic_write_json(config_file, data)
+                return True, "ZCode hooks registered in ~/.zcode/cli/config.json (SessionStart + UserPromptSubmit + PreToolUse guard + PostToolUse compact + Stop) — restart the app to take effect"
+            return True, "TokenSafe ZCode hooks already registered"
 
         # cursor
         config_file = os.path.join(HOME, ".cursor", "hooks.json")

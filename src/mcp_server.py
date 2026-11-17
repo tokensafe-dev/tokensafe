@@ -1864,6 +1864,45 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
     return _fallback_error(name, f"unknown tool '{name}'")
 
 
+def _redact_result_secrets(result):
+    """Egress guard at the MCP boundary: strips recognized secret patterns from
+    tool results BEFORE they enter any agent's context. Covers every MCP-connected
+    agent (CC, Cursor, Cline, Windsurf, Copilot, Kimi, Codex, Antigravity, ZCode)
+    even when the proxy is not on the path. Same redactor the proxy pipeline uses.
+    Fail-open: any internal problem returns the result untouched."""
+    try:
+        if result is None:
+            return result
+        from src.secret_redactor import SecretRedactor
+    except Exception:
+        return result
+    total = 0
+
+    def _walk(node):
+        nonlocal total
+        if isinstance(node, str):
+            red, n, _ = SecretRedactor.redact_text(node)
+            if n:
+                total += n
+            return red
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        return node
+
+    try:
+        redacted = _walk(result)
+    except Exception:
+        return result
+    if total:
+        try:
+            sys.stderr.write(f"[TokenSafe] MCP egress redaction: {total} secret occurrence(s) stripped from tool result\n")
+        except Exception:
+            pass
+    return redacted
+
+
 def _execute_with_timeout(tool_name: str, tool_args: dict, timeout: float = MCP_TOOL_TIMEOUT) -> dict:
     """Runs handle_tool_call inside a daemon thread with hard timeout so stdio MCP never freezes."""
     box = {"result": None, "error": None}
@@ -1977,9 +2016,9 @@ def run_mcp_server():
                 from src.json_repair import parse_tool_arguments
                 tool_args = parse_tool_arguments(raw_tool_args) or {}
             try:
-                response["result"] = _execute_with_timeout(tool_name, tool_args)
+                response["result"] = _redact_result_secrets(_execute_with_timeout(tool_name, tool_args))
             except Exception as e:
-                response["result"] = _fallback_error(tool_name, f"{type(e).__name__}: {str(e)}")
+                response["result"] = _redact_result_secrets(_fallback_error(tool_name, f"{type(e).__name__}: {str(e)}"))
             finally:
                 try:
                     from src.telemetry_sync import TelemetrySync
