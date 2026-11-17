@@ -196,7 +196,11 @@ def _translate_openai_payload_to_anthropic(payload: Dict[str, Any]) -> Dict[str,
             text = tc_content if isinstance(tc_content, str) else json.dumps(tc_content, ensure_ascii=False)
             out_messages.append({
                 "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": msg.get("tool_call_id") or "toolu_call", "content": [{"type": "text", "text": text}]}],
+                # tool_result.content goes out as a plain STRING: the Anthropic
+                # API accepts both shapes, but the Z.ai /api/anthropic mirror
+                # (code 1214 / "Input should be a valid dictionary") rejects
+                # the block-list form — proven by live probes 2026-11-18.
+                "content": [{"type": "tool_result", "tool_use_id": msg.get("tool_call_id") or "toolu_call", "content": text}],
             })
         elif role == "user":
             out_messages.append({"role": "user", "content": _collapse_plain_text(_blocks_from_content(msg.get("content"), "user")) or [{"type": "text", "text": ""}]})
