@@ -1221,6 +1221,10 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
         url = (upstream_url or "").lower()
         if "anthropic.com" in url:
             return "anthropic"
+        # Anthropic-compatible mirrors (e.g. Z.ai /api/anthropic[/v1/messages]
+        # coding-plan endpoint): same wire dialect, client x-api-key is forwarded as-is.
+        if "/anthropic" in url:
+            return "anthropic"
         if "openai.com" in url:
             return "openai"
         if "googleapis.com" in url or "generativelanguage" in url:
