@@ -25,6 +25,9 @@ class UniversalDistiller:
     # distill() runs synchronously inside the PreInvocation lifecycle hook, so a
     # dead/slow provider must not add seconds of latency to every single prompt.
     FAILURE_COOLDOWN_SECONDS = 180.0
+    # Explicit paid set: 'guest' (offline 50k) and 'free' (community 500k) are both
+    # hard-off for ALL distillation — managed cloud AND BYOK env keys.
+    PAID_TIERS = ("solo", "team", "enterprise")
 
     @classmethod
     def _failure_state_path(cls) -> str:
@@ -58,6 +61,53 @@ class UniversalDistiller:
                 os.remove(path)
         except Exception:
             pass
+
+    @classmethod
+    def _read_config(cls) -> Dict[str, Any]:
+        config_path = os.path.join(resolve_data_dir(), "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    @classmethod
+    def write_config_value(cls, key: str, value: Any) -> bool:
+        """Atomic read-modify-write of a single data/config.json key."""
+        try:
+            config_path = os.path.join(resolve_data_dir(), "config.json")
+            data = cls._read_config()
+            data[key] = value
+            os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
+            tmp = config_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=1)
+            os.replace(tmp, config_path)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def cloud_booster_enabled(cls, tier: str = "") -> Tuple[bool, bool]:
+        """Returns (enabled, explicitly_set) for the Cloud Prompt Booster.
+
+        - guest / free tiers: always (False, True) — hard-off, env keys ignored.
+        - paid tiers: env TOKENSAFE_CLOUD_DISTILL wins, then config.json
+          `cloud_distill`; an UNSET flag defaults to ON (legacy behavior — the
+          CLI surfaces a disclosure so nobody's behavior changes silently).
+        """
+        if not tier:
+            tier, _ = LicenseManager.get_active_license()
+        if tier not in cls.PAID_TIERS:
+            return (False, True)
+        env = os.environ.get("TOKENSAFE_CLOUD_DISTILL", "").strip().lower()
+        if env:
+            return (env in ("1", "true", "yes", "on"), True)
+        cfg_value = cls._read_config().get("cloud_distill")
+        if cfg_value is None:
+            return (True, False)
+        return (bool(cfg_value), True)
 
     SYSTEM_PROMPT = """You are a multilingual semantic code intent compiler for the Token-Optimized Communication Protocol (TOCP). Your task is to compress verbose, conversational developer requests into an ultra-dense S-Expression with this exact syntax:
 (ACTION [filepath] [symbol] [[traits...]] ["minimal_intent"])
@@ -99,7 +149,7 @@ Rules:
             "env_key": "GEMINI_API_KEY",
             "config_key": "gemini_api_key",
             "default_model": "gemini-flash-lite-latest",
-            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         }
     }
 
@@ -110,9 +160,15 @@ Rules:
 
     @classmethod
     def _call_cloud_distill(cls, raw_text: str, lic_key: str, mode: str = "") -> Optional[str]:
+        from src.secret_redactor import SecretRedactor
+        from src.egress_counter import increment as _egress_increment
+        from src.version_checker import CURRENT_VERSION
         cloud_url = os.environ.get("TOKENSAFE_CLOUD_URL", "https://api.tokensafe.dev").rstrip("/")
         endpoint = f"{cloud_url}/api/distill"
-        payload = {"prompt": raw_text.strip()}
+        # Egress hygiene: scrub secrets from whatever leaves this machine. Idempotent
+        # with the compactor's own redaction pass (anchors are not re-matched).
+        scrubbed_text, _, _ = SecretRedactor.redact_text(raw_text)
+        payload = {"prompt": scrubbed_text.strip()}
         if mode:
             payload["mode"] = mode
         timeout = cls.HISTORY_DISTILL_TIMEOUT if mode == "history" else cls.DEFAULT_TIMEOUT
@@ -122,10 +178,11 @@ Rules:
             headers={
                 "Authorization": f"Bearer {lic_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "TokenSafe/1.3.7"
+                "User-Agent": f"TokenSafe/{CURRENT_VERSION}"
             }
         )
         try:
+            _egress_increment("booster")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
@@ -155,7 +212,7 @@ Rules:
         if cached:
             return cached
         tier, _ = LicenseManager.get_active_license()
-        if tier == "free":
+        if tier not in cls.PAID_TIERS:
             return None
         providers = cls.get_configured_providers()
         if "cloud" not in providers:
@@ -173,16 +230,24 @@ Rules:
 
     @classmethod
     def get_configured_providers(cls) -> Dict[str, Dict[str, Any]]:
-        """Scans environment and data/config.json for configured LLM distillation keys."""
+        """Scans environment and data/config.json for configured LLM distillation keys.
+
+        Cloud Prompt Booster (managed cloud) requires a PAID tier — guest and
+        community-free are hard-off — AND the booster consent flag (config.json
+        `cloud_distill` or env TOKENSAFE_CLOUD_DISTILL); unset defaults to ON
+        for paid tiers (legacy behavior, disclosed by the CLI)."""
         tier, _ = LicenseManager.get_active_license()
-        if tier == "free":
+        if tier not in cls.PAID_TIERS:
             return {}
 
         if not cls.is_self_hosted():
+            enabled, _explicitly_set = cls.cloud_booster_enabled(tier)
+            if not enabled:
+                return {}
             return {
                 "cloud": {
                     "provider": "cloud",
-                    "name": "TokenSafe Cloud Distiller",
+                    "name": "Cloud Prompt Booster",
                     "model": "gemini-flash-lite-latest",
                     "status": "managed"
                 }
@@ -236,10 +301,10 @@ Rules:
         """
         Distills raw conversational text into an S-Expression using the best available provider.
         Priority: Managed Cloud (license-auth, zero keys) -> Explicit preferred -> Gemini -> OpenAI -> DeepSeek.
-        Requires active TokenSafe Solo or Team subscription.
+        Requires an active paid subscription (solo/team/enterprise; guest & free are hard-off).
         """
         tier, _ = LicenseManager.get_active_license()
-        if tier == "free":
+        if tier not in cls.PAID_TIERS:
             return None
 
         if not raw_text or len(raw_text.strip()) < 10:
@@ -351,7 +416,9 @@ Rules:
 
     @classmethod
     def _call_gemini(cls, conf: Dict[str, Any], raw_text: str) -> Optional[str]:
-        endpoint = conf["endpoint"].format(model=conf["model"], key=conf["api_key"])
+        # Key goes in the x-goog-api-key header, never in the URL (URLs end up in
+        # proxy/access logs; headers do not).
+        endpoint = conf["endpoint"].format(model=conf["model"])
         payload = {
             "systemInstruction": {
                 "parts": [{"text": cls.SYSTEM_PROMPT}]
@@ -370,7 +437,8 @@ Rules:
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "TokenSafe/1.0"
+                "User-Agent": "TokenSafe/1.0",
+                "x-goog-api-key": conf["api_key"]
             }
         )
 

@@ -384,6 +384,8 @@ class TelemetrySync:
 
                     req = urllib.request.Request(target_url, data=body_bytes, headers=headers, method="POST")
                     try:
+                        from src.egress_counter import increment as _egress_increment
+                        _egress_increment("telemetry")
                         with urllib.request.urlopen(req, timeout=timeout) as resp:
                             if resp.status == 200:
                                 try:

@@ -448,11 +448,12 @@ class PromptCompactor:
             }
 
         # Tier 2: Managed Cloud Intent Distiller (BYOK Gemini / OpenAI / DeepSeek for self-hosted)
-        # Exclusive to TokenSafe Solo, Team, and Enterprise (or active trials)
+        # Exclusive to paid tiers (solo/team/enterprise); guest and community-free
+        # are hard-off — explicit paid set, not a != "free" string check.
         min_distill = min_distill_tokens if min_distill_tokens is not None else cls._get_min_distill_tokens()
         if enable_distill and original_tokens >= min_distill:
             active_tier, _ = LicenseManager.get_active_license()
-            if active_tier != "free":
+            if active_tier in UniversalDistiller.PAID_TIERS:
                 distilled = UniversalDistiller.distill(raw_text)
                 if distilled:
                     dist_tokens = count_tokens(distilled)

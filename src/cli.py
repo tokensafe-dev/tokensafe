@@ -118,11 +118,52 @@ def _print_help():
     print("  update | upgrade               Self-update npm/PyPI package and re-sync agents")
     print("  check-update                   Check for a newer published version")
     print("  activate / license             License activation and status")
+    print("  booster on|off|status          Cloud Prompt Booster control (paid tiers)")
     print("  login / auth                   Authorize this device via browser login")
     print("  logout / unlink                Unlink this device and remove local license")
     print("  sync                           Sync telemetry with the cloud backend")
     print("  providers / proxy / mcp        Providers info / proxy server / MCP stdio server")
     print("  --version                      Print version and exit")
+
+
+def _booster_consent_prompt() -> None:
+    """One-time Cloud Prompt Booster consent after a PAID license activation.
+
+    Asks [Y/n] with an honest data-flow disclosure (default Y). Non-TTY runs
+    keep the legacy default (on) and print a disable hint instead of blocking.
+    Users who already chose (config/env) are never re-asked. Fail-open: a
+    broken TTY never blocks activation.
+    """
+    try:
+        from src.distiller import UniversalDistiller
+        if UniversalDistiller.is_self_hosted():
+            return  # BYOK self-hosted: own keys are their own explicit opt-in
+        _enabled, explicitly_set = UniversalDistiller.cloud_booster_enabled()
+        if explicitly_set:
+            return
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        if interactive:
+            print("\n  \033[1m⚡ Cloud Prompt Booster\033[0m — distills long prompts (100+ tokens) cloud-side,")
+            print("  ~5x deeper compression than the local engine (measured median 71% vs 14%).")
+            print("  \033[2mWhat leaves this machine:\033[0m the prompt text (may include code snippets or stack")
+            print("  \033[2mtraces) with secrets automatically scrubbed. Processed transiently via TokenSafe")
+            print("  \033[2mCloud (Google Gemini Flash-Lite); raw text is never stored and not used for training.\033[0m")
+            try:
+                answer = input("  Enable Cloud Prompt Booster? [Y/n]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+                print()
+            chosen = answer in ("", "y", "yes")
+        else:
+            chosen = True  # non-interactive: keep the legacy default + hint
+        UniversalDistiller.write_config_value("cloud_distill", chosen)
+        if chosen:
+            suffix = "" if interactive else "  \033[2m(default — run \033[36mtokensafe booster off\033[0m \033[2mto disable)\033[0m"
+            print(f"  \033[32m✔ Cloud Prompt Booster enabled.\033[0m{suffix}")
+        else:
+            print("  \033[33m○ Cloud Prompt Booster off — all prompt processing stays 100% local.\033[0m")
+    except Exception:
+        pass
 
 
 def main(argv: Optional[List[str]] = None):
@@ -204,6 +245,22 @@ def main(argv: Optional[List[str]] = None):
             print("  Upgrade:   https://tokensafe.dev/signup ($9/mo Solo · 7-Day Team Trial)")
         else:
             print(f"  Tier:      \033[32m{tier.upper()}\033[0m (Unlimited)")
+            try:
+                from src.distiller import UniversalDistiller
+                enabled, explicitly_set = UniversalDistiller.cloud_booster_enabled(tier)
+                state = "\033[32mon\033[0m" if enabled else "\033[33moff\033[0m"
+                if not explicitly_set:
+                    state += " \033[2m(active by default — choose: \033[36mtokensafe booster on|off\033[0m\033[2m)\033[0m"
+                print(f"  Booster:   Cloud Prompt Booster {state}")
+            except Exception:
+                pass
+        # Verifiable egress transparency: what left this machine today
+        try:
+            from src.egress_counter import today_counts
+            _eg = today_counts()
+            print(f"  Egress:    today — {_eg['booster']} booster · {_eg['telemetry']} telemetry outbound requests")
+        except Exception:
+            pass
         # Cloud heartbeat (non-blocking; keeps the machine visible server-side)
         try:
             TelemetrySync.sync_background()
@@ -842,6 +899,10 @@ def main(argv: Optional[List[str]] = None):
                 print("  \033[32m✔ Community Edition license activated (500,000 free tokens/month).\033[0m")
             print(f"  \033[36m✔ Web dashboard unlocked at:\033[0m https://tokensafe.dev/dashboard\n")
 
+            # Cloud Prompt Booster consent (paid tiers only; already-chosen users skipped)
+            if detected_tier in ("solo", "team", "enterprise"):
+                _booster_consent_prompt()
+
             # Sync local token metrics
             try:
                 from src.telemetry_sync import TelemetrySync
@@ -901,6 +962,13 @@ def main(argv: Optional[List[str]] = None):
         ok, msg = LicenseManager.save_license(key)
         if ok:
             print(f"\n\033[32m\033[1m✔ {msg}\033[0m")
+            # Cloud Prompt Booster consent (paid tiers only; already-chosen users skipped)
+            try:
+                valid, lic_meta, _ = LicenseManager.validate_license(key)
+                if valid and str(lic_meta.get("tier", "")).lower() in ("solo", "team", "enterprise"):
+                    _booster_consent_prompt()
+            except Exception:
+                pass
             # Automatically report version and seat activation to cloud
             try:
                 from src.version_checker import VersionChecker
@@ -970,22 +1038,66 @@ def main(argv: Optional[List[str]] = None):
                 print(f"  Expires:    Never (Lifetime)")
         print()
 
+    elif command in ("booster",):
+        from src.license_manager import LicenseManager
+        from src.distiller import UniversalDistiller
+        from src.egress_counter import today_counts
+        sub = args[1].strip().lower() if len(args) > 1 else "status"
+        tier, _ = LicenseManager.get_active_license()
+        print("\n\033[1m\033[36m⚡ CLOUD PROMPT BOOSTER ⚡\033[0m\n")
+        if tier not in UniversalDistiller.PAID_TIERS:
+            print("  Cloud Prompt Booster distills long prompts (100+ tokens) cloud-side with")
+            print("  ~5x deeper compression than the local engine. Available on Solo, Team, and Enterprise.")
+            print("  Guest and Community tiers keep all prompt processing 100% local by design.\n")
+        elif sub in ("on", "enable", "off", "disable"):
+            value = sub in ("on", "enable")
+            if UniversalDistiller.write_config_value("cloud_distill", value):
+                if value:
+                    print("  \033[32m✔ Booster enabled\033[0m — long prompts are distilled via TokenSafe Cloud")
+                    print("    (secrets scrubbed before egress; raw text never stored; not used for training).")
+                else:
+                    print("  \033[33m○ Booster disabled\033[0m — all prompt processing stays 100% local.")
+            else:
+                print("  \033[31m✖ Failed to write data/config.json — check permissions.\033[0m")
+            print()
+        else:
+            enabled, explicitly_set = UniversalDistiller.cloud_booster_enabled(tier)
+            eg = today_counts()
+            state = "\033[32mon\033[0m" if enabled else "\033[33moff\033[0m"
+            if not explicitly_set:
+                state += " \033[2m(active by default — make an explicit choice below)\033[0m"
+            print(f"  Status:    {state}")
+            print(f"  Egress:    today — {eg['booster']} booster · {eg['telemetry']} telemetry outbound requests")
+            print("  What it sends when on: prompt text (code snippets/stack traces possible) with secrets")
+            print("  scrubbed → TokenSafe Cloud → Google Gemini Flash-Lite. Transient processing;")
+            print("  raw text never stored, not used for training.")
+            print("  Toggle:    \033[36mtokensafe booster on|off\033[0m\n")
+
     elif command in ("providers", "models", "keys"):
         from src.license_manager import LicenseManager
         from src.distiller import UniversalDistiller
         tier, _ = LicenseManager.get_active_license()
         print("\n\033[1m\033[36m⚡ TOKENSAFE LLM DISTILLATION PROVIDERS ⚡\033[0m\n")
-        if tier == "free":
-            print("  \033[33mTier: Free Community Edition\033[0m")
-            print("  Managed Cloud Distillation (zero API keys) is reserved for Solo, Team, and Enterprise tiers.")
-            print("  Free Community Edition operates with the zero-latency, zero-cost Local Regex Compactor.\n")
-            print("  \033[1mTo unlock Cloud Distillation:\033[0m")
+        if tier not in UniversalDistiller.PAID_TIERS:
+            tier_label = "Guest (Offline)" if tier == "guest" else "Free Community Edition"
+            print(f"  \033[33mTier: {tier_label}\033[0m")
+            print("  Cloud Prompt Booster (managed distillation, zero API keys) is reserved for Solo, Team, and Enterprise tiers.")
+            print("  Guest and Community Editions operate with the zero-latency, zero-cost Local Regex Compactor.\n")
+            print("  \033[1mTo unlock the Cloud Prompt Booster:\033[0m")
             print("  1. Start 7-day free trial or upgrade at: https://tokensafe.dev")
             print("  2. Activate your key: \033[32mtokensafe activate <KEY>\033[0m\n")
         elif not UniversalDistiller.is_self_hosted():
-            print(f"  \033[32m✔\033[0m \033[1mTokenSafe Cloud Distiller\033[0m [Active: gemini-flash-lite-latest via Managed Cloud]")
-            print("    Zero API keys required — managed centrally by your TokenSafe subscription.")
-            print("    Shared Team Cache & sub-millisecond cloud cache active.\n")
+            enabled, explicitly_set = UniversalDistiller.cloud_booster_enabled(tier)
+            if enabled:
+                print(f"  \033[32m✔\033[0m \033[1mCloud Prompt Booster\033[0m [Active: gemini-flash-lite-latest via TokenSafe Cloud]")
+                print("    Long prompts (100+ tokens) are distilled cloud-side. Secrets are scrubbed before")
+                print("    egress; raw text is never stored and is not used for training. Zero API keys required.")
+                if not explicitly_set:
+                    print("    \033[2mActive by default for your plan — make an explicit choice: tokensafe booster on|off\033[0m")
+            else:
+                print("  \033[33m○ Cloud Prompt Booster: off\033[0m — long prompts stay on the local regex compactor.")
+                print("    Enable anytime: \033[36mtokensafe booster on\033[0m")
+            print()
             print("  \033[2m💡 Tip: To run self-hosted with custom BYOK keys in Docker, export TOKENSAFE_SELF_HOSTED=1.\033[0m\n")
         else:
             print("  \033[36mMode: Self-Hosted Docker (Custom BYOK Keys)\033[0m\n")
