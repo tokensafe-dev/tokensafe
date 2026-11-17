@@ -432,7 +432,9 @@ def main(argv: Optional[List[str]] = None):
             from src.license_manager import LicenseManager
             tier, lic = LicenseManager.get_active_license()
             if tier == "guest":
-                from src.metrics import MetricsTracker
+                # NOTE: no function-local MetricsTracker import here — it would
+                # shadow the module-level import (L20) for the WHOLE main()
+                # and crash `tokensafe status` with UnboundLocalError.
                 quota = LicenseManager.check_quota(MetricsTracker())
                 saved = int(quota.get("monthly_saved", 0))
                 pct = min(100.0, (saved / 50_000) * 100) if 50_000 > 0 else 0.0
