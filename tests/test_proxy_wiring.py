@@ -144,6 +144,65 @@ class TestInstallerZcodeWiring(unittest.TestCase):
         self.assertTrue(ok2)
         self.assertIn("not wired", msg2)
 
+    def test_unwire_respects_deliberate_provider_switch(self):
+        """After a deliberate switch to another provider, `proxy off` must NOT
+        re-enable the original — unwiring must never leave two enabled providers."""
+        self.assertTrue(AgentInstaller._wire_zcode_provider()[0])
+        data = self._load()
+        data["provider"]["builtin:bigmodel"]["enabled"] = True  # user's deliberate switch
+        with open(self.v2_config, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        ok, msg = AgentInstaller._unwire_zcode_provider()
+        self.assertTrue(ok, msg)
+        providers = self._load()["provider"]
+        self.assertNotIn("builtin:zai-coding-plan-tokensafe", providers)
+        self.assertFalse(providers["builtin:zai-coding-plan"]["enabled"])  # stays off
+        self.assertTrue(providers["builtin:bigmodel"]["enabled"])  # user's choice preserved
+        enabled = [k for k, v in providers.items() if isinstance(v, dict) and v.get("enabled") is True]
+        self.assertEqual(enabled, ["builtin:bigmodel"])
+
+    def test_wire_appends_messages_endpoint_for_bare_anthropic_host(self):
+        """kind=anthropic with a bare host baseURL (api.anthropic.com) must get
+        the full /v1/messages route — posting to "/" would 404 upstream."""
+        data = self._load()
+        data["provider"]["builtin:zai-coding-plan"]["options"]["baseURL"] = "https://api.anthropic.com"
+        with open(self.v2_config, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        ok, msg = AgentInstaller._wire_zcode_provider()
+        self.assertTrue(ok, msg)
+        routes = json.load(open(self.routes_path))
+        (route,) = routes.values()
+        self.assertEqual(route["upstream_url"], "https://api.anthropic.com/v1/messages")
+
+    def test_wire_leaves_custom_anthropic_paths_alone(self):
+        """A baseURL with a non-/anthropic custom path must not get a guessy append."""
+        data = self._load()
+        data["provider"]["builtin:zai-coding-plan"]["options"]["baseURL"] = "https://gateway.example.com/v1"
+        with open(self.v2_config, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        ok, msg = AgentInstaller._wire_zcode_provider()
+        self.assertTrue(ok, msg)
+        routes = json.load(open(self.routes_path))
+        (route,) = routes.values()
+        self.assertEqual(route["upstream_url"], "https://gateway.example.com/v1")
+
+
+class TestDetectProviderSegmentRule(unittest.TestCase):
+    def test_anthropic_mirror_path_matches(self):
+        detect = proxy_mod.TokenSafeProxyHandler._detect_provider
+        self.assertEqual(detect("https://api.z.ai/api/anthropic/v1/messages"), "anthropic")
+        self.assertEqual(detect("https://relay.example.com/anthropic"), "anthropic")
+        self.assertEqual(detect("https://api.anthropic.com/v1/messages"), "anthropic")
+
+    def test_anthropic_substring_does_not_match(self):
+        detect = proxy_mod.TokenSafeProxyHandler._detect_provider
+        self.assertNotEqual(detect("https://gw.example.com/my-anthropic-proxy/v1/chat/completions"), "anthropic")
+        self.assertEqual(detect("https://gw.example.com/my-anthropic-proxy/v1/chat/completions"), "generic")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 
 if __name__ == "__main__":
     unittest.main()

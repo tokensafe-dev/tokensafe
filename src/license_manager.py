@@ -482,7 +482,11 @@ class LicenseManager:
         """
         Retrieves active license from env or persistent license.json files.
         Falls back to 'guest' tier (50,000 tokens/month) if no license is present.
-        Legacy anonymous licenses (email == 'community@tokensafe.dev') are mapped to 'guest'.
+        Legacy anonymous licenses (email == 'community@tokensafe.dev') are mapped to 'guest',
+        keeping the server-SIGNED monthly quota (grandfathered machines stay at 500k; fresh
+        machines are signed at the 50k guest quota). Keys issued before the signed-quota
+        field existed carry no quota and default to the legacy community 500k — they are
+        exactly the pre-cutoff (grandfathered) population.
         Verified personal licenses (tier == 'free' with user email) get 'free' (500,000 tokens/month).
         """
         resolved, _ = cls._resolve_active_license_record()
@@ -493,7 +497,13 @@ class LicenseManager:
             if tier == "free" and email == "community@tokensafe.dev":
                 guest_payload = dict(payload)
                 guest_payload["tier"] = "guest"
-                guest_payload["max_tokens_monthly"] = 50_000
+                try:
+                    signed_quota = int(guest_payload.get("max_tokens_monthly") or 0)
+                except (TypeError, ValueError):
+                    signed_quota = 0
+                if signed_quota <= 0:
+                    signed_quota = cls.TIERS["free"]["max_tokens_monthly"] or 500_000
+                guest_payload["max_tokens_monthly"] = signed_quota
                 guest_payload["is_legacy_community"] = True
                 return "guest", guest_payload
             return tier, payload
@@ -639,10 +649,19 @@ class LicenseManager:
         tier_cfg = cls.TIERS.get(tier, cls.TIERS["guest"] if tier == "guest" else cls.TIERS["free"])
         max_tokens = tier_cfg.get("max_tokens_monthly")
 
-        # Server-issued quota (community license payload) overrides embedded default for verified accounts.
-        # Guest tier is strictly capped to the guest limit (50,000).
+        # Server-issued quota (community license payload) overrides embedded defaults.
+        # Anonymous/guest tier honors the SIGNED quota: fresh machines 50k, grandfathered
+        # machines keep their 500k community quota (variant D). Unsigned/absent quota
+        # falls back to the strict guest limit (50,000).
         if tier == "guest":
             max_tokens = 50_000
+            if isinstance(payload, dict):
+                try:
+                    signed_quota = int(payload.get("max_tokens_monthly") or 0)
+                    if signed_quota > 0:
+                        max_tokens = signed_quota
+                except (TypeError, ValueError):
+                    pass
         elif max_tokens is not None and isinstance(payload, dict):
             try:
                 server_quota = int(payload.get("max_tokens_monthly") or 0)

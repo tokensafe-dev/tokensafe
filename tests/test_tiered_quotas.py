@@ -38,19 +38,56 @@ class TestTieredQuotas(unittest.TestCase):
         self.assertEqual(payload["tier"], "guest")
         self.assertEqual(payload["max_tokens_monthly"], 50000)
 
-    def test_legacy_anonymous_community_key_mapped_to_guest(self):
-        """Legacy auto-issued key with community@tokensafe.dev is mapped to guest tier (50k limit)."""
-        legacy_payload = {
+    def test_legacy_anonymous_community_key_honors_signed_quota(self):
+        """Anonymous community key keeps the server-SIGNED quota (variant-D grandfathering keeps 500k)."""
+        grandfathered_payload = {
             "tier": "free",
             "email": "community@tokensafe.dev",
             "max_tokens_monthly": 500000
         }
-        with mock.patch.object(LicenseManager, "_resolve_active_license_record", return_value=(("key", legacy_payload), "key")):
+        with mock.patch.object(LicenseManager, "_resolve_active_license_record", return_value=(("key", grandfathered_payload), "key")):
             tier, payload = LicenseManager.get_active_license()
         self.assertEqual(tier, "guest")
         self.assertEqual(payload["tier"], "guest")
-        self.assertEqual(payload["max_tokens_monthly"], 50000)
+        self.assertEqual(payload["max_tokens_monthly"], 500000)
         self.assertTrue(payload.get("is_legacy_community"))
+
+    def test_fresh_anonymous_community_key_gets_guest_50k(self):
+        """Fresh (post-cutoff) machines are signed at the 50k guest quota and stay capped at 50k."""
+        fresh_payload = {
+            "tier": "free",
+            "email": "community@tokensafe.dev",
+            "max_tokens_monthly": 50000
+        }
+        with mock.patch.object(LicenseManager, "_resolve_active_license_record", return_value=(("key", fresh_payload), "key")):
+            tier, payload = LicenseManager.get_active_license()
+        self.assertEqual(tier, "guest")
+        self.assertEqual(payload["max_tokens_monthly"], 50000)
+
+    def test_legacy_community_key_without_signed_quota_defaults_500k(self):
+        """Pre-variant-D keys carry no quota field at all; that population is exactly the grandfathered class."""
+        legacy_payload = {
+            "tier": "free",
+            "email": "community@tokensafe.dev"
+        }
+        with mock.patch.object(LicenseManager, "_resolve_active_license_record", return_value=(("key", legacy_payload), "key")):
+            tier, payload = LicenseManager.get_active_license()
+        self.assertEqual(tier, "guest")
+        self.assertEqual(payload["max_tokens_monthly"], 500000)
+
+    def test_guest_check_quota_honors_signed_payload_quota(self):
+        """check_quota for the guest tier must honor the signed quota, not the hardcoded 50k."""
+        mock_tracker = mock.MagicMock()
+        with mock.patch.object(
+            LicenseManager,
+            "get_active_license",
+            return_value=("guest", {"tier": "guest", "max_tokens_monthly": 500000}),
+        ):
+            mock_tracker.get_monthly_saved_tokens.return_value = 60000
+            q = LicenseManager.check_quota(mock_tracker)
+            self.assertEqual(q["monthly_limit"], 500000)
+            self.assertFalse(q["is_quota_exceeded"])
+            self.assertIsNone(q["warning"])
 
     def test_verified_user_community_key_retains_500k(self):
         """Personal account key with verified email gets free tier with 500,000 monthly quota."""

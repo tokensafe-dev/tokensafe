@@ -1,5 +1,6 @@
 import unittest
-from src.web_reader import WebReader
+import urllib.error
+from src.web_reader import WebReader, _SafeRedirectHandler
 
 
 class TestWebReader(unittest.TestCase):
@@ -45,6 +46,27 @@ class TestWebReader(unittest.TestCase):
         self.assertFalse(WebReader.is_safe_url("http://169.254.169.254/latest/meta-data"))
         self.assertFalse(WebReader.is_safe_url("ftp://example.com"))
         self.assertTrue(WebReader.is_safe_url("https://docs.python.org/3/library/ast.html"))
+
+    def test_ssrf_private_ranges_exact(self):
+        """Exact IP-range checks: the old string-prefix rule missed 172.17-172.31 and IPv6."""
+        self.assertFalse(WebReader.is_safe_url("http://172.16.5.1/x"))   # docker bridge
+        self.assertFalse(WebReader.is_safe_url("http://172.17.0.1/x"))   # was MISSED before
+        self.assertFalse(WebReader.is_safe_url("http://172.31.255.9/x"))
+        self.assertFalse(WebReader.is_safe_url("http://10.1.2.3/x"))
+        self.assertFalse(WebReader.is_safe_url("http://192.168.1.1/x"))
+        self.assertFalse(WebReader.is_safe_url("http://[fe80::1]/x"))    # link-local IPv6
+        self.assertFalse(WebReader.is_safe_url("http://[fc00::1]/x"))    # IPv6 ULA
+        self.assertFalse(WebReader.is_safe_url("http://[::1]/x"))
+        self.assertTrue(WebReader.is_safe_url("http://8.8.8.8/x"))       # public literal stays fetchable
+        self.assertTrue(WebReader.is_safe_url("http://172.32.0.1/x"))    # public 172.32/4
+
+    def test_redirect_to_private_host_is_blocked(self):
+        handler = _SafeRedirectHandler()
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1:9222/json")
+        # Public redirect target passes through (super() handles it; just verify no raise here
+        # by checking is_safe_url agrees).
+        self.assertTrue(WebReader.is_safe_url("https://example.com/docs"))
 
 
 if __name__ == "__main__":

@@ -9,8 +9,10 @@ Fetches web pages (documentation, API references, articles) and strips clutter:
 """
 
 import re
+import ipaddress
 import urllib.request
 import urllib.parse
+import urllib.error
 from html.parser import HTMLParser
 from typing import Tuple, Optional, Dict, Any, List
 
@@ -125,6 +127,15 @@ class _HTMLToMarkdownParser(HTMLParser):
         return cleaned
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Blocks redirect hops that leave the safe-URL zone (public → localhost/DMZ)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not WebReader.is_safe_url(newurl):
+            raise urllib.error.HTTPError(newurl, code, "TokenSafe: redirect to a non-public URL blocked", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class WebReader:
     """Safely fetches web pages and returns clean Markdown."""
 
@@ -136,9 +147,24 @@ class WebReader:
             parsed = urllib.parse.urlparse(url)
             if parsed.scheme not in ("http", "https"):
                 return False
-            host = (parsed.hostname or "").lower()
-            if host in cls._BLOCKED_HOSTS or host.startswith(("10.", "192.168.", "172.16.")):
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if host in cls._BLOCKED_HOSTS or host.endswith(".local"):
                 return False
+            # Literal IPs (v4/v6) — exact range checks instead of string prefixes
+            # (the old prefix check missed 172.17-172.31 and all of IPv6).
+            try:
+                ip = ipaddress.ip_address(host)
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_reserved
+                    or ip.is_unspecified
+                    or ip.is_multicast
+                ):
+                    return False
+            except ValueError:
+                pass  # hostname, not a literal IP
             return True
         except Exception:
             return False
@@ -181,7 +207,8 @@ class WebReader:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            _opener = urllib.request.build_opener(_SafeRedirectHandler)
+            with _opener.open(req, timeout=timeout) as resp:
                 status = resp.status
                 if status >= 400:
                     return "", False, f"HTTP Error {status}"

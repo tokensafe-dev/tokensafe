@@ -887,7 +887,17 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             sys.stderr.write(f"[TokenSafe] {self.command} {self.path} -> {status_code}: {message}\n")
         except Exception:
             pass
-        err_bytes = json.dumps({"error": message}).encode("utf-8")
+        # Anthropic-dialect clients (ZCode /v1/messages) expect the Anthropic
+        # error envelope; OpenAI-shape clients keep the flat {"error": ...} form.
+        client_shape = getattr(self, "_client_shape", "") or (
+            "anthropic" if self.path.rstrip("/").endswith("/v1/messages") else ""
+        )
+        if client_shape == "anthropic":
+            err_type = "api_error" if status_code >= 500 else "invalid_request_error"
+            err_body: Dict[str, Any] = {"type": "error", "error": {"type": err_type, "message": message}}
+        else:
+            err_body = {"error": message}
+        err_bytes = json.dumps(err_body).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(err_bytes)))
@@ -1002,6 +1012,14 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
         # Client shape: "anthropic" when the request arrived on /v1/messages
         # (Claude Code via ANTHROPIC_BASE_URL), else OpenAI-native.
         client_anthropic = getattr(self, "_client_shape", "") == "anthropic"
+        # Defensive endpoint completion: an anthropic-dialect upstream registered
+        # as a bare host (https://api.anthropic.com) or an /anthropic mirror base
+        # must receive the payload on its /v1/messages endpoint, not on "/".
+        if client_anthropic and provider == "anthropic" and not upstream_url.rstrip("/").endswith("/v1/messages"):
+            after_host = upstream_url.split("://", 1)[-1]
+            path = "/" + after_host.split("/", 1)[1] if "/" in after_host else ""
+            if not path or path.rstrip("/").endswith("/anthropic"):
+                upstream_url = f"{upstream_url.rstrip('/')}/v1/messages"
         # Optional upstream model mapping: route client model names (e.g. claude-*)
         # to the model the upstream account actually serves.
         upstream_model = os.environ.get("TOKENSAFE_UPSTREAM_MODEL", "").strip()
@@ -1237,7 +1255,9 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             return "anthropic"
         # Anthropic-compatible mirrors (e.g. Z.ai /api/anthropic[/v1/messages]
         # coding-plan endpoint): same wire dialect, client x-api-key is forwarded as-is.
-        if "/anthropic" in url:
+        # Match "/anthropic" as a path SEGMENT, not a substring — a URL like
+        # ".../my-anthropic-proxy/v1/chat/completions" is an OpenAI-dialect host.
+        if re.search(r"/anthropic(/|$)", url):
             return "anthropic"
         if "openai.com" in url:
             return "openai"

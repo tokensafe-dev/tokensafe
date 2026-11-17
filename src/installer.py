@@ -250,40 +250,35 @@ class AgentInstaller:
                 except Exception:
                     pass
 
-            if "kimi_hook.py" in content:
-                return True, "TokenSafe Kimi Code hooks already registered in config.toml"
-
             toml_hook_cmd = json.dumps(kimi_cmd)
+
+            def _kimi_section(event: str, matcher: str = "") -> str:
+                m = f'matcher = "{matcher}"\n' if matcher else ""
+                return f'[[hooks]]\nevent = "{event}"\n{m}command = {toml_hook_cmd}\ntimeout = 10\n'
+
+            if "kimi_hook.py" in content:
+                # Migration: older installs lack the PostToolUse output-compaction hook.
+                if 'event = "PostToolUse"' in content:
+                    return True, "TokenSafe Kimi Code hooks already registered in config.toml"
+                post_section = "\n# TokenSafe PostToolUse stdout compaction (migration)\n" + _kimi_section("PostToolUse")
+                content = content.rstrip() + "\n" + post_section
+                with open(config_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return True, "PostToolUse hook migrated in ~/.kimi-code/config.toml (stdout compaction)"
+
             hook_sections = (
-                f'\n# TokenSafe Lifecycle Hooks\n'
-                f'[[hooks]]\n'
-                f'event = "SessionStart"\n'
-                f'command = {toml_hook_cmd}\n'
-                f'timeout = 10\n\n'
-                f'[[hooks]]\n'
-                f'event = "UserPromptSubmit"\n'
-                f'command = {toml_hook_cmd}\n'
-                f'timeout = 10\n\n'
-                f'[[hooks]]\n'
-                f'event = "PreToolUse"\n'
-                f'matcher = "Bash"\n'
-                f'command = {toml_hook_cmd}\n'
-                f'timeout = 10\n\n'
-                f'[[hooks]]\n'
-                f'event = "PreToolUse"\n'
-                f'matcher = "Write"\n'
-                f'command = {toml_hook_cmd}\n'
-                f'timeout = 10\n\n'
-                f'[[hooks]]\n'
-                f'event = "PreToolUse"\n'
-                f'matcher = "Read"\n'
-                f'command = {toml_hook_cmd}\n'
-                f'timeout = 10\n'
+                '\n# TokenSafe Lifecycle Hooks\n'
+                + _kimi_section("SessionStart") + "\n"
+                + _kimi_section("UserPromptSubmit") + "\n"
+                + _kimi_section("PreToolUse", "Bash") + "\n"
+                + _kimi_section("PreToolUse", "Write") + "\n"
+                + _kimi_section("PreToolUse", "Read") + "\n"
+                + _kimi_section("PostToolUse")
             )
             content = (content.rstrip() + "\n" + hook_sections) if content.strip() else hook_sections.lstrip()
             with open(config_file, "w", encoding="utf-8") as f:
                 f.write(content)
-            return True, "hooks registered in ~/.kimi-code/config.toml (SessionStart + UserPromptSubmit + PreToolUse Bash/Write/Read)"
+            return True, "hooks registered in ~/.kimi-code/config.toml (SessionStart + UserPromptSubmit + PreToolUse Bash/Write/Read + PostToolUse compact)"
 
         if agent_key == "claude_code":
             config_file = os.path.join(HOME, ".claude", "settings.json")
@@ -560,8 +555,12 @@ class AgentInstaller:
             if not isinstance(routes, dict):
                 routes = {}
             routes[fp] = {"upstream_url": upstream_url, "label": label, "added_at": int(time.time())}
-            with open(path, "w", encoding="utf-8") as f:
+            # Atomic write: a truncated routes file makes the proxy silently fall
+            # back to its default upstream (the live 400-incident class).
+            tmp_path = f"{path}.tmp.{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(routes, f, indent=2)
+            os.replace(tmp_path, path)
             return True
         except Exception as e:
             try:
@@ -629,10 +628,15 @@ class AgentInstaller:
         if not api_key or not base_url:
             return (False, f"enabled provider '{enabled_key}' lacks apiKey/baseURL")
         clone_key = f"{enabled_key}{cls._ZCODE_CLONE_SUFFIX}"
-        # Anthropic-kind mirrors need the full messages endpoint on the route.
+        # Anthropic-kind upstreams need the full messages endpoint on the route.
+        # Append for a bare host (https://api.anthropic.com) or an /anthropic
+        # mirror base (https://api.z.ai/api/anthropic); leave other paths alone.
         upstream = base_url
-        if str(src.get("kind") or "").lower() == "anthropic" and "/anthropic" in upstream and not upstream.endswith("/v1/messages"):
-            upstream = f"{upstream}/v1/messages"
+        if str(src.get("kind") or "").lower() == "anthropic" and not upstream.endswith("/v1/messages"):
+            after_host = upstream.split("://", 1)[-1]
+            path = "/" + after_host.split("/", 1)[1] if "/" in after_host else ""
+            if not path or path.rstrip("/").endswith("/anthropic"):
+                upstream = f"{upstream.rstrip('/')}/v1/messages"
         route_ok = cls._register_proxy_route(f"zcode:{enabled_key}", upstream, api_key)
         clone = json.loads(json.dumps(src))
         clone["enabled"] = True
@@ -670,10 +674,18 @@ class AgentInstaller:
             origin_key = ck[: -len(cls._ZCODE_CLONE_SUFFIX)]
             del providers[ck]
             origin = providers.get(origin_key)
-            if isinstance(origin, dict):
+            # Only re-enable the original when nothing else is enabled — if the
+            # user deliberately switched to another provider while wired, we must
+            # not end up with two enabled providers after `proxy off`.
+            other_enabled = any(
+                k
+                for k, v in providers.items()
+                if isinstance(v, dict) and v.get("enabled") is True and k != origin_key
+            )
+            if isinstance(origin, dict) and origin.get("enabled") is not True and not other_enabled:
                 origin["enabled"] = True
         cls._atomic_write_json(cls.ZCODE_V2_CONFIG, data)
-        return (True, "ZCode unwired: clone removed, original provider re-enabled (restart the app)")
+        return (True, "ZCode unwired: clone removed (restart the app)")
 
     @classmethod
     def install_proxy_daemon(cls) -> Tuple[bool, str]:
@@ -839,14 +851,28 @@ WantedBy=default.target
             if fresh_bin:
                 # Re-assert via the freshly upgraded binary so the daemon plist
                 # points at the new engine path, not this (old) process.
-                subprocess.run(
+                proc = subprocess.run(
                     [fresh_bin, "proxy", "on"],
                     env=cls._npm_subprocess_env(fresh_bin), capture_output=True, text=True, timeout=30,
                 )
+                # Surface the subreport: swallowed wiring/route WARNs previously
+                # made a failed wire look like a success on the update path.
+                out = (proc.stdout or "").strip()
+                if out:
+                    print(out)
+                if proc.returncode != 0:
+                    err = (proc.stderr or "").strip()[:300]
+                    if err:
+                        print(f"  {YELLOW}⚠{RESET} proxy on reported a problem: {err}")
             else:
                 cls.proxy_on()
+            wired_ok = cls.wire_proxy_config()[0]
+            zcode_ok = cls._wire_zcode_provider()[0]
             if cls.proxy_health(timeout=3.0):
-                print(f"  {GREEN}✔{RESET} TokenSafe proxy daemon active — Claude Code / ZCode routed through the local optimizer.")
+                if wired_ok and zcode_ok:
+                    print(f"  {GREEN}✔{RESET} TokenSafe proxy daemon active — Claude Code / ZCode routed through the local optimizer.")
+                else:
+                    print(f"  {YELLOW}⚠{RESET} TokenSafe proxy daemon active, but agent wiring is incomplete — run {BOLD}tokensafe proxy on{RESET} for details.")
                 print(f"    {DIM}Rollback: tokensafe proxy off{RESET}")
             else:
                 print(f"  {YELLOW}⚠{RESET} TokenSafe proxy did not answer — run {BOLD}tokensafe proxy on{RESET} to retry.")

@@ -283,6 +283,23 @@ class CodeFTSIndex:
                         "content": row[2].strip(),
                         "bm25_rank": row[3]
                     })
+
+                # Phrase search can miss when the user types several loose words.
+                # Strictly additive retry: AND of individually quoted terms —
+                # only runs when the exact-phrase pass returned nothing.
+                if not results and " " in clean_q.strip():
+                    and_query = " AND ".join(
+                        f'"{term.replace(chr(34), chr(34) * 2)}"' for term in clean_q.split()
+                    )
+                    params2 = ([f"%{path_filter}%"] if path_filter else []) + [limit]
+                    cur = con.execute(sql, (and_query, *params2))
+                    for row in cur.fetchall():
+                        results.append({
+                            "file": row[0],
+                            "line": row[1],
+                            "content": row[2].strip(),
+                            "bm25_rank": row[3]
+                        })
             except sqlite3.OperationalError:
                 # If trigram MATCH fails (e.g. query < 3 chars), fallback to LIKE
                 like_sql = """

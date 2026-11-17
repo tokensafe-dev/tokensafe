@@ -45,6 +45,16 @@ class TestFTSIndex(unittest.TestCase):
         self.assertEqual(len(user_res), 1)
         self.assertEqual(user_res[0]["file"], "src/user.py")
 
+    def test_multi_word_query_falls_back_to_and_terms(self):
+        """Exact-phrase miss for loose words must retry as an AND of quoted terms."""
+        index = CodeFTSIndex(self.tmp_dir)
+        index.index_files()
+        # "process charge" is not a verbatim phrase (source has process_charge),
+        # so the phrase pass returns nothing; the AND retry must still find it.
+        results = index.search("process charge")
+        self.assertGreater(len(results), 0)
+        self.assertEqual(results[0]["file"], "src/gateway.py")
+
     def test_incremental_indexing(self):
         index = CodeFTSIndex(self.tmp_dir)
         stats1 = index.index_files()
