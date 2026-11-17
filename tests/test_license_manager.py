@@ -158,7 +158,7 @@ class TestLicenseManager(unittest.TestCase):
                 os.environ.pop("TOKENSAFE_LICENSE_KEY", None)
                 self.assertEqual(LicenseManager.get_active_license_key(), "")
                 tier, _ = LicenseManager.get_active_license()
-                self.assertEqual(tier, "free")
+                self.assertEqual(tier, "guest")
 
 if __name__ == "__main__":
     unittest.main()

@@ -188,12 +188,19 @@ def main(argv: Optional[List[str]] = None):
         # Tier + quota state
         tier, payload = LicenseManager.get_active_license()
         quota = LicenseManager.check_quota(tracker)
-        if tier == "free":
+        if tier == "guest":
+            q_saved = int(quota.get("monthly_saved", 0))
+            q_limit = int(quota.get("monthly_limit") or 50_000)
+            q_pct = min(100, int(q_saved / q_limit * 100)) if q_limit else 0
+            q_state = "\033[31mQUOTA REACHED (Optimizers paused)\033[0m" if quota.get("is_quota_exceeded") else f"{q_pct}% of monthly guest limit"
+            print(f"  Tier:      \033[33mGUEST (Offline)\033[0m — {q_saved:,} / {q_limit:,} tokens ({q_state})")
+            print("  Unlock 500k: Run \033[36mtokensafe login\033[0m for free Community account & Web Dashboard")
+        elif tier == "free":
             q_saved = int(quota.get("monthly_saved", 0))
             q_limit = int(quota.get("monthly_limit") or 500_000)
             q_pct = min(100, int(q_saved / q_limit * 100)) if q_limit else 0
             q_state = "\033[31mQUOTA REACHED — Pro optimizations paused\033[0m" if quota.get("is_quota_exceeded") else f"{q_pct}% of monthly measured quota"
-            print(f"  Tier:      \033[33mCOMMUNITY (Free)\033[0m — {q_saved:,} / {q_limit:,} tokens ({q_state})")
+            print(f"  Tier:      \033[33mCOMMUNITY (Free Account)\033[0m — {q_saved:,} / {q_limit:,} tokens ({q_state})")
             print("  Upgrade:   https://tokensafe.dev/signup ($9/mo Solo · 7-Day Team Trial)")
         else:
             print(f"  Tier:      \033[32m{tier.upper()}\033[0m (Unlimited)")
@@ -922,7 +929,24 @@ def main(argv: Optional[List[str]] = None):
         tier, payload = LicenseManager.get_active_license()
         print("\n\033[1m\033[36m⚡ TOKENSAFE LICENSE STATUS ⚡\033[0m\n")
         print(f"  Tier:       \033[32m\033[1m{tier.upper()}\033[0m")
-        if tier != "free":
+        if tier == "guest":
+            quota = LicenseManager.check_quota()
+            q_saved = int(quota.get("monthly_saved", 0))
+            q_limit = int(quota.get("monthly_limit") or 50_000)
+            q_state = "\033[31mQUOTA REACHED (Optimizers paused)\033[0m" if quota.get("is_quota_exceeded") else "\033[32mActive\033[0m"
+            print(f"  Status:     Guest Mode ({q_saved:,} / {q_limit:,} tokens this month · {q_state})")
+            print("  Mode:       Local Offline (No account connected)")
+            print("  Unlock 500k: \033[36mtokensafe login\033[0m (Free Community license + Web Dashboard)")
+            print("  Solo Pro:   https://tokensafe.dev/signup (Unlimited tokens)\n")
+        elif tier == "free":
+            quota = LicenseManager.check_quota()
+            q_saved = int(quota.get("monthly_saved", 0))
+            q_limit = int(quota.get("monthly_limit") or 500_000)
+            q_state = "\033[31mQUOTA REACHED (Pro optimizations paused)\033[0m" if quota.get("is_quota_exceeded") else "\033[32mActive\033[0m"
+            print(f"  Email:      {payload.get('email', 'community@tokensafe.dev')}")
+            print(f"  Status:     Community Account ({q_saved:,} / {q_limit:,} measured tokens this month · {q_state})")
+            print("  Upgrade:    https://tokensafe.dev/signup ($9/mo Solo with 7-Day Free Trial)\n")
+        else:
             print(f"  Email:      {payload.get('email', 'N/A')}")
             if payload.get("trial"):
                 print(f"  Mode:       \033[33m7-Day Free Trial\033[0m")
@@ -933,13 +957,6 @@ def main(argv: Optional[List[str]] = None):
                 print(f"  Expires:    {dt}")
             else:
                 print(f"  Expires:    Never (Lifetime)")
-        else:
-            quota = LicenseManager.check_quota()
-            q_saved = int(quota.get("monthly_saved", 0))
-            q_limit = int(quota.get("monthly_limit") or 500_000)
-            q_state = "\033[31mQUOTA REACHED (Pro optimizations paused)\033[0m" if quota.get("is_quota_exceeded") else "\033[32mActive\033[0m"
-            print(f"  Status:     Free Tier ({q_saved:,} / {q_limit:,} measured tokens this month · {q_state})")
-            print("  Upgrade:    https://tokensafe.dev/signup ($9/mo Solo with 7-Day Free Trial)\n")
         print()
 
     elif command in ("providers", "models", "keys"):

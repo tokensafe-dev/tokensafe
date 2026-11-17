@@ -83,6 +83,7 @@ class LicenseManager:
     _QUOTA_TURN_COUNTERS: Dict[str, int] = {}
 
     TIERS = {
+        "guest": {"max_tokens_monthly": 50_000, "team_analytics": False},
         "free": {"max_tokens_monthly": 500_000, "team_analytics": False},
         "solo": {"max_tokens_monthly": None, "team_analytics": False},
         "team": {"max_tokens_monthly": None, "team_analytics": True},
@@ -478,13 +479,26 @@ class LicenseManager:
 
     @classmethod
     def get_active_license(cls) -> Tuple[str, Dict[str, Any]]:
-        """Retrieves active license from env or persistent license.json files, falling back to free tier."""
+        """
+        Retrieves active license from env or persistent license.json files.
+        Falls back to 'guest' tier (50,000 tokens/month) if no license is present.
+        Legacy anonymous licenses (email == 'community@tokensafe.dev') are mapped to 'guest'.
+        Verified personal licenses (tier == 'free' with user email) get 'free' (500,000 tokens/month).
+        """
         resolved, _ = cls._resolve_active_license_record()
         if resolved is not None:
             _, payload = resolved
-            return payload.get("tier", "solo"), payload
+            tier = payload.get("tier", "solo")
+            email = str(payload.get("email") or "").strip().lower()
+            if tier == "free" and email == "community@tokensafe.dev":
+                guest_payload = dict(payload)
+                guest_payload["tier"] = "guest"
+                guest_payload["max_tokens_monthly"] = 50_000
+                guest_payload["is_legacy_community"] = True
+                return "guest", guest_payload
+            return tier, payload
 
-        return "free", {"tier": "free", "max_tokens_monthly": 500_000}
+        return "guest", {"tier": "guest", "max_tokens_monthly": 50_000}
 
     @classmethod
     def get_active_license_key(cls) -> str:
@@ -622,12 +636,14 @@ class LicenseManager:
         }
         """
         tier, payload = cls.get_active_license()
-        tier_cfg = cls.TIERS.get(tier, cls.TIERS["free"])
+        tier_cfg = cls.TIERS.get(tier, cls.TIERS["guest"] if tier == "guest" else cls.TIERS["free"])
         max_tokens = tier_cfg.get("max_tokens_monthly")
 
-        # Server-issued quota (community license payload) overrides the embedded
-        # default — enables remote quota control without a client release.
-        if max_tokens is not None and isinstance(payload, dict):
+        # Server-issued quota (community license payload) overrides embedded default for verified accounts.
+        # Guest tier is strictly capped to the guest limit (50,000).
+        if tier == "guest":
+            max_tokens = 50_000
+        elif max_tokens is not None and isinstance(payload, dict):
             try:
                 server_quota = int(payload.get("max_tokens_monthly") or 0)
                 if server_quota > 0:
@@ -645,7 +661,7 @@ class LicenseManager:
                 "warning": None
             }
 
-        # For free tier, calculate trailing 30 days saved tokens
+        # For guest / free tier, calculate monthly saved tokens
         if tracker is None:
             try:
                 from src.metrics import MetricsTracker
@@ -655,24 +671,61 @@ class LicenseManager:
 
         local_saved = tracker.get_monthly_saved_tokens() if tracker else 0
         server_floor = cls._get_server_quota_floor(tracker)
-        monthly_saved = max(local_saved, server_floor)
+
+        # Guest state backup floor (prevents simple metrics.db deletion within same calendar month)
+        guest_floor = 0
+        if tier == "guest":
+            try:
+                data_dir = resolve_data_dir()
+                gstate_file = os.path.join(data_dir, "guest_state.json")
+                cur_month = time.strftime("%Y-%m")
+                if os.path.exists(gstate_file):
+                    with open(gstate_file, "r", encoding="utf-8") as gf:
+                        gdata = json.load(gf)
+                    if gdata.get("month") == cur_month:
+                        guest_floor = int(gdata.get("saved_tokens", 0) or 0)
+                if local_saved > guest_floor:
+                    os.makedirs(data_dir, exist_ok=True)
+                    with open(gstate_file, "w", encoding="utf-8") as gf:
+                        json.dump({"month": cur_month, "saved_tokens": local_saved}, gf)
+            except Exception:
+                pass
+
+        monthly_saved = max(local_saved, server_floor, guest_floor)
         exceeded = monthly_saved >= max_tokens
 
         warning = None
         if exceeded:
-            warning = (
-                f"⚡ **TokenSafe Quota Alert**: Community Edition limit reached "
-                f"({monthly_saved:,}/{max_tokens:,} measured tokens saved this month). "
-                f"Graph/signature AST slicing, pointer dedup, history compaction & KV-cache prefix locking are paused "
-                f"(Security Guard stays active). Upgrade to Solo ($9/mo) or 7-Day Team Trial: "
-                f"`tokensafe activate <key>` or create your account at https://tokensafe.dev/signup"
-            )
-        elif monthly_saved >= int(max_tokens * 0.85):
-            warning = (
-                f"⚡ **TokenSafe Quota Notice**: Community Edition is at {int(monthly_saved / max_tokens * 100)}% of monthly limit "
-                f"({monthly_saved:,}/{max_tokens:,} measured tokens). "
-                f"Upgrade to Solo for unlimited optimization: `tokensafe activate <key>` or https://tokensafe.dev/signup"
-            )
+            if tier == "guest":
+                warning = (
+                    f"⚡ **TokenSafe Quota Alert**: Guest limit reached "
+                    f"({monthly_saved:,}/{max_tokens:,} measured tokens saved this month). "
+                    f"Optimizers & code search are paused (Security Guard stays active). "
+                    f"Run `tokensafe login` in your terminal for 500,000 free tokens/month, "
+                    f"or upgrade to Solo ($9/mo) at https://tokensafe.dev/pricing"
+                )
+            else:
+                warning = (
+                    f"⚡ **TokenSafe Quota Alert**: Community Edition limit reached "
+                    f"({monthly_saved:,}/{max_tokens:,} measured tokens saved this month). "
+                    f"Graph/signature AST slicing, pointer dedup, history compaction & KV-cache prefix locking are paused "
+                    f"(Security Guard stays active). Upgrade to Solo ($9/mo) or 7-Day Team Trial: "
+                    f"`tokensafe activate <key>` or create your account at https://tokensafe.dev/signup"
+                )
+        elif monthly_saved >= int(max_tokens * 0.80):
+            pct = int(monthly_saved / max_tokens * 100)
+            if tier == "guest":
+                warning = (
+                    f"⚡ **TokenSafe Quota Notice**: Guest mode is at {pct}% of monthly limit "
+                    f"({monthly_saved:,}/{max_tokens:,} measured tokens). "
+                    f"Run `tokensafe login` in your terminal to unlock 500,000 free tokens/month!"
+                )
+            else:
+                warning = (
+                    f"⚡ **TokenSafe Quota Notice**: Community Edition is at {pct}% of monthly limit "
+                    f"({monthly_saved:,}/{max_tokens:,} measured tokens). "
+                    f"Upgrade to Solo for unlimited optimization: `tokensafe activate <key>` or https://tokensafe.dev/signup"
+                )
 
         return {
             "tier": tier,

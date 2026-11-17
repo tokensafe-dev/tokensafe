@@ -82,7 +82,17 @@ class Dashboard:
         # Top summary cards
         tier, payload = LicenseManager.get_active_license()
         tier_upper = tier.upper()
-        if tier == "free":
+        if tier == "guest":
+            monthly_saved = self.tracker.get_monthly_saved_tokens()
+            limit = 50_000
+            q_pct = min(100.0, (monthly_saved / limit * 100.0))
+            if monthly_saved >= limit:
+                out.append(f"  {BOLD}Subscription Tier:{RESET}   {YELLOW}GUEST (Offline){RESET} • {RED}{BOLD}50k Monthly Limit Reached ({monthly_saved:,}/{limit:,}){RESET}")
+                out.append(f"  {BOLD}Quota Usage:{RESET}         {RED}{render_bar(q_pct)}{RESET} (Optimizers paused · Unlock 500k: run 'tokensafe login')")
+            else:
+                out.append(f"  {BOLD}Subscription Tier:{RESET}   {YELLOW}GUEST (Offline){RESET} • {monthly_saved:,} / {limit:,} tokens this month")
+                out.append(f"  {BOLD}Quota Usage:{RESET}         {YELLOW}{render_bar(q_pct)}{RESET} (Unlock 500k: run 'tokensafe login')")
+        elif tier == "free":
             monthly_saved = self.tracker.get_monthly_saved_tokens()
             limit = 500_000
             q_pct = min(100.0, (monthly_saved / limit * 100.0))
@@ -186,11 +196,12 @@ class Dashboard:
         md = []
         md.append("# ⚡ TokenSafe Context & Token Optimizer Report\n")
         quota = LicenseManager.check_quota(self.tracker)
-        if quota.get("tier") == "free":
+        if quota.get("tier") in ("free", "guest"):
+            plan_name = "Guest" if quota.get("tier") == "guest" else "Community"
             m_saved = int(quota.get("monthly_saved", 0))
-            m_limit = int(quota.get("monthly_limit") or 500_000)
-            status_tag = "QUOTA REACHED — Pro optimizers paused" if quota.get("is_quota_exceeded") else "Active"
-            md.append(f"> **Plan:** Community (`{m_saved:,} / {m_limit:,}` measured tokens/mo · **{status_tag}**)\n")
+            m_limit = int(quota.get("monthly_limit") or (50_000 if quota.get("tier") == "guest" else 500_000))
+            status_tag = "QUOTA REACHED — Optimizers paused" if quota.get("is_quota_exceeded") else "Active"
+            md.append(f"> **Plan:** {plan_name} (`{m_saved:,} / {m_limit:,}` measured tokens/mo · **{status_tag}**)\n")
         md.append(f"> **Cumulative Resource Efficiency:** **{pct:.1f}% Reduction** across {summary['total_events']} events.\n")
         md.append("| Metric | Value |")
         md.append("| :--- | :--- |")

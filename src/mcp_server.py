@@ -766,12 +766,21 @@ def handle_tool_call(name: str, args: dict) -> dict:
 
 
 def _quota_banner_if_due(quota: dict, tracker, session_id: str) -> str:
-    """Emits a concise Community 500k quota CTA on turn #1 of exceedance and every 5 turns."""
+    """Emits a concise quota CTA on turn #1 of exceedance and every 5 turns."""
     if not quota.get("is_quota_exceeded"):
         return ""
     if LicenseManager.should_emit_quota_banner(tracker, session_id=session_id, every_n_turns=5):
         return f"// {quota.get('warning', '')}\n"
     return ""
+
+
+def _tier_quota_limit_msg(quota: dict) -> str:
+    """Returns a concise description of the active tier's quota limit and activation CTA."""
+    tier = str(quota.get("tier") or "guest").lower()
+    limit = int(quota.get("monthly_limit") or (50000 if tier == "guest" else 500000))
+    tier_name = "Guest 50k" if tier == "guest" else "Community 500k"
+    cta = "Run 'tokensafe login' in your terminal for 500,000 free tokens/month." if tier == "guest" else "Upgrade to Solo: https://tokensafe.dev/pricing"
+    return f"{tier_name} monthly limit ({limit:,} tokens) reached; optimizations paused ({cta})."
 
 
 def _dispatch_tool_call(name: str, args: dict) -> dict:
@@ -962,7 +971,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                             raw_lines.append(line)
                 raw_chunk = "".join(raw_lines)
                 if total_seen > cap:
-                    raw_chunk += f"\n// [TokenSafe Community 500k limit reached: showing raw lines 1-{cap} of {total_seen}. AST/graph slicing & pointer dedup are paused.]\n"
+                    raw_chunk += f"\n// [TokenSafe {_tier_quota_limit_msg(quota)} Showing raw lines 1-{cap} of {total_seen}. AST/graph slicing & pointer dedup are paused.]\n"
             banner = _quota_banner_if_due(quota, tracker, _mcp_session_id())
             return {"content": [{"type": "text", "text": banner + (raw_chunk or "")}]}
 
@@ -1111,7 +1120,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             return _fallback_error("smart_bundle", "too many targets (max 8)")
         if is_quota_exceeded:
             LicenseManager.should_emit_quota_banner(tracker, session_id=_mcp_session_id(), every_n_turns=5)
-            return {"content": [{"type": "text", "text": f"{quota.get('warning', '')}\n\nsmart_bundle is paused over the 500k Community limit. Use single smart_read_file calls, or activate a subscription at https://tokensafe.dev/#pricing."}]}
+            tier_msg = _tier_quota_limit_msg(quota)
+            return {"content": [{"type": "text", "text": f"{quota.get('warning', '')}\n\nsmart_bundle is paused: {tier_msg}"}]}
 
         inc_deps, _eff_dep_mode = _resolve_dep_mode(args)
         max_tokens = _safe_int(os.environ.get("TOKENSAFE_BUNDLE_MAX_TOKENS"), 6000, lo=1000, hi=50000)
@@ -1232,7 +1242,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 "saved_tokens": 0,
                 "tier": "QUOTA_EXCEEDED",
                 "quota_exceeded": True,
-                "warning": quota.get("warning") if emit_warn else "Community 500k monthly limit reached; prompt compaction paused.",
+                "warning": quota.get("warning") if emit_warn else _tier_quota_limit_msg(quota),
             }
             return {"content": [{"type": "text", "text": json.dumps(payload, indent=2, ensure_ascii=False)}]}
         res = PromptCompactor.compact(prompt, enable_distill=True)
@@ -1349,7 +1359,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 "blocked": False,
                 "tokens_saved": 0,
                 "quota_exceeded": True,
-                "reason": quota.get("warning") if emit_note else "Community 500k monthly limit reached; command output compression paused (Security Guard active).",
+                "reason": quota.get("warning") if emit_note else _tier_quota_limit_msg(quota),
             }
             if guard_res.warning_only:
                 result["warning"] = guard_res.reason
@@ -1708,6 +1718,12 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         raw_regex = args.get("use_regex")
         u_regex = None if raw_regex is None else bool(raw_regex)
 
+        # Quota degradation: when monthly quota is reached, softly degrade scoped_search
+        # to top 3 matches with an upgrade header rather than returning an empty block,
+        # preventing the agent from deadlocking or panicking into blocked raw terminal grep.
+        if is_quota_exceeded:
+            max_res = min(max_res, 3)
+
         res = ScopedSearch.search(
             query=query,
             project_path=target_path,
@@ -1719,6 +1735,21 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         md_text = res["markdown"]
         if not res.get("success", True):
             return _fallback_error("scoped_search", md_text)
+
+        if is_quota_exceeded:
+            banner = _quota_banner_if_due(quota, tracker, _mcp_session_id())
+            current_tier = str(quota.get("tier") or "guest").lower()
+            limit_val = int(quota.get("monthly_limit") or (50000 if current_tier == "guest" else 500000))
+            if current_tier == "guest":
+                cta_note = "Run 'tokensafe login' in your terminal to unlock 500,000 free tokens/month!"
+            else:
+                cta_note = "Upgrade to Solo for unlimited optimization: https://tokensafe.dev/pricing"
+            degraded_header = (
+                f"// [TokenSafe Quota Notice: {current_tier.upper()} limit of {limit_val:,} tokens reached. "
+                f"Showing top {max_res} matches in degraded mode.]\n"
+                f"// [{cta_note}]\n\n"
+            )
+            return {"content": [{"type": "text", "text": banner + degraded_header + md_text}]}
 
         res_tokens = count_tokens(md_text)
         est_orig = max(1500, res_tokens * 8)

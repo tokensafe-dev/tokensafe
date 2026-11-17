@@ -617,7 +617,9 @@ WantedBy=default.target
         try:
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
                 return
-            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes") or "unittest" in sys.modules:
+            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes"):
+                return
+            if "unittest" in sys.modules and not os.environ.get("TOKENSAFE_TEST_PROMPT"):
                 return
             st = cls.proxy_status()
             if st.get("claude_code_wired"):
@@ -644,41 +646,69 @@ WantedBy=default.target
     @classmethod
     def maybe_prompt_account_login(cls, context: str = "install") -> None:
         """
-        Interactive prompt to connect TokenSafe account and unlock web dashboard.
-        Migrates anonymous community@tokensafe.dev licenses to verified user accounts.
+        Interactive prompt to connect TokenSafe account and unlock 500k free quota + web dashboard.
+        Migrates anonymous community@tokensafe.dev and guest installations to verified user accounts.
+        Features a resilient /dev/tty fallback for piped 'curl | bash' installations and an
+        intelligent one-more-chance nudge on decline.
         Fail-open: skips quietly on non-interactive environments (CI, scripts).
         """
         try:
             from src.license_manager import LicenseManager
-            _, lic = LicenseManager.get_active_license()
+            tier, lic = LicenseManager.get_active_license()
             email = lic.get("email", "")
 
             # If user already has a real personal account (not the legacy anonymous key), nothing to prompt
             if email and email != "community@tokensafe.dev":
                 return
 
-            is_anonymous = (email == "community@tokensafe.dev")
+            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes"):
+                return
+            if "unittest" in sys.modules and not os.environ.get("TOKENSAFE_TEST_PROMPT"):
+                return
 
-            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            has_tty = sys.stdin.isatty() or (os.path.exists("/dev/tty") and sys.stdout.isatty())
+            if not has_tty:
                 print(f"  {CYAN}ℹ{RESET} Run {BOLD}tokensafe login{RESET} anytime to activate your Community license & web dashboard.\n")
                 return
 
-            if os.environ.get("TOKENSAFE_NONINTERACTIVE", "").strip() in ("1", "true", "yes") or "unittest" in sys.modules:
-                return
+            def _read_input(prompt_text: str) -> str:
+                sys.stdout.write(prompt_text)
+                sys.stdout.flush()
+                if sys.stdin.isatty():
+                    return sys.stdin.readline().strip()
+                if os.path.exists("/dev/tty"):
+                    with open("/dev/tty", "r") as tty_in:
+                        return tty_in.readline().strip()
+                raise EOFError("No interactive TTY")
 
             if context == "update":
-                if is_anonymous or not email:
-                    print(f"  {CYAN}ℹ{RESET} Connect your account anytime with {BOLD}tokensafe login{RESET} to view your cloud dashboard.\n")
+                print(f"  {CYAN}ℹ{RESET} Connect your account anytime with {BOLD}tokensafe login{RESET} to upgrade from 50k to 500k tokens/mo.\n")
                 return
 
-            print(f"\n  {CYAN}→ Connect your free TokenSafe account (500,000 tokens/mo) to unlock your web dashboard:{RESET}")
-            print(f"    Open browser to authorize? [{GREEN}Y{RESET}/n] ", end="", flush=True)
-            answer = input().strip().lower()
+            print(f"\n{BOLD}{CYAN}╔════════════════════════════════════════════════════════════════════╗{RESET}")
+            print(f"{BOLD}{CYAN}║                  ⚡ TOKENSAFE TIERS & LIMITS                      ║{RESET}")
+            print(f"{BOLD}{CYAN}╚════════════════════════════════════════════════════════════════════╝{RESET}\n")
+            print(f"  • Local Guest (No account):    50,000 tokens/month  [{GREEN}Active Now{RESET}]")
+            print(f"  • Free Community Account:     500,000 tokens/month  ({CYAN}10x Boost + Dashboard{RESET})\n")
+            print("  Authorizing takes 5 seconds (opens your browser) and gives you:")
+            print("  ✔ 500,000 free tokens every month")
+            print("  ✔ Cloud Web Dashboard & live analytics (tokensafe.dev/dashboard)")
+            print("  ✔ Full code search (scoped_search) & AST slicing\n")
+
+            answer = _read_input(f"  {CYAN}→ Activate your free 500k Community license now? [{GREEN}Y{RESET}/n]: {RESET}").lower()
             if answer in ("", "y", "yes"):
                 from src.cli import main as cli_main
                 cli_main(["login"])
             else:
-                print(f"    {CYAN}ℹ{RESET} You can run {BOLD}tokensafe login{RESET} anytime to activate your account.\n")
+                # Intelligent One-More-Chance nudge highlighting quick exhaustion of guest quota
+                print(f"\n  {YELLOW}⚠️  Are you sure?{RESET} In Guest mode, optimizations pause after only 50,000 tokens (~1-2 days of coding).")
+                second_chance = _read_input(f"  {CYAN}→ Connect your free account now for 500,000 tokens/month? [{GREEN}y{RESET}/N]: {RESET}").lower()
+                if second_chance in ("y", "yes"):
+                    from src.cli import main as cli_main
+                    cli_main(["login"])
+                else:
+                    print(f"\n  {CYAN}ℹ{RESET} Continuing in Guest Mode (50,000 tokens/mo limit).")
+                    print(f"    Run {BOLD}tokensafe login{RESET} anytime in your terminal to unlock 500,000 free tokens/mo!\n")
         except (EOFError, KeyboardInterrupt):
             print()
             return
