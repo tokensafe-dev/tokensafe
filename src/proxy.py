@@ -834,6 +834,10 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
         try:
             openai_payload = _translate_anthropic_payload_to_openai(payload)
         except Exception as e:
+            try:
+                sys.stderr.write(f"[TokenSafe][debug] translate fail body[:800]={json.dumps(payload)[:800]}\n")
+            except Exception:
+                pass
             self._send_json_error(400, f"Failed to translate Anthropic payload: {e}")
             return False
         self._client_shape = "anthropic"
@@ -879,6 +883,10 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
         return self.rfile.read(content_len)
 
     def _send_json_error(self, status_code: int, message: str):
+        try:
+            sys.stderr.write(f"[TokenSafe] {self.command} {self.path} -> {status_code}: {message}\n")
+        except Exception:
+            pass
         err_bytes = json.dumps({"error": message}).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
