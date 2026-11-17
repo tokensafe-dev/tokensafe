@@ -31,6 +31,6 @@
     ],
     "websiteURL": "https://tokensafe.dev",
     "brandColor": "#10B981",
-    "logo": "./assets/logo.svg"
+    "logo": "https://tokensafe.dev/logo.png"
   }
 }

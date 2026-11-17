@@ -1,0 +1,57 @@
+{
+  "name": "tokensafe",
+  "version": "4.1.7",
+  "description": "Token-optimized AST slicing, graph-first navigation, and lifecycle guard for AI coding agents",
+  "homepage": "https://tokensafe.dev",
+  "license": "MIT",
+  "author": {
+    "name": "Oleg Savelev"
+  },
+  "interface": {
+    "displayName": "TokenSafe",
+    "shortDescription": "Zero-loss AST slicing, secret leaks prevention & local token optimization",
+    "developerName": "Oleg Savelev",
+    "websiteURL": "https://tokensafe.dev"
+  },
+  "skills": [
+    "skills/token-optimizer"
+  ],
+  "mcpServers": {
+    "tokensafe": {
+      "command": "python3",
+      "args": [
+        "src/mcp_server.py"
+      ]
+    }
+  },
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 10
+    },
+    {
+      "event": "UserPromptSubmit",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Write",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
+      "matcher": "Read",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 10
+    }
+  ]
+}

@@ -2,8 +2,8 @@
   "name": "tokensafe",
   "displayName": "TokenSafe",
   "version": "4.1.7",
-  "description": "Reduce your AI bills by up to 99% locally. Your agents read only needed code, keep prompt caches intact across turns, and keep secrets out of git.",
-  "logo": "assets/logo.svg",
+  "description": "Your coding agent isn't getting dumber. Your context is just full of trash. Local context firewall & zero-loss runtime for Cursor, Claude Code, and autonomous agents.",
+  "logo": "https://tokensafe.dev/logo.png",
   "author": {
     "name": "Oleg Savelev",
     "url": "https://github.com/NekoSin4eG"
