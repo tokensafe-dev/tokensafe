@@ -217,7 +217,7 @@ TOOLS = [
     },
     {
         "name": "guard_inspect",
-        "description": "Pre-flight security & hygiene audit for commands or code snippets. Detects secret leaks, SQL injection, TLS bypass (incl. git-level), CORS wildcard, destructive commands, raw grep, and never-terminating streams (tail -f, watch, docker attach).",
+        "description": "Pre-flight security & hygiene audit for commands or code snippets. Detects secret leaks, SQL injection, TLS bypass (incl. git-level), CORS wildcard, destructive commands, raw grep, in-place stream editing (sed -i, perl -i), and never-terminating streams (tail -f, watch, docker attach).",
         "inputSchema": {
             "type": "object",
             "properties": {
