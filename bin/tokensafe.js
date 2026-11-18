@@ -136,6 +136,7 @@ Commands:
   tokensafe license            Show current license status and active tier
   tokensafe update             One-click self-update for npm, pip & all AI agent rules
   tokensafe install            Interactive installer for Cursor, Antigravity, Claude, etc.
+  tokensafe uninstall          Uninstall TokenSafe from AI agents, unwire proxy & clean rules
   tokensafe --help             Show this help screen
 `);
   process.exit(0);

@@ -424,6 +424,195 @@ class AgentInstaller:
         cls._atomic_write_json(config_file, data)
         return True, "guards registered (shell + junk-read + prompt pipeline)"
 
+    @classmethod
+    def uninstall_hooks_config(cls, agent_key: str) -> Tuple[bool, str]:
+        """Removes TokenSafe lifecycle hooks from agents that support them."""
+        if agent_key not in ("claude_code", "cursor", "kimi", "zcode"):
+            return True, ""
+
+        if agent_key == "kimi":
+            config_file = os.path.join(HOME, ".kimi-code", "config.toml")
+            if not os.path.exists(config_file):
+                return True, "Kimi Code config.toml not found"
+            try:
+                shutil.copy2(config_file, f"{config_file}.backup")
+            except Exception:
+                pass
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                return False, f"Could not read {config_file}"
+
+            sections = re.split(r'(?m)^(?=\[\[hooks\]\])', content)
+            keep = []
+            removed = False
+            for s in sections:
+                if "kimi_hook.py" in s:
+                    removed = True
+                    continue
+                keep.append(s)
+
+            new_content = "".join(keep)
+            new_content = re.sub(r'(?m)^[ \t]*#[ \t]*TokenSafe[^\n]*\n?', '', new_content)
+            cleaned = new_content.strip()
+            if not cleaned:
+                try:
+                    os.remove(config_file)
+                    return True, "Removed hooks from ~/.kimi-code/config.toml (file removed)"
+                except Exception:
+                    pass
+
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(cleaned + "\n" if cleaned else "")
+            return True, "Removed TokenSafe hooks from ~/.kimi-code/config.toml" if removed else "No TokenSafe hooks in config.toml"
+
+        if agent_key == "claude_code":
+            config_file = os.path.join(HOME, ".claude", "settings.json")
+            if not os.path.exists(config_file):
+                return True, "Claude Code settings.json not found"
+            data, err = cls._load_json_with_backup(config_file)
+            if err or data is None:
+                return False, err or f"Failed to parse {config_file}"
+            hooks = data.get("hooks")
+            if not isinstance(hooks, dict):
+                return True, "No hooks in Claude Code settings.json"
+
+            changed = False
+            for event_name in list(hooks.keys()):
+                entries = hooks.get(event_name)
+                if not isinstance(entries, list):
+                    continue
+                new_entries = []
+                for entry in entries:
+                    if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
+                        remaining = [
+                            h for h in entry["hooks"]
+                            if not (isinstance(h, dict) and "claude_code_hook.py" in str(h.get("command", "")))
+                        ]
+                        if len(remaining) != len(entry["hooks"]):
+                            changed = True
+                        if remaining:
+                            entry["hooks"] = remaining
+                            new_entries.append(entry)
+                    else:
+                        new_entries.append(entry)
+                if new_entries:
+                    hooks[event_name] = new_entries
+                else:
+                    hooks.pop(event_name, None)
+                    changed = True
+
+            if changed:
+                if not hooks:
+                    data.pop("hooks", None)
+                else:
+                    data["hooks"] = hooks
+                cls._atomic_write_json(config_file, data)
+                return True, "Removed TokenSafe hooks from Claude Code settings.json"
+            return True, "No TokenSafe hooks found in Claude Code settings.json"
+
+        if agent_key == "zcode":
+            config_file = os.path.join(HOME, ".zcode", "cli", "config.json")
+            if not os.path.exists(config_file):
+                return True, "ZCode config.json not found"
+            data, err = cls._load_json_with_backup(config_file)
+            if err or data is None:
+                return False, err or f"Failed to parse {config_file}"
+            hooks_block = data.get("hooks")
+            if not isinstance(hooks_block, dict):
+                return True, "No hooks in ZCode config.json"
+            events = hooks_block.get("events")
+            if not isinstance(events, dict):
+                return True, "No events in ZCode hooks"
+
+            tokensafe_scripts = ("session_start.py", "pre_invocation.py", "pre_tool_use.py", "post_tool_use.py", "stop_hook.py")
+            changed = False
+            for event_name in list(events.keys()):
+                entries = events.get(event_name)
+                if not isinstance(entries, list):
+                    continue
+                new_entries = []
+                for entry in entries:
+                    if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
+                        remaining = []
+                        for h in entry["hooks"]:
+                            args = h.get("args") if isinstance(h, dict) else []
+                            is_ts = False
+                            if isinstance(args, list):
+                                for a in args:
+                                    if isinstance(a, str) and (any(a.endswith(s) for s in tokensafe_scripts) or "tokensafe" in a):
+                                        is_ts = True
+                                        break
+                            if not is_ts:
+                                remaining.append(h)
+                            else:
+                                changed = True
+                        if remaining:
+                            entry["hooks"] = remaining
+                            new_entries.append(entry)
+                    else:
+                        new_entries.append(entry)
+                if new_entries:
+                    events[event_name] = new_entries
+                else:
+                    events.pop(event_name, None)
+                    changed = True
+
+            if changed:
+                if not events:
+                    hooks_block.pop("events", None)
+                    if list(hooks_block.keys()) == ["enabled"]:
+                        data.pop("hooks", None)
+                    else:
+                        data["hooks"] = hooks_block
+                else:
+                    hooks_block["events"] = events
+                    data["hooks"] = hooks_block
+                cls._atomic_write_json(config_file, data)
+                return True, "Removed TokenSafe hooks from ZCode config.json"
+            return True, "No TokenSafe hooks found in ZCode config.json"
+
+        # cursor
+        config_file = os.path.join(HOME, ".cursor", "hooks.json")
+        if not os.path.exists(config_file):
+            return True, "Cursor hooks.json not found"
+        data, err = cls._load_json_with_backup(config_file)
+        if err or data is None:
+            return False, err or f"Failed to parse {config_file}"
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            return True, "No hooks in Cursor hooks.json"
+
+        changed = False
+        for event_name in list(hooks.keys()):
+            entries = hooks.get(event_name)
+            if not isinstance(entries, list):
+                continue
+            new_entries = [
+                e for e in entries
+                if not (isinstance(e, dict) and "cursor_hook.py" in str(e.get("command", "")))
+            ]
+            if len(new_entries) != len(entries):
+                changed = True
+            if new_entries:
+                hooks[event_name] = new_entries
+            else:
+                hooks.pop(event_name, None)
+                changed = True
+
+        if changed:
+            if not hooks:
+                try:
+                    os.remove(config_file)
+                except Exception:
+                    cls._atomic_write_json(config_file, {})
+            else:
+                data["hooks"] = hooks
+                cls._atomic_write_json(config_file, data)
+            return True, "Removed TokenSafe guards from Cursor hooks.json"
+        return True, "No TokenSafe guards found in Cursor hooks.json"
+
     # ------------------------------------------------------------------
     # Proxy auto-wiring (v3.0.0): daemon + per-agent base URL override with
     # one-command rollback. Only agents that CAN be wired programmatically
@@ -1267,6 +1456,185 @@ WantedBy=default.target
         return False, "Unsupported type"
 
     @staticmethod
+    def _remove_path_safely(target_path: Optional[str]) -> bool:
+        """Safely removes a file, symlink, or directory. Returns True if removed."""
+        if not target_path:
+            return False
+        if os.path.islink(target_path) or os.path.isfile(target_path):
+            try:
+                os.unlink(target_path)
+                return True
+            except Exception:
+                return False
+        elif os.path.isdir(target_path):
+            try:
+                shutil.rmtree(target_path)
+                return True
+            except Exception:
+                return False
+        return False
+
+    @classmethod
+    def uninstall_mcp_config(cls, agent_key: str) -> Tuple[bool, str]:
+        """Removes TokenSafe MCP server, skills, rules, and plugins from the target agent."""
+        info = AGENTS_REGISTRY.get(agent_key)
+        if not info:
+            return False, f"Unknown agent: {agent_key}"
+
+        if info["type"] == "plugin":
+            target = info["target_path"]
+            legacy = info.get("legacy_path")
+            r1 = cls._remove_path_safely(target)
+            r2 = False
+            if legacy and os.path.islink(legacy):
+                r2 = cls._remove_path_safely(legacy)
+            r3 = cls._remove_user_level_tokensafe_mcp()
+            if r1 or r2 or r3:
+                return True, f"Removed TokenSafe plugin from Antigravity ({target})"
+            return True, "TokenSafe plugin not found in Antigravity"
+
+        elif info["type"] == "cursor_env":
+            config_file = info["config_path"]
+            if os.path.exists(config_file):
+                data, err = cls._load_json_with_backup(config_file)
+                if not err and data and isinstance(data.get("mcpServers"), dict):
+                    if "tokensafe" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe")
+                        cls._atomic_write_json(config_file, data)
+
+            cls._remove_path_safely(info.get("skills_path"))
+            cls._remove_path_safely(info.get("extension_path"))
+            cls._remove_path_safely(info.get("rules_path"))
+            cls._remove_global_rule(os.path.join(HOME, ".cursorrules"))
+            return True, "Removed MCP, Extension & Rules for Cursor"
+
+        elif info["type"] == "mcp_json":
+            config_file = info["config_path"]
+            if os.path.exists(config_file):
+                data, err = cls._load_json_with_backup(config_file)
+                if not err and data and isinstance(data.get("mcpServers"), dict):
+                    if "tokensafe" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe")
+                        cls._atomic_write_json(config_file, data)
+
+            if "skills_path" in info:
+                cls._remove_path_safely(info["skills_path"])
+
+            if "rules_path" in info:
+                if info["rules_path"].endswith("Rule_TokenSafe.md"):
+                    cls._remove_path_safely(info["rules_path"])
+                else:
+                    cls._remove_global_rule(info["rules_path"])
+
+            return True, f"Removed MCP & Rules from {config_file}"
+
+        elif info["type"] == "codex_toml":
+            config_file = info["config_path"]
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    if re.search(r'(?m)^\[mcp_servers\.tokensafe\]\s*$', content):
+                        shutil.copy2(config_file, f"{config_file}.backup")
+                        pattern = re.compile(r'(?ms)^\[mcp_servers\.tokensafe\]\s*\n(?:(?!^\[).)*')
+                        content = pattern.sub("", content)
+                        with open(config_file, "w", encoding="utf-8") as f:
+                            f.write(content.strip() + "\n" if content.strip() else "")
+                except Exception:
+                    pass
+
+            if "skills_path" in info:
+                cls._remove_path_safely(info["skills_path"])
+
+            if "plugin_path" in info:
+                cls._remove_path_safely(info["plugin_path"])
+
+            if "agents_md_path" in info:
+                cls._remove_global_rule(info["agents_md_path"])
+
+            return True, f"Removed MCP, Plugin, Skill & AGENTS.md for Codex ({config_file})"
+
+        elif info["type"] == "claude_md":
+            if "config_path" in info and os.path.exists(info["config_path"]):
+                config_file = info["config_path"]
+                data, err = cls._load_json_with_backup(config_file)
+                if not err and data and isinstance(data.get("mcpServers"), dict):
+                    if "tokensafe" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe")
+                        cls._atomic_write_json(config_file, data)
+
+            if "agents_md_path" in info:
+                cls._remove_global_rule(info["agents_md_path"])
+
+            if "skills_path" in info:
+                cls._remove_path_safely(info["skills_path"])
+
+            return True, f"Removed MCP, Rule & Skill for Claude Code ({info.get('agents_md_path')})"
+
+        elif info["type"] == "copilot_json":
+            config_file = info["config_path"]
+            if os.path.exists(config_file):
+                data, err = cls._load_json_with_backup(config_file)
+                if not err and data and isinstance(data.get("mcpServers"), dict):
+                    if "tokensafe" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe")
+                        cls._atomic_write_json(config_file, data)
+            return True, f"Removed MCP for GitHub Copilot in {config_file}"
+
+        elif info["type"] == "zcode_json":
+            config_file = info["config_path"]
+            if os.path.exists(config_file):
+                data, err = cls._load_json_with_backup(config_file)
+                if not err and data:
+                    mcp = data.get("mcp")
+                    if isinstance(mcp, dict) and isinstance(mcp.get("servers"), dict):
+                        if "tokensafe" in mcp["servers"]:
+                            mcp["servers"].pop("tokensafe")
+                            cls._atomic_write_json(config_file, data)
+
+            if "skills_path" in info:
+                cls._remove_path_safely(info["skills_path"])
+
+            if "plugin_path" in info:
+                cls._remove_path_safely(info["plugin_path"])
+
+            if "agents_md_path" in info:
+                cls._remove_global_rule(info["agents_md_path"])
+
+            return True, f"Removed MCP, Plugin, Skill & AGENTS.md for Z.ai Code ({config_file})"
+
+        elif info["type"] == "kimi_plugin":
+            mcp_file = info.get("config_path")
+            if mcp_file and os.path.exists(mcp_file):
+                data, err = cls._load_json_with_backup(mcp_file)
+                if not err and data and isinstance(data.get("mcpServers"), dict):
+                    if "tokensafe" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe")
+                        cls._atomic_write_json(mcp_file, data)
+
+            managed_plugin_path = info.get("managed_plugin_path")
+            if managed_plugin_path:
+                cls._remove_path_safely(managed_plugin_path)
+
+            installed_json = info.get("installed_json_path")
+            if installed_json and os.path.exists(installed_json):
+                inst_data, err = cls._load_json_with_backup(installed_json)
+                if not err and inst_data and isinstance(inst_data.get("plugins"), list):
+                    inst_data["plugins"] = [
+                        p for p in inst_data["plugins"]
+                        if not (isinstance(p, dict) and p.get("id") == "tokensafe")
+                    ]
+                    cls._atomic_write_json(installed_json, inst_data)
+
+            if "skills_path" in info:
+                cls._remove_path_safely(info["skills_path"])
+
+            if "agents_md_path" in info:
+                cls._remove_global_rule(info["agents_md_path"])
+
+            return True, "Removed MCP, Plugin, Skill & AGENTS.md for Kimi Code"
+
+    @staticmethod
     def _remove_user_level_tokensafe_mcp() -> bool:
         """Removes the tokensafe MCP entry from Antigravity's user-level
         mcp_config.json files (backup first). Returns True if any entry was
@@ -1352,6 +1720,43 @@ WantedBy=default.target
             new_content = (content.rstrip() + "\n\n" + wrapped).lstrip()
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
+
+    @classmethod
+    def _remove_global_rule(cls, file_path: Optional[str], tag: str = "tokensafe") -> bool:
+        """Removes a delimited rule block from a markdown instruction file.
+        Returns True if a rule block was found and stripped."""
+        if not file_path or not os.path.exists(file_path):
+            return False
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return False
+
+        start_tag = f"<!-- {tag} -->"
+        end_tag = f"<!-- /{tag} -->"
+        pattern = re.compile(rf"[ \t]*{re.escape(start_tag)}.*?{re.escape(end_tag)}[ \t]*\n?", re.DOTALL)
+        if not re.search(pattern, content) and start_tag not in content:
+            return False
+
+        new_content = pattern.sub("", content)
+        if start_tag in new_content:
+            new_content = re.sub(rf"[ \t]*{re.escape(start_tag)}.*", "", new_content)
+
+        cleaned = new_content.strip()
+        if not cleaned:
+            try:
+                os.remove(file_path)
+                return True
+            except Exception:
+                pass
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(cleaned + "\n" if cleaned else "")
+            return True
+        except Exception:
+            return False
 
     @classmethod
     def _symlink_skill(cls, target_path: str):
@@ -1556,6 +1961,218 @@ WantedBy=default.target
         print("   Restart your IDE / Agent to start saving tokens automatically.\n")
         cls.maybe_prompt_account_login(context="install")
         cls._ensure_proxy_default("install")
+
+    @classmethod
+    def uninstall_project(cls, project_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Removes TokenSafe rules, project MCP configs, and .gitignore references from a project workspace."""
+        if not project_dir:
+            project_dir = os.getcwd()
+        project_dir = os.path.abspath(project_dir)
+
+        rule_files = [
+            os.path.join(project_dir, "AGENTS.md"),
+            os.path.join(project_dir, "CLAUDE.md"),
+            os.path.join(project_dir, ".cursorrules"),
+            os.path.join(project_dir, ".windsurfrules"),
+            os.path.join(project_dir, ".clinerules"),
+            os.path.join(project_dir, ".github", "copilot-instructions.md"),
+        ]
+        cleaned = []
+        for rf in rule_files:
+            try:
+                if cls._remove_global_rule(rf):
+                    cleaned.append(os.path.relpath(rf, project_dir))
+            except Exception:
+                pass
+
+        # Remove .cursor/rules/tokensafe.mdc if present
+        cursor_mdc = os.path.join(project_dir, ".cursor", "rules", "tokensafe.mdc")
+        if cls._remove_path_safely(cursor_mdc):
+            cleaned.append(".cursor/rules/tokensafe.mdc")
+
+        # Clean project-local .cursor/mcp.json
+        cursor_mcp = os.path.join(project_dir, ".cursor", "mcp.json")
+        if os.path.exists(cursor_mcp):
+            try:
+                data, err = cls._load_json_with_backup(cursor_mcp)
+                if not err and data and isinstance(data.get("mcpServers"), dict):
+                    if "tokensafe" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe")
+                        if not data["mcpServers"] and list(data.keys()) == ["mcpServers"]:
+                            os.remove(cursor_mcp)
+                        else:
+                            cls._atomic_write_json(cursor_mcp, data)
+                        cleaned.append(".cursor/mcp.json")
+            except Exception:
+                pass
+
+        # Clean .agents/plugins.json
+        agents_plugins = os.path.join(project_dir, ".agents", "plugins.json")
+        if os.path.exists(agents_plugins):
+            try:
+                data, err = cls._load_json_with_backup(agents_plugins)
+                if not err and data and isinstance(data.get("entries"), list):
+                    original_len = len(data["entries"])
+                    data["entries"] = [
+                        e for e in data["entries"]
+                        if not (isinstance(e, dict) and "tokensafe" in str(e.get("path", "")))
+                    ]
+                    if len(data["entries"]) != original_len:
+                        if not data["entries"] and list(data.keys()) == ["entries"]:
+                            os.remove(agents_plugins)
+                        else:
+                            cls._write_file_safely(agents_plugins, json.dumps(data, indent=2))
+                        cleaned.append(".agents/plugins.json")
+            except Exception:
+                pass
+
+        # Clean .gitignore
+        root_gitignore = os.path.join(project_dir, ".gitignore")
+        if os.path.isfile(root_gitignore):
+            try:
+                with open(root_gitignore, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                new_lines = [
+                    line for line in lines
+                    if not line.strip().startswith(".tokensafe")
+                    and not ("TokenSafe" in line and ("runtime" in line or "metric" in line or "cache" in line))
+                ]
+                if len(new_lines) != len(lines):
+                    with open(root_gitignore, "w", encoding="utf-8") as f:
+                        f.writelines(new_lines)
+                    cleaned.append(".gitignore")
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "project_dir": project_dir,
+            "cleaned_rules": cleaned
+        }
+
+    @classmethod
+    def uninstall_all(cls, force: bool = False, purge: bool = False) -> Dict[str, Any]:
+        """Uninstalls TokenSafe from all detected AI agents, unwires proxy, and optionally purges data."""
+        proxy_report = cls.proxy_off()
+
+        agents = cls.detect_available_agents()
+        results = {}
+        for key, info in agents.items():
+            if info["installed"] or force:
+                m_ok, m_msg = cls.uninstall_mcp_config(key)
+                h_ok, h_msg = cls.uninstall_hooks_config(key)
+                status_ok = m_ok or h_ok
+                msgs = [m for m in (m_msg, h_msg) if m]
+                results[key] = {
+                    "name": info["name"],
+                    "success": status_ok,
+                    "message": "; ".join(msgs) if msgs else "Cleaned"
+                }
+
+        cls.restart_mcp_daemons()
+        proj_report = cls.uninstall_project(os.getcwd())
+
+        purged = False
+        if purge:
+            try:
+                from src.paths import resolve_data_dir
+                d_dir = resolve_data_dir()
+                if os.path.isdir(d_dir):
+                    shutil.rmtree(d_dir, ignore_errors=True)
+                ts_home = os.path.join(HOME, ".tokensafe")
+                if os.path.isdir(ts_home):
+                    shutil.rmtree(ts_home, ignore_errors=True)
+                purged = True
+            except Exception:
+                pass
+
+        return {
+            "agents": results,
+            "project_rules": proj_report.get("cleaned_rules", []),
+            "proxy": proxy_report,
+            "purged": purged
+        }
+
+    @classmethod
+    def run_interactive_uninstall(cls):
+        """Interactive terminal UI asking developer which agents to disconnect and unwire."""
+        agents = cls.detect_available_agents()
+
+        print("\n\033[1m\033[36m╔════════════════════════════════════════════════════════════════════╗\033[0m")
+        print("\033[1m\033[36m║        ⚡ TOKENSAFE UNIVERSAL MCP & AGENT UNINSTALLER ⚡         ║\033[0m")
+        print("\033[1m\033[36m╚════════════════════════════════════════════════════════════════════╝\033[0m\n")
+        print("Detected AI developer environments on your machine:\n")
+
+        keys = list(agents.keys())
+        selected = {}
+
+        for idx, key in enumerate(keys, 1):
+            info = agents[key]
+            tag = "\033[32m[Detected]\033[0m" if info["installed"] else "\033[2m[Not Found]\033[0m"
+            selected[key] = info["installed"]
+            mark = "[\033[32m✓\033[0m]" if selected[key] else "[ ]"
+            print(f"  {idx}. {mark} {info['name']:<28} {tag}")
+
+        print("\n\033[2mEnter numbers to toggle (e.g., 2,3), 'A' for all, or press Enter to uninstall selected:\033[0m")
+        try:
+            choice = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+
+        if choice == "a":
+            for k in selected:
+                selected[k] = True
+        elif choice:
+            for num in choice.replace(",", " ").split():
+                if num.isdigit() and 1 <= int(num) <= len(keys):
+                    k = keys[int(num) - 1]
+                    selected[k] = not selected[k]
+
+        try:
+            purge_ans = input("\nAlso purge local metrics database and cache (~/.tokensafe)? [y/N]: ").strip().lower()
+            purge = purge_ans in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            purge = False
+
+        print("\nUninstalling TokenSafe configurations...\n")
+        p_rep = cls.proxy_off()
+        if p_rep.get("unwired", {}).get("ok"):
+            print(f"  \033[32m✔\033[0m Proxy daemon & wiring unwound")
+
+        uninstalled_count = 0
+        for key, is_sel in selected.items():
+            if is_sel:
+                name = agents[key]["name"]
+                m_ok, m_msg = cls.uninstall_mcp_config(key)
+                h_ok, h_msg = cls.uninstall_hooks_config(key)
+                if m_ok or h_ok:
+                    msg = f"{m_msg}; {h_msg}" if (m_msg and h_msg) else (m_msg or h_msg)
+                    print(f"  \033[32m✔\033[0m \033[1m{name}\033[0m: {msg}")
+                    uninstalled_count += 1
+                else:
+                    print(f"  \033[33m–\033[0m \033[1m{name}\033[0m: Nothing to remove")
+
+        cls.restart_mcp_daemons()
+        proj_rep = cls.uninstall_project(os.getcwd())
+        if proj_rep.get("cleaned_rules"):
+            print(f"\n\033[32m✔ Cleaned project rules from: {', '.join(proj_rep['cleaned_rules'])}\033[0m")
+
+        if purge:
+            try:
+                from src.paths import resolve_data_dir
+                d_dir = resolve_data_dir()
+                if os.path.isdir(d_dir):
+                    shutil.rmtree(d_dir, ignore_errors=True)
+                ts_home = os.path.join(HOME, ".tokensafe")
+                if os.path.isdir(ts_home):
+                    shutil.rmtree(ts_home, ignore_errors=True)
+                print("  \033[32m✔\033[0m Local data directory purged (~/.tokensafe)")
+            except Exception:
+                pass
+
+        print(f"\n\033[32m\033[1m✅ TokenSafe uninstalled from {uninstalled_count} agent(s)!\033[0m")
+        print("   To completely remove the CLI, run:\n     npm uninstall -g @tokensafe/cli   (or pip uninstall tokensafe)\n")
 
     @staticmethod
     def _is_tokensafe_mcp_command(cmd: str) -> bool:

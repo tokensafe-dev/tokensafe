@@ -115,6 +115,7 @@ def _print_help():
     print("  vacuum                         Reclaim SQLite disk space")
     print("  reset                          Reset all local token metrics")
     print("  install | setup [--all]        Configure detected agent environments")
+    print("  uninstall [--all | --project]  Remove TokenSafe from agent environments & unwire proxy")
     print("  update | upgrade               Self-update npm/PyPI package and re-sync agents")
     print("  check-update                   Check for a newer published version")
     print("  activate / license             License activation and status")
@@ -415,6 +416,31 @@ def main(argv: Optional[List[str]] = None):
             print(f"\n\033[32m✔ TokenSafe rules injected into project: {', '.join(res['created_rules'])}\033[0m\n")
         else:
             AgentInstaller.run_interactive()
+
+    elif command in ("uninstall", "unistall", "remove", "unlink-all"):
+        from src.installer import AgentInstaller
+        purge = "--purge" in args
+        if "--all" in args or "-a" in args or "-y" in args or "--auto" in args:
+            print("\n\033[1m\033[36m⚡ TOKENSAFE UNIVERSAL MULTI-AGENT UNINSTALLER (--all) ⚡\033[0m\n")
+            res = AgentInstaller.uninstall_all(force=True, purge=purge)
+            print("Uninstalled AI agent configurations:")
+            for k, r in res["agents"].items():
+                status = "\033[32m✔\033[0m" if r["success"] else "\033[33m–\033[0m"
+                print(f"  {status} \033[1m{r['name']:<28}\033[0m: {r['message']}")
+            if res.get("project_rules"):
+                print(f"\n\033[32m✔ Project rules cleaned from: {', '.join(res['project_rules'])}\033[0m")
+            if res.get("proxy"):
+                print(f"  \033[32m✔\033[0m Proxy daemon stopped and routing restored")
+            if purge:
+                print(f"  \033[32m✔\033[0m Local data directory purged (~/.tokensafe)")
+            print("\n\033[32m✔ TokenSafe uninstallation complete.\033[0m\n")
+        elif "--project" in args:
+            res = AgentInstaller.uninstall_project(os.getcwd())
+            cleaned = res.get("cleaned_rules", [])
+            msg = f"TokenSafe rules cleaned from project: {', '.join(cleaned)}" if cleaned else "No TokenSafe rules found in project workspace"
+            print(f"\n\033[32m✔ {msg}\033[0m\n")
+        else:
+            AgentInstaller.run_interactive_uninstall()
 
     elif command in ("update", "upgrade"):
         from src.installer import AgentInstaller
