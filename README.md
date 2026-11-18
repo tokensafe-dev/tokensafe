@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="TokenSafe Logo" width="88" height="88" />
+  <img src="https://www.tokensafe.dev/ts-logo-transp-big.png" alt="TokenSafe Logo" width="88" height="88" />
 </p>
 
 <h1 align="center">TokenSafe</h1>
