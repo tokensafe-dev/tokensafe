@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "dev.tokensafe/tokensafe",
   "title": "TokenSafe",
-  "description": "Your AI agent is smart enough to code all day. Now it actually can. Local firewall & zero-loss runtime.",
+  "description": "Your AI agent is smart enough to code all day. Local firewall & zero-loss runtime.",
   "version": "4.2.5",
   "websiteUrl": "https://tokensafe.dev",
   "repository": {
