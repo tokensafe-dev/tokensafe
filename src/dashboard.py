@@ -41,6 +41,7 @@ def render_bar(percentage: float, width: int = 24) -> str:
 EVENT_NAMES = {
     "PROMPT": "Prompt Compactor (TOCP)",
     "TOOL_READ": "File Line Slicer (AST)",
+    "RAW_SLICE": "Raw Line Slice (explicit range)",
     "AST_SKELETON": "AST Skeletonizer (Signatures)",
     "GRAPH_SKELETON": "Graph-Guided Slicer (Call-Graph)",
     "GRAPH_TOPOLOGY": "Architecture Graph (God Nodes)",

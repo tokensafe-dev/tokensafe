@@ -34,12 +34,21 @@ class TestWave1McpProxyHooksInstaller(unittest.TestCase):
             self.assertIn("line_20 = 20", text1)
             self.assertIn("line_30 = 30", text1)
             self.assertNotIn("line_1 = 1", text1)
+            self.assertIn("[TOCP Raw Slice: lines 20-30 of sample.py]", text1)
 
             # Subsequent full read must return line_1, NOT cached 20..30 slice
             r2 = mcp_mod.handle_tool_call("smart_read_file", {"path": target, "include_deps": None})
             self.assertFalse(r2.get("isError", False))
             text2 = r2["content"][0]["text"]
             self.assertIn("line_1 = 1", text2)
+
+            # Raw slice must be self-identifying (mode + exact bounds), incl. end_line-only bound
+            r3 = mcp_mod.handle_tool_call("smart_read_file", {"path": target, "end_line": 5})
+            self.assertFalse(r3.get("isError", False))
+            text3 = r3["content"][0]["text"]
+            self.assertIn("[TOCP Raw Slice: lines 1-5 of sample.py]", text3)
+            self.assertIn("line_5 = 5", text3)
+            self.assertNotIn("line_6 = 6", text3)
 
     def test_mcp_rejects_explicit_invalid_project_path_and_null_json_rpc_params(self):
         from src import mcp_server as mcp_mod

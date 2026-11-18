@@ -1005,10 +1005,23 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             content, err = _read_line_slice(path, start_line, end_line)
             if err:
                 return _fallback_error("smart_read_file", err)
+            slice_lines = (content or "").splitlines()
+            slice_first = start_line if start_line is not None else 1
+            slice_last = slice_first + len(slice_lines) - 1 if slice_lines else max(1, slice_first - 1)
+            range_label = f"{slice_first}-{slice_last}" if slice_lines else str(slice_first)
             prefetch_block = ""
             if not sym_clean or eff_dep_mode == "full":
                 prefetch_block, _ = DependencyPrefetcher.prefetch_for_file(path)
-            return {"content": [{"type": "text", "text": (prefetch_block or "") + (content or "")}]}
+            slice_header = f"// [TOCP Raw Slice: lines {range_label} of {os.path.basename(path)}]\n"
+            delivered = (prefetch_block or "") + slice_header + (content or "")
+            tracker.record_event(
+                session_id=_mcp_session_id(),
+                event_type="RAW_SLICE",
+                original_tokens=max(200, st.st_size // 4),
+                optimized_tokens=count_tokens(delivered),
+                details={"file": os.path.basename(path), "lines": range_label, "symbol": sym_clean[:120]}
+            )
+            return {"content": [{"type": "text", "text": delivered}]}
 
         if symbol:
             # Team pre-warm hit: a teammate already skeletonized this symbol
