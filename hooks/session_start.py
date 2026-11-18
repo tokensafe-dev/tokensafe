@@ -72,6 +72,24 @@ def main():
     ]
 
     try:
+        from src.graph_engine import GraphEngine
+        graph = GraphEngine.get_instance(workspace_root)
+        banner = graph.format_topology_banner()
+        if banner:
+            inject_steps.append({
+                "systemMessage": {
+                    "systemMessage": (
+                        f"{banner}\n"
+                        "⚡ Core God Nodes and dependency hubs mapped above. "
+                        "Call 'tokensafe:get_architecture_graph(project_path)' for full dependency trees."
+                    ),
+                    "metadata": {},
+                }
+            })
+    except Exception:
+        pass
+
+    try:
         tracker = MetricsTracker()
         quota = LicenseManager.check_quota(tracker)
         if quota.get("warning"):

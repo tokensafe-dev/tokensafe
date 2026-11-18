@@ -38,7 +38,7 @@ TOKENSAFE_DIRECTIVES = (
     "• Zero-Fluff Egress: Omit conversational filler, courtesy preambles, and wrap-ups. Format responses in dense, technical prose.\n"
     "• Surgical Code Diffs: Never reprint full unmodified files or lengthy boilerplate; cite line ranges and provide targeted diffs.\n"
     "• Compact Test Execution: Run unit tests with concise flags or via 'tokensafe tests [cmd]' so passing suites emit a 1-line summary.\n"
-    "• To locate dependencies & God Nodes: call 'tokensafe:get_architecture_graph(project_path)'.\n"
+    "• Mandatory Architecture Graph & God Nodes: For any codebase navigation, feature design, or multi-component investigation, ALWAYS inspect God Nodes via 'tokensafe:get_architecture_graph(project_path)' first before diving into individual files.\n"
     "• To inspect all exported types/interfaces: call 'tokensafe:get_api_surface(project_path)'.\n"
     "• Before large multi-step tasks: call 'tokensafe:context_budget(model=...)' to check context headroom and Quality Score (Grade S-F).\n"
     "• When context_budget reports warning/critical or Grade C/F: call 'tokensafe:compact_conversation(transcript_path=...)' to fold history before continuing.\n"

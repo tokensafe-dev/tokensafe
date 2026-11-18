@@ -151,6 +151,25 @@ class TestSessionStartHook(unittest.TestCase):
                 session_start.main()
             bloat_mock.assert_called_once_with(workspace_root=tmp)
 
+    def test_topology_banner_injected_in_session_start(self):
+        from hooks import session_start
+        with tempfile.TemporaryDirectory() as tmp:
+            _fresh_env(tmp)
+            payload = {"conversationId": "ss_topo", "workspacePaths": [tmp]}
+            with patch("src.graph_engine.GraphEngine.get_instance") as mock_get_inst, \
+                 patch("src.license_manager.LicenseManager.check_quota", return_value={"is_quota_exceeded": False}), \
+                 patch("src.version_checker.VersionChecker.notify_os_update_background"), \
+                 patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                mock_graph = mock_get_inst.return_value
+                mock_graph.format_topology_banner.return_value = "[TokenSafe Architecture Map | Core Hubs: foo.py (10 deps)]"
+                session_start.main()
+            data = json.loads(out.getvalue())
+            steps = data["injectSteps"]
+            texts = [s["systemMessage"]["systemMessage"] for s in steps if "systemMessage" in s]
+            self.assertTrue(any("TokenSafe Architecture Map" in t for t in texts))
+            self.assertTrue(any("Core God Nodes and dependency hubs mapped above" in t for t in texts))
+
 
 class TestStopHook(unittest.TestCase):
     def test_budget_nudge_fires_exactly_once(self):

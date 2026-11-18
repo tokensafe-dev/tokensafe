@@ -1,10 +1,4 @@
 <!-- tokensafe -->
-# TokenSafe Project Rules (Pointer)
-
-The canonical project rules live in [AGENTS.md](../../AGENTS.md) — read it now and follow it for this repository.
-
-It carries the full TokenSafe Graph-First Optimization Protocol (`scoped_search`, `smart_read_file` / `smart_bundle`,
-`sanitize_command`, `tokensafe wrap` for tests) plus the repo architecture map and testing directives.
-
-This pointer replaces a duplicated copy to keep every session's context lean.
+## TOKENSAFE GRAPH-FIRST OPTIMIZATION PROTOCOL
+The full 12-point protocol is installed globally in the agent-level instructions (~/.zcode/AGENTS.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.kimi-code/AGENTS.md) and applies to this project. Core rules: never raw grep/find or `ls -la` — use `tokensafe:scoped_search`, `tokensafe:smart_read_file(path, symbol)`, `tokensafe:smart_bundle` and `tokensafe:list_dir`; sanitize high-output commands via `tokensafe:sanitize_command`; check `tokensafe:context_budget` (Grade S-F) before large tasks and compact via `tokensafe:compact_conversation` (orientation digest active); never hardcode secret fallbacks; append the `⚡ TokenSafe Turn Savings` footer on tool-using turns.
 <!-- /tokensafe -->

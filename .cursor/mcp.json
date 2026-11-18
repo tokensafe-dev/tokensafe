@@ -3,7 +3,7 @@
     "tokensafe": {
       "command": "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",
       "args": [
-        "/Users/olegsavelev/Documents/projects/agy-token-optimizer/src/mcp_server.py"
+        "/Users/olegsavelev/Documents/projects/tokensafe/src/mcp_server.py"
       ]
     }
   }

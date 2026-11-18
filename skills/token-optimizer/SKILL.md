@@ -31,8 +31,8 @@ folds multi-turn conversation history, slices verbose tool outputs, and guards a
    - **Schema Auto-Slicing**: OpenAPI/Swagger, Prisma, GraphQL and SQL files bypass AST skeletonization. Pass the spec path (`/users/{id}`), Prisma model, GraphQL type, or SQL table as `symbol` for a targeted slice with 1-hop references; an empty `symbol` returns a compact overview (paths/models/types/tables index) instead of a 20k-50k token dump.
    - **Result**: Preserves the exact target definition while folding surrounding inert code into clean 1-line signatures without docstrings (-85% to -98% tokens).
 
-3. **ARCHITECTURE SURVEY BEFORE BROWSING (`get_architecture_graph`)**:
-   - Before multi-file exploration or asking where things are located, ALWAYS call `tokensafe:get_architecture_graph(project_path=".")` (`project_path` defaults to active workspace).
+3. **MANDATORY ARCHITECTURE GRAPH & GOD NODES FIRST (`get_architecture_graph`)**:
+   - For ANY codebase inquiry, feature design, refactoring, or multi-component investigation, your FIRST tool call MUST be `tokensafe:get_architecture_graph(project_path=".")` (`project_path` defaults to active workspace) before diving into individual files or running searches.
    - **Result**: Returns top architectural God Nodes, dependency hubs, and centrality rankings in < 250 tokens without file crawling.
 
 4. **API SURFACE INSPECTION (`get_api_surface`)**:
