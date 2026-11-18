@@ -902,11 +902,16 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
         else:
             err_body = {"error": message}
         err_bytes = json.dumps(err_body).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(err_bytes)))
-        self.end_headers()
-        self.wfile.write(err_bytes)
+        # Client may have already hung up (BrokenPipeError in the traceback log
+        # used to bury the real cause under a full socketserver dump).
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(err_bytes)))
+            self.end_headers()
+            self.wfile.write(err_bytes)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def handle_chat_completions(self):
         try:
@@ -1346,6 +1351,15 @@ def run_proxy(port: int = DEFAULT_PORT, host: str = DEFAULT_HOST):
     class _TokenSafeThreadingServer(ThreadingHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
+
+        def handle_error(self, request, client_address):
+            # Client hangups (agent cancelled a request mid-stream) are routine
+            # here — keep them out of proxy.log, surface everything else.
+            import sys as _sys
+            exc = _sys.exc_info()[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+                return
+            super().handle_error(request, client_address)
 
     httpd = _TokenSafeThreadingServer(server_address, TokenSafeProxyHandler)
     display_host = "localhost" if host in ("0.0.0.0", "", "127.0.0.1") else host
