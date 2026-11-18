@@ -14,6 +14,7 @@ from src.proxy import (
     _translate_anthropic_payload_to_openai,
     _translate_openai_json_to_anthropic,
     _translate_openai_error_body_to_anthropic,
+    _translate_openai_payload_to_anthropic,
 )
 
 
@@ -196,6 +197,79 @@ class TestIngestEndpoint(unittest.TestCase):
         written = handler.wfile.getvalue().decode("utf-8")
         self.assertIn("Hi there", written)
         self.assertIn('"type": "message"', written)
+
+
+class TestThinkingPreservation(unittest.TestCase):
+    """z.ai 1214 round two: extended-thinking blocks dropped by the ingest made
+    assistant tool_use history illegal for the strict z.ai mirror."""
+
+    ANTHROPIC_PAYLOAD = {
+        "model": "glm-5.3-flash",
+        "max_tokens": 256,
+        "messages": [
+            {"role": "user", "content": "Read the file"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "need the file first", "signature": "sig-abc"},
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "/x.py"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "data"}]},
+            ]},
+            {"role": "user", "content": "Now reply OK"},
+        ],
+    }
+
+    def test_thinking_blocks_survive_roundtrip(self):
+        openai_form = _translate_anthropic_payload_to_openai(self.ANTHROPIC_PAYLOAD)
+        assistant = next(m for m in openai_form["messages"] if m["role"] == "assistant")
+        self.assertEqual(assistant["_tokensafe_thinking"][0]["signature"], "sig-abc")
+        self.assertEqual(assistant["tool_calls"][0]["id"], "toolu_1")
+
+        out = _translate_openai_payload_to_anthropic(openai_form)
+        out_assistant = next(m for m in out["messages"] if m["role"] == "assistant")
+        content = out_assistant["content"]
+        self.assertEqual(content[0]["type"], "thinking", "thinking must come first")
+        self.assertEqual(content[0]["signature"], "sig-abc")
+        self.assertEqual([b["type"] for b in content[1:]], ["tool_use"])
+
+    def test_tool_only_assistant_has_no_empty_text_block(self):
+        # Old behavior injected {"type":"text","text":""} before every tool_use.
+        openai_form = {"model": "m", "max_tokens": 10, "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "t1", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{\"path\": \"/x\"}"}},
+            ]},
+        ]}
+        out = _translate_openai_payload_to_anthropic(openai_form)
+        assistant = out["messages"][1]
+        self.assertEqual(assistant["content"][0]["type"], "tool_use")
+        for b in assistant["content"]:
+            self.assertFalse(b.get("type") == "text" and not b.get("text"))
+
+    def test_empty_turns_and_empty_text_blocks_dropped(self):
+        openai_form = {"model": "m", "max_tokens": 10, "messages": [
+            {"role": "user", "content": ""},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": [{"type": "text", "text": ""}, {"type": "text", "text": "real"}]},
+            {"role": "user", "content": "ping"},
+        ]}
+        out = _translate_openai_payload_to_anthropic(openai_form)
+        # empty user + empty assistant dropped; empty text block filtered; merge keeps one user message
+        self.assertEqual(len(out["messages"]), 1)
+        self.assertEqual(out["messages"][0]["role"], "user")
+        self.assertEqual([b["text"] for b in out["messages"][0]["content"]], ["real", "ping"])
+
+    def test_thinking_only_assistant_kept_nonempty(self):
+        openai_form = {"model": "m", "max_tokens": 10, "messages": [
+            {"role": "user", "content": "think"},
+            {"role": "assistant", "content": None,
+             "_tokensafe_thinking": [{"type": "thinking", "thinking": "hmm", "signature": "s"}]},
+            {"role": "user", "content": "reply OK"},
+        ]}
+        out = _translate_openai_payload_to_anthropic(openai_form)
+        assistant = out["messages"][1]
+        self.assertEqual(assistant["content"][0]["type"], "thinking")
 
 
 if __name__ == "__main__":

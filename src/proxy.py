@@ -110,7 +110,9 @@ def _blocks_from_content(content: Any, role: str = "user") -> List[Dict[str, Any
         if not isinstance(blk, dict):
             continue
         btype = blk.get("type")
-        if btype == "text" and isinstance(blk.get("text"), str):
+        # Empty text blocks are rejected by strict Anthropic mirrors (z.ai 1214)
+        # and carry no information — drop them at the source.
+        if btype == "text" and isinstance(blk.get("text"), str) and blk["text"]:
             nb = {"type": "text", "text": blk["text"]}
             if isinstance(blk.get("cache_control"), dict):
                 nb["cache_control"] = blk["cache_control"]
@@ -169,9 +171,12 @@ def _translate_openai_payload_to_anthropic(payload: Dict[str, Any]) -> Dict[str,
 
         if role == "assistant":
             blocks: List[Dict[str, Any]] = _blocks_from_content(msg.get("content"), "assistant")
+            thinking = msg.get("_tokensafe_thinking") if isinstance(msg.get("_tokensafe_thinking"), list) else []
+            has_tool_use = False
             for tc in (msg.get("tool_calls") or []):
                 if not isinstance(tc, dict):
                     continue
+                has_tool_use = True
                 fn = tc.get("function") or {}
                 try:
                     tool_input = json.loads(fn.get("arguments") or "{}")
@@ -188,9 +193,21 @@ def _translate_openai_payload_to_anthropic(payload: Dict[str, Any]) -> Dict[str,
                     "name": fn.get("name") or "unknown",
                     "input": tool_input,
                 })
-            if not blocks:
-                blocks = [{"type": "text", "text": ""}]
-            out_messages.append({"role": "assistant", "content": _collapse_plain_text(blocks) if len(blocks) == 1 and blocks[0].get("type") == "text" else blocks})
+            if not blocks and not thinking:
+                # An assistant turn with neither text, tool_use, nor thinking is
+                # illegal upstream (z.ai answers 1214 "messages parameter illegal").
+                continue
+            if thinking:
+                # Extended-thinking models (GLM via z.ai, Claude): assistant
+                # history must carry its thinking blocks back, signature included —
+                # thinking first, then text/tool_use. Dropping them (the old
+                # ingest behavior) trips strict mirrors with 1214.
+                content: Any = thinking + blocks if blocks else list(thinking)
+            elif len(blocks) == 1 and blocks[0].get("type") == "text":
+                content = _collapse_plain_text(blocks)
+            else:
+                content = blocks
+            out_messages.append({"role": "assistant", "content": content})
         elif role == "tool":
             tc_content = msg.get("content")
             text = tc_content if isinstance(tc_content, str) else json.dumps(tc_content, ensure_ascii=False)
@@ -203,7 +220,13 @@ def _translate_openai_payload_to_anthropic(payload: Dict[str, Any]) -> Dict[str,
                 "content": [{"type": "tool_result", "tool_use_id": msg.get("tool_call_id") or "toolu_call", "content": text}],
             })
         elif role == "user":
-            out_messages.append({"role": "user", "content": _collapse_plain_text(_blocks_from_content(msg.get("content"), "user")) or [{"type": "text", "text": ""}]})
+            blocks = _blocks_from_content(msg.get("content"), "user")
+            if not blocks:
+                # Empty user turns are rejected by strict mirrors — drop instead
+                # of emitting {"type":"text","text":""}; adjacent same-role
+                # messages are re-merged below, so alternation stays valid.
+                continue
+            out_messages.append({"role": "user", "content": _collapse_plain_text(blocks)})
 
     out: Dict[str, Any] = {
         "model": payload.get("model") or "claude-3-5-sonnet-latest",
@@ -366,12 +389,20 @@ def _translate_anthropic_payload_to_openai(payload: Dict[str, Any]) -> Dict[str,
         if role == "assistant":
             text_parts: List[str] = []
             tool_calls = []
+            thinking_blocks: List[Dict[str, Any]] = []
             blocks = content if isinstance(content, list) else ([{"type": "text", "text": content}] if isinstance(content, str) else [])
             for blk in blocks:
                 if not isinstance(blk, dict):
                     continue
                 if blk.get("type") == "text" and isinstance(blk.get("text"), str):
                     text_parts.append(blk["text"])
+                elif blk.get("type") in ("thinking", "redacted_thinking"):
+                    # Side-channel: extended-thinking blocks must survive the
+                    # OpenAI-form pipeline untouched so the outbound Anthropic
+                    # translation can restore them (strict mirrors reject
+                    # assistant history whose tool_use turns lost their thinking
+                    # prefix — z.ai 1214 "messages parameter is illegal").
+                    thinking_blocks.append(blk)
                 elif blk.get("type") == "tool_use":
                     tool_calls.append({
                         "id": blk.get("id") or f"call_{blk.get('name', 'tool')}",
@@ -384,6 +415,8 @@ def _translate_anthropic_payload_to_openai(payload: Dict[str, Any]) -> Dict[str,
             m: Dict[str, Any] = {"role": "assistant", "content": "\n\n".join(text_parts) if text_parts else None}
             if tool_calls:
                 m["tool_calls"] = tool_calls
+            if thinking_blocks:
+                m["_tokensafe_thinking"] = thinking_blocks
             out_messages.append(m)
         elif role == "user":
             blocks = content if isinstance(content, list) else ([{"type": "text", "text": content}] if isinstance(content, str) else [])
@@ -1091,6 +1124,12 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             # itself speaks Anthropic (ingest): the pipeline ran on the internal
             # OpenAI form, and this puts it back into Anthropic shape for upstream.
             payload = _translate_openai_payload_to_anthropic(payload)
+        else:
+            # The ingest thinking side-channel is Anthropic-only — never leak it
+            # into an OpenAI-dialect upstream request.
+            for _m in payload.get("messages") or []:
+                if isinstance(_m, dict):
+                    _m.pop("_tokensafe_thinking", None)
 
         headers = {"Content-Type": "application/json"}
         if provider == "anthropic":
@@ -1245,6 +1284,22 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             with e:
                 err_body = e.read()
                 ctype = e.headers.get("Content-Type", "application/json") if e.headers else "application/json"
+            # Permanent diagnostics: upstream rejections were previously forwarded
+            # to the client without any server-side trace, making incidents like
+            # z.ai 1214 undiagnosable from proxy.log alone.
+            try:
+                sys.stderr.write(
+                    f"[TokenSafe] {self.command} {self.path} -> upstream {e.code}: "
+                    f"{err_body[:400].decode('utf-8', 'replace')}\n"
+                )
+                if e.code == 400:
+                    sys.stderr.write(
+                        "[TokenSafe][debug] upstream-400 payload preview: "
+                        f"model={payload.get('model')!r} msgs={len(payload.get('messages') or [])} "
+                        f"body[:1200]={json.dumps(payload, ensure_ascii=False)[:1200]}\n"
+                    )
+            except Exception:
+                pass
             if provider == "anthropic" and not client_anthropic:
                 err_body = _translate_anthropic_error_body(err_body)
             elif client_anthropic and provider != "anthropic":
