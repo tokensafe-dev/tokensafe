@@ -4,9 +4,9 @@
   "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall & zero-loss context optimizer for AI coding agents.",
   "homepage": "https://tokensafe.dev",
   "license": "MIT",
-  "logo": "https://tokensafe.dev/logo.png",
-  "icon": "https://tokensafe.dev/logo.png",
-  "iconUrl": "https://tokensafe.dev/logo.png",
+  "logo": "https://tokensafe.dev/ts-logo-black-small.png",
+  "icon": "https://tokensafe.dev/ts-logo-black-small.png",
+  "iconUrl": "https://tokensafe.dev/ts-logo-black-small.png",
   "author": {
     "name": "TokenSafe"
   },
@@ -15,8 +15,8 @@
     "shortDescription": "Stop coding agent context rot, destructive rewrites & secret leaks",
     "developerName": "TokenSafe",
     "websiteURL": "https://tokensafe.dev",
-    "logo": "https://tokensafe.dev/logo.png",
-    "iconUrl": "https://tokensafe.dev/logo.png"
+    "logo": "https://tokensafe.dev/ts-logo-black-small.png",
+    "iconUrl": "https://tokensafe.dev/ts-logo-black-small.png"
   },
   "skills": [
     "skills/token-optimizer"

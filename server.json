@@ -16,13 +16,6 @@
       "sizes": [
         "96x96"
       ]
-    },
-    {
-      "src": "https://tokensafe.dev/logo.svg",
-      "mimeType": "image/svg+xml",
-      "sizes": [
-        "any"
-      ]
     }
   ],
   "packages": [
