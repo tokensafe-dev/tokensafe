@@ -1,7 +1,7 @@
 {
   "name": "tokensafe",
   "displayName": "TokenSafe",
-  "version": "4.2.8",
+  "version": "4.2.9",
   "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall & zero-loss context optimizer for AI coding agents.",
   "logo": "https://tokensafe.dev/ts-logo-black-256.png",
   "developerName": "TokenSafe",
