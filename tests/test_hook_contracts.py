@@ -166,7 +166,8 @@ class TestSessionStartHook(unittest.TestCase):
                 session_start.main()
             data = json.loads(out.getvalue())
             steps = data["injectSteps"]
-            texts = [s["systemMessage"]["systemMessage"] for s in steps if "systemMessage" in s]
+            texts = [s["systemMessage"]["systemMessage"] for s in steps if "systemMessage" in s and s["systemMessage"]["systemMessage"]]
+            self.assertEqual(len(texts), 1, "Directives and topology banner should be unified into a single systemMessage card")
             self.assertTrue(any("TokenSafe Architecture Map" in t for t in texts))
             self.assertTrue(any("Core God Nodes and dependency hubs mapped above" in t for t in texts))
 

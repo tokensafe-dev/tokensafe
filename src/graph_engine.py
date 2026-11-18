@@ -134,6 +134,22 @@ def _is_test_file(rel_path: str) -> bool:
         or base.endswith(("_test.py", "_test.go", ".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts", ".spec.tsx", ".spec.js"))
     )
 
+
+def _is_generated_file(rel_path: str) -> bool:
+    norm = rel_path.replace("\\", "/").lower()
+    base = os.path.basename(norm)
+    parts = norm.split("/")
+    if any(p in ("generated", "__generated__", ".gen", "gen", "swagger", "openapi") for p in parts[:-1]):
+        return True
+    if any(p.endswith((".gen", "__generated__")) for p in parts[:-1]):
+        return True
+    return (
+        base.startswith(("swagger", "openapi", "generated"))
+        or base.endswith((".swagger.ts", ".swagger.js", ".gen.ts", ".gen.js", ".gen.go", ".pb.go", "_pb2.py"))
+        or "swaggerapi" in base
+        or "openapi" in base
+    )
+
 class CodeSymbol:
     """Represents a structural code entity (file, class, or function)."""
     __slots__ = ("name", "kind", "file_path", "line_start", "line_end", "signature", "body")
@@ -1090,7 +1106,7 @@ class CodeGraph:
         Prioritizes resolved file-to-file imports and import-verified symbol calls,
         and downweights test files when production files are present.
         """
-        has_prod_files = any(not _is_test_file(p) for p in self.file_symbols.keys())
+        has_prod_files = any(not _is_test_file(p) and not _is_generated_file(p) for p in self.file_symbols.keys())
         has_resolved_imports = any(
             t.startswith("file:")
             for src, targets in self.edges.items()
@@ -1120,7 +1136,14 @@ class CodeGraph:
                         in_degree += 1
 
             raw_centrality = in_degree * 2 + out_degree
-            rank_score = raw_centrality * 0.2 if (has_prod_files and _is_test_file(rel_path)) else float(raw_centrality)
+            if has_prod_files and _is_test_file(rel_path):
+                rank_score = raw_centrality * 0.1
+            elif has_prod_files and _is_generated_file(rel_path):
+                rank_score = raw_centrality * 0.01
+            elif has_prod_files and in_degree == 0:
+                rank_score = raw_centrality * 0.15
+            else:
+                rank_score = float(in_degree * 3 + out_degree)
             scores[rel_path] = {
                 "file": rel_path,
                 "centrality": raw_centrality,
@@ -1443,10 +1466,13 @@ class CodeGraph:
 
     def format_topology_banner(self) -> str:
         """Creates a compact 1-line prompt injection banner for coding agents."""
-        god_nodes = self.get_god_nodes(top_n=4)
+        god_nodes = self.get_god_nodes(top_n=6)
         if not god_nodes:
             return ""
-        items = [f"{g['file']} ({g['dependents']} deps)" for g in god_nodes]
+        # In multi-file projects, Core Hubs must have incoming dependents (dependents > 0)
+        hubs = [g for g in god_nodes if g.get("dependents", 0) > 0]
+        nodes_to_show = hubs[:4] if hubs else god_nodes[:4]
+        items = [f"{g['file']} ({g['dependents']} deps)" for g in nodes_to_show]
         return f"[TokenSafe Architecture Map | Core Hubs: {', '.join(items)}]"
 
 

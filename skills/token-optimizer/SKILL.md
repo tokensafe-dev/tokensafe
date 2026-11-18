@@ -32,7 +32,7 @@ folds multi-turn conversation history, slices verbose tool outputs, and guards a
    - **Result**: Preserves the exact target definition while folding surrounding inert code into clean 1-line signatures without docstrings (-85% to -98% tokens).
 
 3. **MANDATORY ARCHITECTURE GRAPH & GOD NODES FIRST (`get_architecture_graph`)**:
-   - For ANY codebase inquiry, feature design, refactoring, or multi-component investigation, your FIRST tool call MUST be `tokensafe:get_architecture_graph(project_path=".")` (`project_path` defaults to active workspace) before diving into individual files or running searches.
+   - For ANY codebase inquiry, feature design, refactoring, or multi-component investigation, your FIRST tool call MUST be `tokensafe:get_architecture_graph(project_path)` before diving into individual files or running searches. Always pass the target project's absolute path (e.g. `"/path/to/repo"`) when working across multiple workspaces or outside CWD.
    - **Result**: Returns top architectural God Nodes, dependency hubs, and centrality rankings in < 250 tokens without file crawling.
 
 4. **API SURFACE INSPECTION (`get_api_surface`)**:

@@ -127,7 +127,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project_path": {"type": "string", "description": "Optional root path of the project (defaults to active workspace, or pass '.' or absolute path)"}
+                "project_path": {"type": "string", "description": "Target project root directory. IMPORTANT: Always pass the absolute directory path (e.g. '/path/to/repo') when working in multi-workspace setups or repositories outside CWD."}
             }
         }
     },
@@ -137,7 +137,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project_path": {"type": "string", "description": "Optional root path of the project (defaults to active workspace, or pass '.' or absolute path)"}
+                "project_path": {"type": "string", "description": "Target project root directory. IMPORTANT: Always pass the absolute directory path (e.g. '/path/to/repo') when working in multi-workspace setups or repositories outside CWD."}
             }
         }
     },

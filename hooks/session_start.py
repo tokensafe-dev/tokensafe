@@ -67,27 +67,24 @@ def main():
     except Exception:
         pass
 
-    inject_steps = [
-        {"systemMessage": {"systemMessage": PROTOCOL_DIRECTIVES, "metadata": {}}}
-    ]
-
+    directives = PROTOCOL_DIRECTIVES
     try:
         from src.graph_engine import GraphEngine
         graph = GraphEngine.get_instance(workspace_root)
         banner = graph.format_topology_banner()
         if banner:
-            inject_steps.append({
-                "systemMessage": {
-                    "systemMessage": (
-                        f"{banner}\n"
-                        "⚡ Core God Nodes and dependency hubs mapped above. "
-                        "Call 'tokensafe:get_architecture_graph(project_path)' for full dependency trees."
-                    ),
-                    "metadata": {},
-                }
-            })
+            directives = (
+                f"{directives}\n\n"
+                f"{banner}\n"
+                "⚡ Core God Nodes and dependency hubs mapped above. "
+                "Call 'tokensafe:get_architecture_graph(project_path)' for full dependency trees."
+            )
     except Exception:
         pass
+
+    inject_steps = [
+        {"systemMessage": {"systemMessage": directives, "metadata": {}}}
+    ]
 
     try:
         tracker = MetricsTracker()

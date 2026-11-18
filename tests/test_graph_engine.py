@@ -118,6 +118,21 @@ def run_service():
         self.assertIn("[TokenSafe Architecture Map", banner)
         self.assertIn("core.py", banner)
 
+    def test_generated_files_downranked_in_god_nodes(self):
+        gen_dir = os.path.join(self.test_dir, "src", "__generated__")
+        os.makedirs(gen_dir, exist_ok=True)
+        gen_file = os.path.join(gen_dir, "SwaggerApi.py")
+        with open(gen_file, "w") as f:
+            f.write("\n".join([f"class DTO{i}:\n    pass" for i in range(50)]))
+        graph = CodeGraph(self.test_dir)
+        graph.scan()
+        god_nodes = graph.get_god_nodes(top_n=3)
+        self.assertTrue(len(god_nodes) > 0)
+        # Generated file with 0 incoming dependents must not displace real core hubs
+        self.assertEqual(god_nodes[0]["file"], "core.py")
+        banner = graph.format_topology_banner()
+        self.assertNotIn("SwaggerApi.py", banner)
+
     def test_python_duplicate_method_names_and_class_call_isolation(self):
         dup_file = os.path.join(self.test_dir, "models.py")
         with open(dup_file, "w") as f:
