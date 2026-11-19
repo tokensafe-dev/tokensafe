@@ -16,6 +16,7 @@ import os
 import sys
 import re
 import json
+import time
 from typing import Dict, Any, Optional, Tuple
 
 from src.tokenizer import count_tokens
@@ -100,7 +101,75 @@ def _get_tracker():
         return None
 
 
-def compact_for_injection(prompt: str, agent: str, session_id: str) -> Tuple[str, Dict[str, Any]]:
+# --- Model attribution -------------------------------------------------------
+# Lifecycle hooks never receive the host model, so event details resolve it
+# best-effort: 1) the session transcript (CC-family JSONL stores message.model
+# on assistant entries — read the file tail only, cached by mtime so repeated
+# hook invocations stay cheap), 2) the local proxy's state file (the proxy sees
+# every request and stamps its last-seen model), 3) host env (MODEL /
+# AGY_MODEL). Anything unknown stays "" — the landing feed renders "—" instead
+# of a fabricated name (see telemetry_sync / record_telemetry).
+_MODEL_TRANSCRIPT_CACHE: Dict[str, Tuple[float, str]] = {}
+_PROXY_STATE_TTL_S = 600
+_TRANSCRIPT_TAIL_BYTES = 262144
+
+
+def _sniff_transcript_model(transcript_path: str) -> str:
+    path = str(transcript_path or "")
+    if not path:
+        return ""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return ""
+    cached = _MODEL_TRANSCRIPT_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    model = ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            tail = f.read().decode("utf-8", errors="ignore")
+        for line in reversed(tail.splitlines()):
+            if '"model"' not in line:
+                continue
+            m = re.search(r'"model"\s*:\s*"([^"]+)"', line)
+            if m and m.group(1):
+                model = m.group(1)[:64]
+                break
+    except OSError:
+        model = ""
+    _MODEL_TRANSCRIPT_CACHE[path] = (mtime, model)
+    return model
+
+
+def _read_proxy_state_model() -> str:
+    try:
+        from src.paths import resolve_data_dir
+        state_path = os.path.join(resolve_data_dir(), "proxy_state.json")
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if time.time() - float(state.get("ts") or 0) > _PROXY_STATE_TTL_S:
+            return ""
+        return str(state.get("model") or "")[:64]
+    except Exception:
+        return ""
+
+
+def resolve_event_model(transcript_path: str = "", session_id: str = "") -> str:
+    """Best-effort model attribution for recorded events. Fails open to ''."""
+    model = _sniff_transcript_model(transcript_path)
+    if model:
+        return model
+    model = _read_proxy_state_model()
+    if model:
+        return model
+    return os.environ.get("MODEL") or os.environ.get("AGY_MODEL") or ""
+
+
+def compact_for_injection(prompt: str, agent: str, session_id: str, transcript_path: str = "") -> Tuple[str, Dict[str, Any]]:
     """Compacts a user prompt into its TOCP form for context injection.
 
     Returns (context_text, meta). context_text is '' when compaction is not
@@ -124,7 +193,8 @@ def compact_for_injection(prompt: str, agent: str, session_id: str) -> Tuple[str
                     event_type="PROMPT",
                     original_tokens=compaction["original_tokens"],
                     optimized_tokens=compaction["compact_tokens"],
-                    details={"agent": agent, "mode": "hook_inject", "tier": compaction.get("tier", "REGEX")},
+                    details={"agent": agent, "mode": "hook_inject", "tier": compaction.get("tier", "REGEX"),
+                             "model": resolve_event_model(transcript_path, session_id)},
                 )
             except Exception:
                 pass
@@ -134,7 +204,7 @@ def compact_for_injection(prompt: str, agent: str, session_id: str) -> Tuple[str
         return "", meta
 
 
-def guard_command(command: str, agent: str, session_id: str = "", cwd: str = "") -> Dict[str, Any]:
+def guard_command(command: str, agent: str, session_id: str = "", cwd: str = "", transcript_path: str = "") -> Dict[str, Any]:
     """Pre-execution shell guard. Returns:
     {decision: allow|deny|ask, reason, saved_tokens} where saved_tokens is the
     MEASURED mass of blocked output (0 for allowed commands)."""
@@ -154,7 +224,8 @@ def guard_command(command: str, agent: str, session_id: str = "", cwd: str = "")
                     event_type=f"GUARD_{kind}",
                     original_tokens=est,
                     optimized_tokens=0,
-                    details={"agent": agent, "command": cmd[:120]},
+                    details={"agent": agent, "command": cmd[:120],
+                             "model": resolve_event_model(transcript_path, session_id)},
                 )
             except Exception:
                 pass
@@ -193,7 +264,7 @@ def guard_command(command: str, agent: str, session_id: str = "", cwd: str = "")
     return result
 
 
-def guard_read(file_path: str, agent: str, session_id: str = "") -> Dict[str, Any]:
+def guard_read(file_path: str, agent: str, session_id: str = "", transcript_path: str = "") -> Dict[str, Any]:
     """Pre-read guard: denies lockfiles/bundles/dist junk that would burn the
     context window. Blocked reads are recorded as measured savings."""
     result = {"decision": "allow", "reason": "", "saved_tokens": 0}
@@ -211,7 +282,8 @@ def guard_read(file_path: str, agent: str, session_id: str = "") -> Dict[str, An
                         event_type="GUARD_JUNK_READ",
                         original_tokens=est,
                         optimized_tokens=0,
-                        details={"agent": agent, "file": os.path.basename(normalized)},
+                        details={"agent": agent, "file": os.path.basename(normalized),
+                                 "model": resolve_event_model(transcript_path, session_id)},
                     )
                 except Exception:
                     pass
@@ -225,7 +297,7 @@ def guard_read(file_path: str, agent: str, session_id: str = "") -> Dict[str, An
     return result
 
 
-def guard_write(file_path: str, content: str, append: bool = False, agent: str = "", session_id: str = "") -> Dict[str, Any]:
+def guard_write(file_path: str, content: str, append: bool = False, agent: str = "", session_id: str = "", transcript_path: str = "") -> Dict[str, Any]:
     """Pre-write egress guard (v3.0.0): full-file Write over an existing file
     burns expensive OUTPUT tokens. Policy:
     - new file / append / no content -> allow
@@ -273,6 +345,7 @@ def guard_write(file_path: str, content: str, append: bool = False, agent: str =
                         "existing_lines": len(existing_lines),
                         "delta_lines": delta_lines,
                         "decision": decision,
+                        "model": resolve_event_model(transcript_path, session_id),
                     },
                 )
             except Exception:

@@ -668,12 +668,33 @@ class _AnthropicSSETranslator:
         }
         return (b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n")
 
+    def _touch_proxy_model_state(self, model: str) -> None:
+        """Persists the last-seen model so hook-side attribution can read it:
+        adapters resolve event models from ~/.tokensafe/data/proxy_state.json
+        because lifecycle hosts never pass the model to hooks. Throttled to one
+        write per 30s (or on model change); never raises."""
+        now = time.time()
+        if model == getattr(self, "_model_state_model", "") and now - getattr(self, "_model_state_ts", 0.0) < 30.0:
+            return
+        try:
+            from src.paths import resolve_data_dir
+            state_path = os.path.join(resolve_data_dir(), "proxy_state.json")
+            tmp = f"{state_path}.tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"model": str(model or "")[:64], "ts": now}, f)
+            os.replace(tmp, state_path)
+            self._model_state_ts = now
+            self._model_state_model = model
+        except Exception:
+            pass
+
     def _handle_event(self, event: str, data: Dict[str, Any]) -> bytes:
         out = b""
         if event == "message_start":
             msg = data.get("message") or {}
             if msg.get("model"):
                 self.model = msg["model"]
+                self._touch_proxy_model_state(str(self.model))
             self._usage_in = int((msg.get("usage") or {}).get("input_tokens") or 0)
             out += self._chunk({"role": "assistant", "content": ""})
         elif event == "content_block_start":

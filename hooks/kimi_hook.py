@@ -93,7 +93,7 @@ def handle(event: str, payload: dict) -> dict:
                 }
             return {}
 
-        context, meta = compact_for_injection(prompt, AGENT, session_id)
+        context, meta = compact_for_injection(prompt, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
         if context and meta.get("compacted"):
             parts.append(
                 f"{context}\n"
@@ -118,7 +118,7 @@ def handle(event: str, payload: dict) -> dict:
 
         if tool in ("Bash", "Shell", "bash"):
             command = str(tool_input.get("command") or "")
-            verdict = guard_command(command, AGENT, session_id, cwd=str(payload.get("cwd") or ""))
+            verdict = guard_command(command, AGENT, session_id, cwd=str(payload.get("cwd") or ""), transcript_path=str(payload.get("transcript_path") or ""))
             if verdict["decision"] == "deny":
                 return {
                     "hookSpecificOutput": {
@@ -140,7 +140,7 @@ def handle(event: str, payload: dict) -> dict:
             file_path = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
             content = tool_input.get("content") or tool_input.get("Content") or tool_input.get("file_text") or ""
             append = bool(tool_input.get("append") or tool_input.get("Append") or False)
-            verdict = guard_write(file_path, str(content or ""), append, AGENT, session_id)
+            verdict = guard_write(file_path, str(content or ""), append, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
             if verdict["decision"] == "deny":
                 return {
                     "hookSpecificOutput": {
@@ -160,7 +160,7 @@ def handle(event: str, payload: dict) -> dict:
 
         elif tool in ("Read", "read_file", "view_file"):
             file_path = str(tool_input.get("file_path") or tool_input.get("path") or tool_input.get("Path") or "")
-            verdict = guard_read(file_path, AGENT, session_id)
+            verdict = guard_read(file_path, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
             if verdict["decision"] == "deny":
                 return {
                     "hookSpecificOutput": {

@@ -42,7 +42,7 @@ def handle(event: str, payload: dict) -> dict:
 
     if event == "beforeShellExecution":
         command = str(payload.get("command") or "")
-        verdict = guard_command(command, AGENT, session_id, cwd=str(payload.get("cwd") or ""))
+        verdict = guard_command(command, AGENT, session_id, cwd=str(payload.get("cwd") or ""), transcript_path=str(payload.get("transcript_path") or ""))
         if verdict["decision"] == "deny":
             return {"permission": "deny", "user_message": verdict["reason"]}
         if verdict["decision"] == "ask":
@@ -51,7 +51,7 @@ def handle(event: str, payload: dict) -> dict:
 
     if event == "beforeReadFile":
         file_path = str(payload.get("file_path") or "")
-        verdict = guard_read(file_path, AGENT, session_id)
+        verdict = guard_read(file_path, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
         if verdict["decision"] == "deny":
             return {"permission": "deny", "user_message": verdict["reason"]}
         return {"permission": "allow"}
