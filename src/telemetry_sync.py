@@ -350,7 +350,11 @@ class TelemetrySync:
                             except Exception:
                                 ts_int = int(time.time())
 
-                    model_name = os.environ.get("AGY_MODEL") or os.environ.get("MODEL") or "gemini-3.8-flash"
+                    # Model attribution: event details win, then host-provided env
+                    # (AGY_MODEL / MODEL). No hardcoded default — hook-path events
+                    # genuinely don't know the model unless the host exposes it,
+                    # and an empty value renders as "—" instead of lying.
+                    model_name = os.environ.get("AGY_MODEL") or os.environ.get("MODEL") or ""
                     if r["details"]:
                         try:
                             det = json.loads(r["details"]) if isinstance(r["details"], str) else r["details"]
