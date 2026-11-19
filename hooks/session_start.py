@@ -42,6 +42,33 @@ def _user_markdown(markdown: str) -> dict:
     }
 
 
+def _guest_pitch_step(quota: dict):
+    """One-shot Guest-mode pitch: fires on the first session of a machine that
+    runs below the 500K free tier (offline guest or a fresh anonymous 50K
+    community license), then never again (marker file in the data dir). The
+    80%/100% quota banners cover every later nudge, so this must not become
+    per-turn nagging. Anonymous guest machines never see the interactive
+    installer prompt, so this is their only 500K-for-login touchpoint."""
+    try:
+        limit = quota.get("monthly_limit")
+        if limit is None or int(limit) >= 500000:
+            return None
+        from src.paths import resolve_data_dir
+        marker_path = os.path.join(resolve_data_dir(), ".guest_pitch_shown")
+        if os.path.exists(marker_path):
+            return None
+        os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+        with open(marker_path, "w", encoding="utf-8") as marker:
+            marker.write("1")
+        return _user_markdown(
+            "⚡ **TokenSafe Guest mode**: savings pause at 50,000 tokens/month. "
+            "Run `tokensafe login` in your terminal to unlock 500,000 free tokens/month (10x) "
+            "plus your personal savings dashboard. Takes about a minute."
+        )
+    except Exception:
+        return None
+
+
 def main():
     try:
         raw_input = sys.stdin.read()
@@ -91,6 +118,9 @@ def main():
         quota = LicenseManager.check_quota(tracker)
         if quota.get("warning"):
             inject_steps.append(_user_markdown(quota["warning"]))
+        pitch = _guest_pitch_step(quota)
+        if pitch:
+            inject_steps.append(pitch)
     except Exception:
         pass
 

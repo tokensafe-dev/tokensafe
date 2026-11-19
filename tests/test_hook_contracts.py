@@ -171,6 +171,64 @@ class TestSessionStartHook(unittest.TestCase):
             self.assertTrue(any("TokenSafe Architecture Map" in t for t in texts))
             self.assertTrue(any("Core God Nodes and dependency hubs mapped above" in t for t in texts))
 
+    def test_guest_pitch_fires_once_for_guest_quota(self):
+        from hooks import session_start
+        with tempfile.TemporaryDirectory() as tmp:
+            _fresh_env(tmp)
+            payload = {"conversationId": "ss_pitch", "workspacePaths": [tmp]}
+            guest_quota = {"tier": "free", "is_quota_exceeded": False,
+                           "monthly_limit": 50000, "monthly_saved": 0, "warning": None}
+            with patch("src.license_manager.LicenseManager.check_quota", return_value=guest_quota), \
+                 patch("src.version_checker.VersionChecker.notify_os_update_background"), \
+                 patch("src.paths.resolve_data_dir", return_value=tmp), \
+                 patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                session_start.main()
+            data = json.loads(out.getvalue())
+            markdowns = " ".join(
+                s["systemMessage"].get("metadata", {}).get("user_markdown", "")
+                for s in data["injectSteps"] if "systemMessage" in s
+            )
+            self.assertIn("Guest mode", markdowns)
+            self.assertIn("tokensafe login", markdowns)
+            self.assertTrue(os.path.exists(os.path.join(tmp, ".guest_pitch_shown")))
+
+            # Second session: the marker exists, so the pitch must stay silent.
+            repeat_quota = dict(guest_quota, monthly_saved=100)
+            with patch("src.license_manager.LicenseManager.check_quota", return_value=repeat_quota), \
+                 patch("src.version_checker.VersionChecker.notify_os_update_background"), \
+                 patch("src.paths.resolve_data_dir", return_value=tmp), \
+                 patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                session_start.main()
+            data = json.loads(out.getvalue())
+            markdowns = " ".join(
+                s["systemMessage"].get("metadata", {}).get("user_markdown", "")
+                for s in data["injectSteps"] if "systemMessage" in s
+            )
+            self.assertNotIn("Guest mode", markdowns)
+
+    def test_guest_pitch_skipped_for_full_community_tier(self):
+        from hooks import session_start
+        with tempfile.TemporaryDirectory() as tmp:
+            _fresh_env(tmp)
+            payload = {"conversationId": "ss_nopitch", "workspacePaths": [tmp]}
+            with patch("src.license_manager.LicenseManager.check_quota",
+                       return_value={"tier": "free", "is_quota_exceeded": False,
+                                     "monthly_limit": 500000, "monthly_saved": 0, "warning": None}), \
+                 patch("src.version_checker.VersionChecker.notify_os_update_background"), \
+                 patch("src.paths.resolve_data_dir", return_value=tmp), \
+                 patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                session_start.main()
+            data = json.loads(out.getvalue())
+            markdowns = " ".join(
+                s["systemMessage"].get("metadata", {}).get("user_markdown", "")
+                for s in data["injectSteps"] if "systemMessage" in s
+            )
+            self.assertNotIn("Guest mode", markdowns)
+            self.assertFalse(os.path.exists(os.path.join(tmp, ".guest_pitch_shown")))
+
 
 class TestStopHook(unittest.TestCase):
     def test_budget_nudge_fires_exactly_once(self):
