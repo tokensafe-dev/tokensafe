@@ -355,11 +355,17 @@ class TelemetrySync:
                     # genuinely don't know the model unless the host exposes it,
                     # and an empty value renders as "—" instead of lying.
                     model_name = os.environ.get("AGY_MODEL") or os.environ.get("MODEL") or ""
+                    # Agent attribution fills the landing feed's model column when
+                    # the model itself is unknown (details.agent is always present
+                    # on hook-recorded events).
+                    agent_name = ""
                     if r["details"]:
                         try:
                             det = json.loads(r["details"]) if isinstance(r["details"], str) else r["details"]
-                            if isinstance(det, dict) and det.get("model"):
-                                model_name = str(det["model"])
+                            if isinstance(det, dict):
+                                if det.get("model"):
+                                    model_name = str(det["model"])
+                                agent_name = str(det.get("agent") or "")
                         except Exception:
                             pass
 
@@ -369,6 +375,7 @@ class TelemetrySync:
                         "saved_tokens": int(r["saved_tokens"] or 0),
                         "usd_saved": float(r["est_usd_saved"] or 0.0),
                         "model": model_name,
+                        "agent": agent_name,
                         "timestamp": ts_int,
                         "measurement": resolve_measurement(str(r["event_type"] or "PROMPT"), r["measurement"])
                     }))
