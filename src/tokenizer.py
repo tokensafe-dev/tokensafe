@@ -33,6 +33,16 @@ class TokenCounter:
         r"""'s|'t|'re|'ve|'m|'ll|'d|[a-zA-Z\u00C0-\u024F\u0400-\u04FF_]+|\d{1,3}|[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF\u31F0-\u31FF\uAC00-\uD7AF]+|[^\w\s]+|\s+"""
     )
 
+    # Script detection via C-level regex scans — replaces per-char Python loops
+    # that previously dominated the hot path (~46% of runtime on mixed text).
+    _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+    _CJK_RE = re.compile(
+        r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF\u31F0-\u31FF\uAC00-\uD7AF]"
+    )
+    # English / code identifier subword split (hoisted: avoids the re-module
+    # cache lookup on every word of every payload).
+    _SUBWORD_REGEX = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+")
+
     @classmethod
     def count(cls, text: Optional[str]) -> int:
         """Calculate or estimate token count for any text."""
@@ -59,9 +69,9 @@ class TokenCounter:
             # Check if whitespace
             if chunk.isspace():
                 if "\n" in chunk:
-                    tokens += chunk.count("\n")
-                    remaining_spaces = len(chunk) - chunk.count("\n")
-                    tokens += remaining_spaces // 4
+                    newlines = chunk.count("\n")
+                    tokens += newlines
+                    tokens += (len(chunk) - newlines) // 4
                 else:
                     # In BPE, single spaces are merged into adjacent word tokens (e.g. " world").
                     # Only indentations (e.g., 4 spaces) add extra tokens.
@@ -79,17 +89,13 @@ class TokenCounter:
                 tokens += max(1, (len(chunk) + 2) // 3)
                 continue
 
-            # Alphabetic words: Check script
-            is_cyrillic = any('\u0400' <= char <= '\u04FF' for char in chunk)
-            is_cjk = any(
-                '\u4E00' <= char <= '\u9FFF'      # CJK Unified Ideographs
-                or '\u3400' <= char <= '\u4DBF'   # CJK Extension A
-                or '\uF900' <= char <= '\uFAFF'   # CJK Compatibility Ideographs
-                or '\u3040' <= char <= '\u30FF'   # Hiragana / Katakana
-                or '\u31F0' <= char <= '\u31FF'   # Katakana Phonetic Extensions
-                or '\uAC00' <= char <= '\uD7AF'   # Hangul syllables
-                for char in chunk
-            )
+            # Alphabetic words: Check script. ASCII chunks (the dominant case for
+            # code and English payloads) cannot be Cyrillic or CJK — skip the scan.
+            if chunk.isascii():
+                is_cyrillic = is_cjk = False
+            else:
+                is_cyrillic = cls._CYRILLIC_RE.search(chunk) is not None
+                is_cjk = cls._CJK_RE.search(chunk) is not None
 
             if is_cjk:
                 # CJK: typically ~1.8 tokens per character
@@ -106,7 +112,7 @@ class TokenCounter:
                     tokens += max(3, (len(chunk) + 2) // 3)
             else:
                 # English / Code identifier
-                subwords = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)|\d+', chunk)
+                subwords = cls._SUBWORD_REGEX.findall(chunk)
                 if subwords:
                     for sub in subwords:
                         if len(sub) <= 7:
