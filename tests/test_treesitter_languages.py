@@ -5,6 +5,8 @@ Unit tests for Tree-sitter multi-language support (Java, PHP, Kotlin) in TokenSa
 import unittest
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from src.treesitter_backend import TreeSitterBackend
 from src.graph_engine import CodeGraph
@@ -238,6 +240,33 @@ class NetworkClient {
         for lang, ok in status.items():
             self.assertTrue(ok, f"Expected grammar for {lang} to be available")
         self.assertEqual(TreeSitterBackend.get_missing_languages(), [])
+
+    def test_isolated_mode_recovers_user_site_grammars(self):
+        """`python -I` hides user site-packages where grammar wheels live; the
+        backend must probe and recover them instead of silently degrading."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        snippet = (
+            "import sys; sys.path.insert(0, {root!r}); sys.path.insert(0, {root!r} + '/src'); "
+            "from treesitter_backend import TreeSitterBackend; "
+            "print(sum(1 for v in TreeSitterBackend.check_all_languages().values() if v))"
+        ).format(root=repo_root)
+        expected = subprocess.run(
+            [sys.executable, "-c", snippet],
+            cwd=repo_root, capture_output=True, text=True, timeout=120,
+        )
+        isolated = subprocess.run(
+            [sys.executable, "-I", "-c", snippet],
+            cwd=repo_root, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(expected.returncode, 0, expected.stderr)
+        self.assertEqual(isolated.returncode, 0, isolated.stderr)
+        self.assertEqual(
+            expected.stdout.strip(),
+            isolated.stdout.strip(),
+            "grammar visibility must be identical in normal and isolated modes",
+        )
+        if expected.stdout.strip() != "0":
+            self.assertGreater(int(isolated.stdout.strip() or 0), 0)
 
 
 if __name__ == "__main__":

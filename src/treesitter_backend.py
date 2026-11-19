@@ -8,11 +8,14 @@ languages:
 
 All language grammars are standard mandatory dependencies with pre-compiled wheels.
 Fail-safe fallback to stdlib ast / regex lexer is preserved if a grammar cannot load.
+Isolated runs (`python -I` / `-s`, sanitized env) hide user site-packages where the
+wheels usually live; the backend probes that directory explicitly before degrading.
 """
 
 import importlib
 import os
 import re
+import sys
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # Extension -> (module_name, loader_attr)
@@ -134,6 +137,22 @@ class TreeSitterBackend:
         flag = os.environ.get("TOKENSAFE_TREESITTER", "auto").strip().lower()
         return flag not in ("0", "false", "off", "no", "disabled")
 
+    @staticmethod
+    def _probe_user_site() -> bool:
+        """Isolated runs (`python -I` / `-s`) skip user site-packages, where the
+        grammar wheels typically live. If that directory exists on disk but is
+        missing from sys.path, append it so the lazy imports can recover."""
+        try:
+            import site
+
+            user_sp = site.getusersitepackages()
+        except Exception:
+            return False
+        if user_sp and os.path.isdir(user_sp) and user_sp not in sys.path:
+            sys.path.append(user_sp)
+            return True
+        return False
+
     @classmethod
     def is_available(cls) -> bool:
         if not cls.is_enabled():
@@ -144,6 +163,11 @@ class TreeSitterBackend:
                 cls._ts_mod = importlib.import_module("tree_sitter")
             except Exception:
                 cls._ts_mod = None
+                try:
+                    if cls._probe_user_site():
+                        cls._ts_mod = importlib.import_module("tree_sitter")
+                except Exception:
+                    cls._ts_mod = None
         return cls._ts_mod is not None
 
     @classmethod
