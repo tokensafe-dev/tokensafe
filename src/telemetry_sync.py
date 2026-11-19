@@ -496,11 +496,15 @@ class TelemetrySync:
         return cls._is_pid_alive(pid)
 
     @classmethod
-    def sync_background(cls, throttle_seconds: float = 20.0, force: bool = False):
+    def sync_background(cls, throttle_seconds: float = 5.0, force: bool = False):
         """
         Spawns a detached, non-blocking background OS process to sync metrics.
-        Throttled to run at most once every `throttle_seconds` (default: 20s)
-        using persistent state from sync_state.json.
+        Throttled to run at most once every `throttle_seconds` (default: 5s) so
+        cloud-side live feeds (public network panel, dashboards) reflect fresh
+        events within seconds instead of tens of seconds. Sync only fires when
+        pending events exist, and failure backoff (2^n up to 300s) still guards
+        flaky connections, so the tighter cadence adds no idle traffic.
+        Uses persistent state from sync_state.json.
         Detached from parent process group so it survives the termination of short-lived CLI lifecycle hooks.
         """
         if _telemetry_disabled():

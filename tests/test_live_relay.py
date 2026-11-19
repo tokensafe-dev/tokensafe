@@ -64,7 +64,7 @@ class TestLiveRelay(unittest.TestCase):
             def read(self):
                 return b"{}"
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, context=None):
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return FakeResp()

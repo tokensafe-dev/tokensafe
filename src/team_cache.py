@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 from typing import Optional, Dict, Any, Tuple
 from src.license_manager import LicenseManager
+from src.ssl_context import shared_ssl_context
 
 class TeamCache:
     """Distributed cross-developer cache client for TokenSafe Team tier."""
@@ -105,7 +106,7 @@ class TeamCache:
 
         eff_timeout = cls.DEFAULT_TIMEOUT if timeout is None else max(0.05, float(timeout))
         try:
-            with urllib.request.urlopen(req, timeout=eff_timeout) as resp:
+            with urllib.request.urlopen(req, timeout=eff_timeout, context=shared_ssl_context()) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     val = data.get("value") or data.get("cached_value")
@@ -176,7 +177,7 @@ class TeamCache:
                 }
             )
             try:
-                with urllib.request.urlopen(req, timeout=1.5):
+                with urllib.request.urlopen(req, timeout=1.5, context=shared_ssl_context()):
                     cls._clear_cooldown(cloud_url)
             except urllib.error.HTTPError as he:
                 if he.code in (401, 403) or he.code >= 500:
@@ -200,7 +201,7 @@ class TeamCache:
             headers={"Authorization": f"Bearer {lic_key}", "User-Agent": "TokenSafe-TeamCache/1.0"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=max(2.5, cls.DEFAULT_TIMEOUT)) as resp:
+            with urllib.request.urlopen(req, timeout=max(2.5, cls.DEFAULT_TIMEOUT), context=shared_ssl_context()) as resp:
                 if resp.status == 200:
                     res = json.loads(resp.read().decode("utf-8"))
                     res["active"] = True

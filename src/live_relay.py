@@ -16,6 +16,7 @@ from collections import deque
 from typing import Dict
 
 from src.license_manager import LicenseManager
+from src.ssl_context import shared_ssl_context
 
 _MACHINE_HASH = ""
 
@@ -94,7 +95,7 @@ class LiveRelay:
                 "Authorization": f"Bearer {key}",
                 "User-Agent": "TokenSafe-LiveRelay/2.8",
             }, method="POST")
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
+            with urllib.request.urlopen(req, timeout=4.0, context=shared_ssl_context()) as resp:
                 resp.read()
         except Exception:
             pass  # live telemetry is best-effort and must never block the proxy
