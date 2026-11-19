@@ -95,6 +95,20 @@ class TestEnsureCommunityLicense(unittest.TestCase):
         self.assertIsInstance(body["version"], str)
         self.assertTrue(body["version"])
 
+    def test_community_license_uses_shared_ssl_context(self):
+        """SIGSEGV regression: the community-license POST runs in a daemon thread
+        (hooks/session_start.py) that can outlive the main thread; urllib lazily
+        building its own SSLContext there races OPENSSL_cleanup at interpreter
+        exit. The pre-built shared context must be passed explicitly (same fix
+        family as live_relay/team_cache)."""
+        from src.ssl_context import shared_ssl_context
+        with mock.patch.object(LicenseManager, "get_active_license_key", return_value=""), \
+             mock.patch.object(LicenseManager, "save_license", return_value=(True, "ok")), \
+             mock.patch("urllib.request.urlopen", return_value=_fake_response({"success": True, "license_key": "TS2.xyz.sig"})) as m_urlopen:
+            res = LicenseManager.ensure_community_license()
+        self.assertEqual(res, {"success": True, "reason": "issued"})
+        self.assertIs(m_urlopen.call_args.kwargs.get("context"), shared_ssl_context())
+
     def test_explicit_agent_param_beats_env_and_detect(self):
         os.environ["TOKENSAFE_AGENT"] = "cursor"
         self.addCleanup(os.environ.pop, "TOKENSAFE_AGENT", None)

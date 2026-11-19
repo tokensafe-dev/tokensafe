@@ -63,11 +63,15 @@ class TestCliLogin(unittest.TestCase):
             mock_resp.read.return_value = json.dumps({"success": True, "license_key": renewed_key}).encode("utf-8")
             mock_resp.__enter__.return_value = mock_resp
 
-            with mock.patch("urllib.request.urlopen", return_value=mock_resp):
+            with mock.patch("urllib.request.urlopen", return_value=mock_resp) as m_urlopen:
                 ok, msg = LicenseManager.refresh_device_license()
                 self.assertTrue(ok)
                 self.assertIn("Successfully activated", msg)
                 self.assertEqual(LicenseManager.get_active_license_key(), renewed_key)
+            # SIGSEGV regression: refresh can fire from background sync paths —
+            # must reuse the shared SSL context, never build one lazily in-thread.
+            from src.ssl_context import shared_ssl_context
+            self.assertIs(m_urlopen.call_args.kwargs.get("context"), shared_ssl_context())
 
     @mock.patch("sys.stdin.isatty", return_value=False)
     @mock.patch("sys.stdout.isatty", return_value=False)

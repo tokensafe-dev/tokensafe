@@ -17,6 +17,7 @@ import threading
 from typing import Dict, Any, Tuple, Optional, List
 
 from src.paths import resolve_data_dir
+from src.ssl_context import shared_ssl_context
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = resolve_data_dir()
@@ -226,7 +227,10 @@ class LicenseManager:
                 headers={"Content-Type": "application/json", "User-Agent": "TokenSafe/Community-License"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=2.5) as resp:
+            # Shared SSL context: this runs in a daemon thread (session_start
+            # hook) that can outlive the main thread; a lazily created context
+            # there races OPENSSL_cleanup at interpreter exit (SIGSEGV).
+            with urllib.request.urlopen(req, timeout=2.5, context=shared_ssl_context()) as resp:
                 data = json.loads(resp.read().decode("utf-8") or "{}")
             license_key = str(data.get("license_key", "") or "")
             if resp.status != 200 or not data.get("success") or not license_key:
@@ -548,7 +552,7 @@ class LicenseManager:
                 headers={"Content-Type": "application/json", "User-Agent": "TokenSafe/Refresh"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=3.5) as resp:
+            with urllib.request.urlopen(req, timeout=3.5, context=shared_ssl_context()) as resp:
                 data = json.loads(resp.read().decode("utf-8") or "{}")
             new_key = data.get("license_key", "")
             if resp.status == 200 and data.get("success") and new_key:
