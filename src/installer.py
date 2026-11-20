@@ -306,16 +306,23 @@ class AgentInstaller:
                 if not isinstance(entries, list):
                     hooks[event_name] = [default_entry]
                     return True
+                default_matcher = str(default_entry.get("matcher") or "")
                 seen = False
                 dirty = False
                 for entry in entries:
                     if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
                         for h in entry["hooks"]:
                             if isinstance(h, dict) and "claude_code_hook.py" in str(h.get("command", "")):
-                                seen = True
-                                if h.get("command") != claude_cmd:
-                                    h["command"] = claude_cmd
-                                    dirty = True
+                                # Matcher-aware sync: a legacy entry with a
+                                # DIFFERENT matcher covers only its own tool
+                                # set (e.g. PostToolUse "Write|Edit|MultiEdit"
+                                # never fires for Read), so the canonical
+                                # default entry must still be appended.
+                                if str(entry.get("matcher") or "") == default_matcher:
+                                    seen = True
+                                    if h.get("command") != claude_cmd:
+                                        h["command"] = claude_cmd
+                                        dirty = True
                 if not seen:
                     entries.append(default_entry)
                     dirty = True
