@@ -1852,16 +1852,32 @@ WantedBy=default.target
         cursor_mcp = os.path.join(project_dir, ".cursor", "mcp.json")
         try:
             os.makedirs(os.path.dirname(cursor_mcp), exist_ok=True)
-            data, err = cls._load_json_with_backup(cursor_mcp)
-            if not err and data is not None:
-                if "mcpServers" not in data or not isinstance(data["mcpServers"], dict):
-                    data["mcpServers"] = {}
-                data["mcpServers"]["tokensafe"] = {
-                    "command": PYTHON_BIN,
-                    "args": [MCP_SERVER_PATH]
-                }
-                cls._atomic_write_json(cursor_mcp, data)
-                created.append(".cursor/mcp.json")
+            # Idempotency exception: when the project ALREADY carries a
+            # tokensafe entry (committed by the repo authors or injected
+            # earlier), leave it verbatim — rewriting the machine-specific
+            # PYTHON_BIN command churns tracked project files on every
+            # `install --all` run (the tokensafe repo itself shipped exactly
+            # this dirt: a .cursor/mcp.json diff + .backup after each run).
+            already_present = False
+            try:
+                with open(cursor_mcp, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing = (loaded.get("mcpServers") or {}).get("tokensafe")
+                    already_present = isinstance(existing, dict) and bool(existing.get("command"))
+            except Exception:
+                already_present = False
+            if not already_present:
+                data, err = cls._load_json_with_backup(cursor_mcp)
+                if not err and data is not None:
+                    if "mcpServers" not in data or not isinstance(data["mcpServers"], dict):
+                        data["mcpServers"] = {}
+                    data["mcpServers"]["tokensafe"] = {
+                        "command": PYTHON_BIN,
+                        "args": [MCP_SERVER_PATH]
+                    }
+                    cls._atomic_write_json(cursor_mcp, data)
+                    created.append(".cursor/mcp.json")
         except Exception:
             pass
 
