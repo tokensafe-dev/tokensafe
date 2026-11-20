@@ -201,3 +201,37 @@ def ensure_tokensafe_gitignore(project_root: Optional[str]) -> bool:
 
     return updated
 
+
+_PROJECT_MARKER_FILES = (
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+    "go.mod", "Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts",
+    "composer.json", "Gemfile", "mix.exs", "Makefile", "CMakeLists.txt",
+)
+
+
+def is_project_root(path: str) -> bool:
+    """True when ``path`` looks like a real working project the agent can code in.
+
+    Used to gate project-scoped SessionStart injections (cold-start brief /
+    God Nodes banner): plain chats and plugin/system directories must stay
+    banner-free. A directory qualifies when it carries a VCS root or any
+    well-known project manifest, and is neither the home directory, a hidden
+    home subdirectory, nor a plugin/system dir per ``is_plugin_or_system_dir``.
+    Fail-open is deliberately NOT used here: an unrecognized directory simply
+    gets no brief (additive-only behavior, never breaks existing sessions).
+    """
+    try:
+        if not path or not os.path.isdir(path):
+            return False
+        if is_plugin_or_system_dir(path):
+            return False
+        real = os.path.realpath(path)
+        home = os.path.expanduser("~")
+        if real == home or real.startswith(home + os.sep + "."):
+            return False
+        if os.path.isdir(os.path.join(real, ".git")) or os.path.isfile(os.path.join(real, ".git")):
+            return True
+        return any(os.path.exists(os.path.join(real, marker)) for marker in _PROJECT_MARKER_FILES)
+    except Exception:
+        return False
+

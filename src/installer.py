@@ -292,6 +292,14 @@ class AgentInstaller:
             write_entry = {"matcher": "Write", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
             session_entry = {"hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
             post_bash_entry = {"matcher": "Bash", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
+            # Stale-edit guard: PreToolUse asks on externally-changed targets;
+            # PostToolUse snapshots the on-disk hash after every read/write.
+            stale_edit_entry = {"matcher": "Edit|MultiEdit", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
+            post_track_entry = {"matcher": "Read|Edit|MultiEdit|Write", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
+            # Fold-at-rest: Stop hook prunes superseded reads from the idle
+            # transcript (opt-in via TOKENSAFE_FOLD_AT_REST=1; the hook itself
+            # is a no-op while the flag is off).
+            stop_entry = {"hooks": [{"type": "command", "command": claude_cmd, "timeout": 15}]}
 
             def _sync_claude_event(event_name: str, default_entry: dict) -> bool:
                 entries = hooks.get(event_name)
@@ -318,13 +326,16 @@ class AgentInstaller:
                 _sync_claude_event("UserPromptSubmit", prompt_entry),
                 _sync_claude_event("PreToolUse", bash_entry),
                 _sync_claude_event("PreToolUse", write_entry),
+                _sync_claude_event("PreToolUse", stale_edit_entry),
                 _sync_claude_event("PostToolUse", post_bash_entry),
+                _sync_claude_event("PostToolUse", post_track_entry),
+                _sync_claude_event("Stop", stop_entry),
             ])
             if not changed:
                 return True, "TokenSafe Claude Code hooks already registered"
             data["hooks"] = hooks
             cls._atomic_write_json(config_file, data)
-            return True, "hooks registered (SessionStart + UserPromptSubmit + PreToolUse guard/write + PostToolUse stdout compact)"
+            return True, "hooks registered (SessionStart + UserPromptSubmit + PreToolUse guard/write/stale + PostToolUse compact/tracking + Stop fold-at-rest)"
 
         if agent_key == "zcode":
             config_file = os.path.join(HOME, ".zcode", "cli", "config.json")

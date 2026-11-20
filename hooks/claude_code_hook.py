@@ -56,6 +56,23 @@ def handle(event: str, payload: dict) -> dict:
                 extra = f"{extra}\n\n{guard}"
         except Exception:
             pass
+        # Cold-start brief (project-gated): one-shot God Nodes topology banner,
+        # parity with the Antigravity SessionStart hook. Non-project cwd
+        # (plain chats, plugin/system dirs) stays banner-free.
+        try:
+            from src.paths import is_project_root
+            start_cwd = str(payload.get("cwd") or os.getcwd())
+            if is_project_root(start_cwd):
+                from src.graph_engine import GraphEngine
+                banner = GraphEngine.get_instance(start_cwd).format_topology_banner()
+                if banner:
+                    extra = (
+                        f"{extra}\n\n{banner}\n"
+                        "⚡ Core God Nodes and dependency hubs mapped above. "
+                        "Call 'tokensafe:get_architecture_graph(project_path)' for full dependency trees."
+                    )
+        except Exception:
+            pass
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
@@ -200,6 +217,47 @@ def handle(event: str, payload: dict) -> dict:
                         "permissionDecisionReason": verdict["reason"],
                     }
                 }
+        elif tool in ("Edit", "MultiEdit", "edit_file", "replace_file_content"):
+            # Stale-file edit guard: when the target changed on disk since the
+            # model last saw it (build output, linters, another session), the
+            # edit either corrupts content or fails and forces a costly full
+            # re-read. Surface it BEFORE the edit lands — ask, never deny.
+            # Kill switch: TOKENSAFE_STALE_GUARD=0.
+            try:
+                from src.file_state import FileState
+                stale_fp = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
+                if stale_fp and FileState.guard_enabled():
+                    stale = FileState.check_stale(stale_fp)
+                    if stale:
+                        try:
+                            from src.metrics import MetricsTracker
+                            MetricsTracker().record_event(
+                                session_id=session_id,
+                                event_type="STALE_EDIT_ASK",
+                                original_tokens=FileState.estimate_reread_tokens(stale_fp),
+                                optimized_tokens=0,
+                                details={
+                                    "agent": AGENT,
+                                    "target_file": os.path.basename(stale_fp),
+                                    "age_s": stale.get("age_s", 0),
+                                },
+                                measurement="estimated",
+                            )
+                        except Exception:
+                            pass
+                        return {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "ask",
+                                "permissionDecisionReason": (
+                                    f"[TokenSafe] {os.path.basename(stale_fp)} changed on disk since it was last read "
+                                    f"(external edit: build/linter/another session?). Your edit may target outdated content. "
+                                    f"Approve if you have verified the current file state."
+                                ),
+                            }
+                        }
+            except Exception:
+                pass
         return {}
 
     if event == "PostToolUse":
@@ -235,6 +293,49 @@ def handle(event: str, payload: dict) -> dict:
                     f"({orig:,} → {new:,} chars). Output summary:\n{compacted}"
                 ),
             }
+        # File-state tracking for the stale-edit guard: snapshot the on-disk
+        # hash of every file the model has just seen (Read) or rewritten
+        # (Write/Edit) so PreToolUse can detect external changes later.
+        try:
+            if tool in ("Read", "view_file", "read_file", "Write", "write_file",
+                        "Edit", "MultiEdit", "edit_file", "replace_file_content"):
+                ti = payload.get("tool_input")
+                if isinstance(ti, dict):
+                    track_fp = str(ti.get("file_path") or ti.get("Path") or ti.get("path") or ti.get("FilePath") or "")
+                    if track_fp:
+                        from src.file_state import FileState
+                        FileState.record_seen(track_fp)
+        except Exception:
+            pass
+        return {}
+
+    if event == "Stop":
+        # Fold-at-rest (opt-in TOKENSAFE_FOLD_AT_REST=1): when the session goes
+        # idle, prune superseded intermediate read results from the transcript
+        # IN PLACE (structure/UUID-preserving tombstones + one-file backup), so
+        # the next resume starts light without any proxy involvement.
+        if os.environ.get("TOKENSAFE_FOLD_AT_REST", "").strip().lower() in ("1", "true", "yes"):
+            try:
+                rest_tp = str(payload.get("transcript_path") or "")
+                if rest_tp:
+                    from src.superseded import SupersededPruner
+                    res = SupersededPruner.fold_at_rest(rest_tp)
+                    if res.get("success") and res.get("pruned_count", 0) > 0:
+                        from src.metrics import MetricsTracker
+                        MetricsTracker().record_event(
+                            session_id=session_id,
+                            event_type="FOLD_AT_REST",
+                            original_tokens=res.get("orig_tokens", 0),
+                            optimized_tokens=res.get("pruned_tokens", 0),
+                            details={
+                                "agent": AGENT,
+                                "pruned": res.get("pruned_count", 0),
+                                "transcript": os.path.basename(rest_tp),
+                            },
+                            measurement="measured",
+                        )
+            except Exception:
+                pass
         return {}
 
     return {}

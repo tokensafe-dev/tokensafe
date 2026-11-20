@@ -12,10 +12,15 @@ class TestSmartBundle(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        # Fresh metrics DB: the developer's real local DB may already be over
-        # the Community quota, which would pause smart_bundle in tests.
+        # Fresh metrics DB + data dir: the developer's real local DB may already
+        # be over the Community quota, which would pause smart_bundle in tests.
+        # The monthly quota ALSO reads the server-floor mirror from
+        # resolve_data_dir(), so the DATA dir must be isolated too.
         self._old_db_env = os.environ.get("TOKENSAFE_DB_PATH")
         os.environ["TOKENSAFE_DB_PATH"] = os.path.join(self.dir, "metrics.db")
+        self._old_data_env = os.environ.get("TOKENSAFE_DATA_DIR")
+        os.environ["TOKENSAFE_DATA_DIR"] = os.path.join(self.dir, "data")
+        os.environ["TOKENSAFE_TELEMETRY_DISABLED"] = "1"
         self.a_py = os.path.join(self.dir, "repo.py")
         with open(self.a_py, "w", encoding="utf-8") as f:
             f.write(
@@ -46,6 +51,11 @@ class TestSmartBundle(unittest.TestCase):
             os.environ.pop("TOKENSAFE_DB_PATH", None)
         else:
             os.environ["TOKENSAFE_DB_PATH"] = self._old_db_env
+        if self._old_data_env is None:
+            os.environ.pop("TOKENSAFE_DATA_DIR", None)
+        else:
+            os.environ["TOKENSAFE_DATA_DIR"] = self._old_data_env
+        os.environ.pop("TOKENSAFE_TELEMETRY_DISABLED", None)
 
     def _bundle(self, targets, **extra):
         return _dispatch_tool_call("smart_bundle", {"targets": targets, **extra})

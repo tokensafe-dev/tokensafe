@@ -82,6 +82,42 @@ def _handle(payload: dict) -> dict:
 
     response: dict = {"decision": "allow"}
 
+    # 1.5 Stale-file edit guard: when the target changed on disk since the
+    #     model last saw it (build output, linters, another session), the edit
+    #     either corrupts content or fails and forces a costly full re-read.
+    #     Surface it BEFORE the edit lands — force_ask, never deny.
+    #     Kill switch: TOKENSAFE_STALE_GUARD=0.
+    if tool_name in ("edit_file", "replace_file_content"):
+        try:
+            from src.file_state import FileState
+            if FileState.guard_enabled():
+                raw_path = str(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
+                stale = FileState.check_stale(_resolve_hook_path(raw_path, hook_cwd)) if raw_path else None
+                if stale:
+                    tracker.record_event(
+                        session_id=conversation_id,
+                        event_type="STALE_EDIT_ASK",
+                        original_tokens=FileState.estimate_reread_tokens(_resolve_hook_path(raw_path, hook_cwd)),
+                        optimized_tokens=0,
+                        details={
+                            "tool": tool_name,
+                            "target_file": os.path.basename(raw_path),
+                            "age_s": stale.get("age_s", 0),
+                        },
+                        measurement="estimated",
+                    )
+                    _trigger_bg_sync()
+                    return {
+                        "decision": "force_ask",
+                        "reason": (
+                            f"[TokenSafe] {os.path.basename(raw_path)} changed on disk since it was last read "
+                            f"(external edit: build/linter/another session?). Your edit may target outdated content. "
+                            f"Verify the current file state (read_file the target region) before re-applying the edit."
+                        ),
+                    }
+        except Exception:
+            pass
+
     # 2. TokenSafe Guard: Inspect file writes and edits for security violations
     if tool_name in ("write_file", "edit_file"):
         from src.guard import TokenSafeGuard

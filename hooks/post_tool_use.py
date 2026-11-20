@@ -33,9 +33,36 @@ def _should_skip_fast() -> bool:
     return False
 
 def main():
+    raw = ""
     try:
-        # Drain stdin to keep pipes clean
-        _ = sys.stdin.read()
+        raw = sys.stdin.read()
+    except Exception:
+        raw = ""
+
+    # Stale-edit guard tracking: snapshot the on-disk hash of files the model
+    # has just seen (read) or rewritten (write/edit). Tolerant payload parsing
+    # — this one script serves Antigravity/ZCode (toolCall shape) and stays
+    # harmless under CC-shaped payloads. Output contract is untouched: {}.
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+        if isinstance(payload, dict):
+            tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else {}
+            tool_name = str(tool_call.get("name") or payload.get("tool_name") or "")
+            args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else (
+                payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+            )
+            if tool_name in ("read_file", "view_file", "Read", "smart_read_file", "write_file",
+                             "edit_file", "Write", "Edit", "MultiEdit", "replace_file_content",
+                             "NotebookEdit"):
+                tracked_path = ""
+                for key in ("Path", "TargetFile", "path", "FilePath", "file_path", "notebook_path"):
+                    val = args.get(key)
+                    if isinstance(val, str) and val.strip():
+                        tracked_path = val
+                        break
+                if tracked_path:
+                    from src.file_state import FileState
+                    FileState.record_seen(tracked_path)
     except Exception:
         pass
 

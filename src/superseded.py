@@ -278,3 +278,46 @@ class SupersededPruner:
             "transcript_path": transcript_path,
             **stats
         }
+
+    FOLD_AT_REST_MIN_BYTES = 100_000
+    FOLD_AT_REST_BACKUP_MAX = 20_000_000
+
+    @classmethod
+    def fold_at_rest(cls, transcript_path: str) -> Dict[str, Any]:
+        """Stop-hook entry (fold-at-rest): prunes superseded intermediate reads
+        from an idle session transcript IN PLACE.
+
+        Safety envelope:
+        - Tombstones are structure-preserving: every JSONL line stays a valid
+          message with identical ids/parent chain — only oversized content
+          strings shrink to reversible stash markers. Claude Code appends new
+          turns to the same file, so the chain never breaks.
+        - Atomic rewrite (tmp + os.replace) via prune_transcript; a one-file
+          ``.tokensafe.bak`` copy of the pre-fold bytes is kept for rollback.
+        - Sessions below 100KB are skipped outright (nothing worth folding).
+        - Fail-open: any error returns success=False, transcript untouched."""
+        if not transcript_path or not os.path.exists(transcript_path):
+            return {"success": False, "error": f"Transcript not found: {transcript_path}"}
+        try:
+            size = os.path.getsize(transcript_path)
+        except OSError as e:
+            return {"success": False, "error": str(e)}
+        if size < cls.FOLD_AT_REST_MIN_BYTES:
+            return {"success": False, "skipped": "below fold-at-rest size threshold"}
+
+        raw_backup: Optional[bytes] = None
+        if size <= cls.FOLD_AT_REST_BACKUP_MAX:
+            try:
+                with open(transcript_path, "rb") as f:
+                    raw_backup = f.read()
+            except Exception:
+                raw_backup = None
+
+        res = cls.prune_transcript(transcript_path)
+        if res.get("success") and res.get("pruned_count", 0) > 0 and raw_backup:
+            try:
+                with open(f"{transcript_path}.tokensafe.bak", "wb") as f:
+                    f.write(raw_backup)
+            except Exception:
+                pass
+        return res

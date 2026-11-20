@@ -541,6 +541,58 @@ class MetricsTracker:
         except Exception:
             return {"events": 0, "saved_tokens": 0, "usd_saved": 0.0}
 
+    def get_cache_obs(self, limit: int = 300) -> Dict[str, Any]:
+        """Aggregates CACHE_OBS proxy events into clean-vs-mutated cache-hit
+        ratios — the evidence for the cache-stability claim: history-mutation
+        stages (ledger/thinking/prompt/governor) should NOT erode KV-cache
+        hits versus clean requests.
+
+        Hit definition per provider shape:
+        - anthropic: cache_read / (input + cache_read + cache_write)
+        - openai:    cached_tokens / prompt_tokens (prompt already includes cache)
+        Zero-denominator samples are skipped."""
+        samples: List[Dict[str, Any]] = []
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT details FROM events WHERE event_type = 'CACHE_OBS' ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+            for row in cursor.fetchall():
+                try:
+                    d = json.loads(row["details"] or "{}")
+                    if isinstance(d, dict):
+                        samples.append(d)
+                except Exception:
+                    continue
+
+        def _hit(d: Dict[str, Any]) -> Optional[float]:
+            cache_read = float(d.get("cache_read") or 0)
+            if str(d.get("provider") or "") == "anthropic":
+                denom = float(d.get("input") or 0) + cache_read + float(d.get("cache_write") or 0)
+            else:
+                denom = float(d.get("input") or 0)
+            return (cache_read / denom) if denom > 0 else None
+
+        buckets: Dict[str, List[float]] = {"mutated": [], "clean": []}
+        for d in samples:
+            hit = _hit(d)
+            if hit is None:
+                continue
+            buckets["mutated" if d.get("mutations") else "clean"].append(hit)
+
+        def _agg(hits: List[float]) -> Dict[str, Any]:
+            return {
+                "n": len(hits),
+                "hit_pct": round(sum(hits) / len(hits) * 100.0, 1) if hits else None,
+            }
+
+        return {
+            "mutated": _agg(buckets["mutated"]),
+            "clean": _agg(buckets["clean"]),
+            "total": len(samples),
+        }
+
     def get_summary(self) -> Dict[str, Any]:
         """Returns cumulative statistics across all sessions, including lifetime rollups."""
         with self._get_connection() as conn:

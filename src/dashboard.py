@@ -54,7 +54,11 @@ EVENT_NAMES = {
     "TOOL_LEDGER": "Tool Result Ledger (proxy)",
     "TOOL_PRUNE": "Cold Tool Pruning (proxy)",
     "TOOL_PRUNE_MISS": "Tool Prune Miss (quality watch)",
-    "EPOCH_ROLLOVER": "Epoch Rollover (80% window)"
+    "EPOCH_ROLLOVER": "Epoch Rollover (80% window)",
+    "FOLD_AT_REST": "Fold-at-Rest (Stop hook)",
+    "THINKING_FOLD": "Aged Thinking Fold (proxy)",
+    "STALE_EDIT_ASK": "Stale-File Edit Guard",
+    "CACHE_OBS": "Cache Stability (proxy)"
 }
 
 class Dashboard:
@@ -142,6 +146,22 @@ class Dashboard:
                 out.append(f"  • {BOLD}{'Cold MCP tools pruned (proxy)':<34}{RESET} : {GREEN}{tp['saved']:,} floor tokens{RESET} ({tp['count']} events)")
             out.append("")
 
+        # Cache stability (proxy): does history mutation erode KV-cache hits?
+        try:
+            cache_obs = self.tracker.get_cache_obs()
+        except Exception:
+            cache_obs = None
+        if cache_obs and cache_obs.get("total"):
+            mut_c = cache_obs.get("mutated") or {}
+            clean_c = cache_obs.get("clean") or {}
+            out.append(f"{BOLD}── Cache Stability (proxy KV-cache) ────────────────────────────────{RESET}")
+            if clean_c.get("hit_pct") is not None:
+                out.append(f"  • {BOLD}{'Clean requests':<34}{RESET} : {GREEN}{clean_c['hit_pct']:.1f}% avg cache-hit{RESET} ({clean_c['n']} samples)")
+            if mut_c.get("hit_pct") is not None:
+                out.append(f"  • {BOLD}{'Mutated (folded) requests':<34}{RESET} : {YELLOW}{mut_c['hit_pct']:.1f}% avg cache-hit{RESET} ({mut_c['n']} samples)")
+            out.append(f"  {DIM}Mutation stages should not erode hits — a persistent gap means a fold is cache-breaking.{RESET}")
+            out.append("")
+
         # Breakdown by category
         out.append(f"{BOLD}── Breakdown by Source ──────────────────────────────────────────────{RESET}")
         breakdown = summary.get("breakdown", {})
@@ -149,6 +169,8 @@ class Dashboard:
             out.append(f"  {DIM}No events recorded yet. Run a prompt to see live optimization.{RESET}\n")
         else:
             for source, data in breakdown.items():
+                if source == "CACHE_OBS":
+                    continue  # zero-savings observability event — has its own panel above
                 s_name = EVENT_NAMES.get(source, source)
                 out.append(f"  • {BOLD}{s_name:<32}{RESET} : {GREEN}{data['saved']:,} tokens saved{RESET} ({data['count']} events)")
             out.append("")
@@ -215,8 +237,25 @@ class Dashboard:
         md.append("| Pipeline Stage | Events | Tokens Saved |")
         md.append("| :--- | :--- | :--- |")
         for source, data in summary.get("breakdown", {}).items():
+            if source == "CACHE_OBS":
+                continue  # zero-savings observability event — has its own panel below
             s_name = EVENT_NAMES.get(source, source)
             md.append(f"| **{s_name}** | {data['count']} | `{data['saved']:,}` |")
+
+        try:
+            cache_obs = self.tracker.get_cache_obs()
+        except Exception:
+            cache_obs = None
+        if cache_obs and cache_obs.get("total"):
+            mut_c = cache_obs.get("mutated") or {}
+            clean_c = cache_obs.get("clean") or {}
+            md.append("\n### Cache Stability (proxy KV-cache)\n")
+            md.append("| Request Kind | Samples | Avg Cache-Hit |")
+            md.append("| :--- | :--- | :--- |")
+            clean_pct = clean_c.get("hit_pct")
+            mut_pct = mut_c.get("hit_pct")
+            md.append(f"| Clean | {clean_c.get('n', 0)} | {f'{clean_pct:.1f}%' if clean_pct is not None else '—'} |")
+            md.append(f"| Mutated (folded) | {mut_c.get('n', 0)} | {f'{mut_pct:.1f}%' if mut_pct is not None else '—'} |")
 
         md.append("\n### Recent Optimization Events\n")
         md.append("| Timestamp | Event Type | Scope | Tokens Before ➔ After | Saved |")
@@ -244,6 +283,8 @@ class Dashboard:
 
         breakdown_rows = ""
         for source, data in summary.get("breakdown", {}).items():
+            if source == "CACHE_OBS":
+                continue  # zero-savings observability event — kept out of the savings cards
             s_name = html_lib.escape(str(EVENT_NAMES.get(source, source)))
             s_pct = round((data['saved'] / total_saved * 100.0), 1) if total_saved > 0 else 0
             breakdown_rows += f"""

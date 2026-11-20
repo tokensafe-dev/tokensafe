@@ -95,17 +95,24 @@ def main():
         pass
 
     directives = PROTOCOL_DIRECTIVES
+    # Cold-start brief (project-gated): the God Nodes banner is mapped only
+    # when the host actually opened a workspace folder. Plain chats (no
+    # workspacePaths) previously scanned the hook CWD (plugin/system dir) —
+    # junk topology + wasted scan time; they now skip the banner entirely.
+    # Opened-folder sessions behave exactly as before (regression-minimal
+    # gate: folder-opened is the ONLY condition — no project-marker sniffing).
     try:
-        from src.graph_engine import GraphEngine
-        graph = GraphEngine.get_instance(workspace_root)
-        banner = graph.format_topology_banner()
-        if banner:
-            directives = (
-                f"{directives}\n\n"
-                f"{banner}\n"
-                "⚡ Core God Nodes and dependency hubs mapped above. "
-                "Call 'tokensafe:get_architecture_graph(project_path)' for full dependency trees."
-            )
+        if workspace_paths:
+            from src.graph_engine import GraphEngine
+            graph = GraphEngine.get_instance(workspace_root)
+            banner = graph.format_topology_banner()
+            if banner:
+                directives = (
+                    f"{directives}\n\n"
+                    f"{banner}\n"
+                    "⚡ Core God Nodes and dependency hubs mapped above. "
+                    "Call 'tokensafe:get_architecture_graph(project_path)' for full dependency trees."
+                )
     except Exception:
         pass
 

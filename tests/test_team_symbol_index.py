@@ -24,6 +24,13 @@ class TestTeamSymbolIndex(unittest.TestCase):
             f.write("def boot():\n    return Repo()\n")
         self._old_db_env = os.environ.get("TOKENSAFE_DB_PATH")
         os.environ["TOKENSAFE_DB_PATH"] = os.path.join(self.dir, "metrics.db")
+        # Isolate the DATA dir too: the monthly quota reads the server-floor
+        # mirror from resolve_data_dir() even when the DB itself is fresh —
+        # a real developer machine over the Community 50k floor would pause
+        # the tool with a quota banner and break these assertions.
+        self._old_data_env = os.environ.get("TOKENSAFE_DATA_DIR")
+        os.environ["TOKENSAFE_DATA_DIR"] = os.path.join(self.dir, "data")
+        os.environ["TOKENSAFE_TELEMETRY_DISABLED"] = "1"
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -31,6 +38,11 @@ class TestTeamSymbolIndex(unittest.TestCase):
             os.environ.pop("TOKENSAFE_DB_PATH", None)
         else:
             os.environ["TOKENSAFE_DB_PATH"] = self._old_db_env
+        if self._old_data_env is None:
+            os.environ.pop("TOKENSAFE_DATA_DIR", None)
+        else:
+            os.environ["TOKENSAFE_DATA_DIR"] = self._old_data_env
+        os.environ.pop("TOKENSAFE_TELEMETRY_DISABLED", None)
 
     def test_fingerprint_stable_and_machine_independent(self):
         # Identical trees under DIFFERENT absolute roots (two clones) must collide

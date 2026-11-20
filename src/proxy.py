@@ -29,6 +29,7 @@ from src.graph_engine import GraphEngine
 from src.cache_normalizer import PromptCacheNormalizer
 from src.governor import ContextGovernor
 from src.result_ledger import fold_tool_results
+from src.thinking_fold import fold_aged_thinking
 from src.tool_pruner import _tool_name, apply_subset, detect_prune_miss
 from src.paths import resolve_data_dir
 
@@ -72,6 +73,42 @@ class EventBroadcaster:
                 self._subscribers.remove(d)
 
 BROADCASTER = EventBroadcaster()
+
+_CACHE_OBS_MIN_INTERVAL_S = 30.0
+_last_cache_obs_ts = 0.0
+
+
+def _record_cache_obs(tracker, provider: str, mutation_kinds: List[str],
+                      input_tokens: int, cache_read: int, cache_write: int) -> None:
+    """CACHE_OBS: per-response KV-cache observation (zero-savings telemetry).
+
+    Lets the dashboard PROVE cache stability: average cache-hit ratio on
+    requests where history-mutation stages fired vs clean requests. Clean
+    samples are throttled; every mutated request is recorded — that is the
+    signal this metric exists for."""
+    global _last_cache_obs_ts
+    mutated = bool(mutation_kinds)
+    now = time.time()
+    if not mutated and (now - _last_cache_obs_ts) < _CACHE_OBS_MIN_INTERVAL_S:
+        return
+    _last_cache_obs_ts = now
+    try:
+        tracker.record_event(
+            session_id="proxy_session",
+            event_type="CACHE_OBS",
+            original_tokens=0,
+            optimized_tokens=0,
+            details={
+                "provider": str(provider),
+                "input": int(input_tokens or 0),
+                "cache_read": int(cache_read or 0),
+                "cache_write": int(cache_write or 0),
+                "mutations": list(mutation_kinds or []),
+            },
+            measurement="measured",
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1028,13 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             if secrets_scrubbed > 0:
                 print(f"[TokenSafe] Scrubbed {secrets_scrubbed} sensitive secret(s) from payload before transmission.")
 
+        # Stage-local stats init: kept defined even when the quota gate skips
+        # the stages below (the CACHE_OBS signature reads them afterwards).
+        ledger_stats: Dict[str, Any] = {}
+        think_stats: Dict[str, Any] = {}
+        gov_stats: Dict[str, Any] = {}
+        prompt_mutated = False
+
         # 1.5 Tool Result Ledger: fold aged, oversized tool results into compact
         #     anchors + local archive (idempotent via marker; cache-aware). Runs
         #     before the governor so the governor sees the lightened mass.
@@ -1006,6 +1050,23 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+        # 1.6 Aged Thinking Fold (OPT-IN, DEFAULT OFF via TOKENSAFE_FOLD_THINKING):
+        #     collapse extended-thinking payloads of aged assistant turns into
+        #     one-line stubs. The _tokensafe_thinking side-channel key stays a
+        #     valid text block for shape-sensitive mirrors (the 1214 class).
+        #     Enable only after the upstream shape probe matrix passes.
+        if messages and not is_quota_exceeded:
+            try:
+                messages, think_stats = fold_aged_thinking(messages)
+                payload["messages"] = messages
+                if think_stats.get("folded"):
+                    print(
+                        f"[TokenSafe] Aged thinking folded: {think_stats['folded']} turn(s), "
+                        f"~{think_stats['saved_tokens']} input tokens lighter."
+                    )
+            except Exception:
+                pass
+
         # 2. Ingress Optimization: REPLACE the last user message with its TOCP form.
         #    Paused when Community 500k monthly measured quota is exceeded.
         target_symbol = None
@@ -1017,6 +1078,7 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                     compaction = PromptCompactor.compact(raw_user, enable_distill=False)
                     if compaction["saved_tokens"] > 5:
                         msg["content"] = compaction["compact_text"]
+                        prompt_mutated = True
                         try:
                             proxy_tracker.record_event(
                                 session_id="proxy_session",
@@ -1140,6 +1202,18 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                     payload["tools"], provider=provider, inject_cache_control=False
                 )
 
+        # Request mutation signature for cache-stability telemetry: which
+        # history-mutation stages fired on THIS request (the CACHE_OBS panel
+        # splits the cache-hit ratio into mutated vs clean by this list).
+        mutation_kinds = [
+            kind for kind, fired in (
+                ("ledger", bool(ledger_stats.get("folded"))),
+                ("thinking", bool(think_stats.get("folded"))),
+                ("prompt", prompt_mutated),
+                ("governor", bool(gov_stats.get("saved_tokens"))),
+            ) if fired
+        ]
+
         if provider == "anthropic":
             # Outbound OpenAI->Anthropic translation is skipped when the CLIENT
             # itself speaks Anthropic (ingest): the pipeline ran on the internal
@@ -1239,6 +1313,20 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                                 BROADCASTER.publish("cache_stats", {"provider": provider, "cached_tokens": int(m_cached.group(1))})
                             elif m_usage:
                                 BROADCASTER.publish("cache_stats", {"provider": provider, "cached_tokens": 0})
+                            # Cache-stability observation (Anthropic-shape tails):
+                            # input/cache fields live in message_start, which the
+                            # 64KB tail may evict on very long streams — record
+                            # only when at least one real field survived.
+                            m_in = re.search(r'"input_tokens":\s*(\d+)', tail_text)
+                            m_cw = re.search(r'"cache_creation_input_tokens":\s*(\d+)', tail_text)
+                            sse_input = int(m_in.group(1)) if m_in else 0
+                            if m_cached or sse_input > 0:
+                                _record_cache_obs(
+                                    proxy_tracker, provider, mutation_kinds,
+                                    sse_input,
+                                    int(m_cached.group(1)) if m_cached else 0,
+                                    int(m_cw.group(1)) if m_cw else 0,
+                                )
                     except Exception:
                         pass
                 else:
@@ -1273,6 +1361,14 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                             or usage.get("cache_read_input_tokens")
                             or usage.get("prompt_cache_hit_tokens")
                             or 0
+                        )
+                        # Cache-stability observation (non-stream path: both
+                        # Anthropic and OpenAI usage shapes are available).
+                        _record_cache_obs(
+                            proxy_tracker, provider, mutation_kinds,
+                            int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                            int(cached or 0),
+                            int(usage.get("cache_creation_input_tokens") or 0),
                         )
                         if cached:
                             BROADCASTER.publish("cache_stats", {"provider": provider, "cached_tokens": int(cached)})

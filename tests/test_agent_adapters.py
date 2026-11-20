@@ -77,9 +77,14 @@ class TestClaudeCodeAdapter(AdapterBase):
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "SessionStart")
         self.assertIn("Mandatory Directives", out["hookSpecificOutput"]["additionalContext"])
         # One-shot injection records no metrics on its own
-        # 6 tool mentions: scoped_search, smart_read_file, get_architecture_graph,
-        # get_api_surface, context_budget, compact_conversation
-        self.assertEqual(out["hookSpecificOutput"]["additionalContext"].count("tokensafe:"), 6)
+        # 6 tool mentions in the DIRECTIVES block: scoped_search, smart_read_file,
+        # get_architecture_graph, get_api_surface, context_budget, compact_conversation.
+        # Counted on the directives portion only: on a project cwd the optional
+        # cold-start brief appends the God Nodes banner (one more tokensafe: hint),
+        # which is gated and tested separately (test_session_brief).
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        directives_only = ctx.split("[TokenSafe Architecture")[0]
+        self.assertEqual(directives_only.count("tokensafe:"), 6)
 
     def test_short_prompt_passes_through_clean(self):
         out = self._run_hook({
