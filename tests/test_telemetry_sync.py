@@ -70,6 +70,46 @@ class TestTelemetrySync(unittest.TestCase):
         self.assertGreater(st["last_synced_at"], 0)
 
     @patch("urllib.request.urlopen")
+    def test_sync_attributes_agent_from_mcp_session_id(self, mock_urlopen):
+        """MCP-server events carry no details.agent; the landing feed must
+        still attribute them via the mcp:<client> session id (mirrors
+        MetricsTracker._infer_agent) instead of rendering "—"."""
+        tracker = MetricsTracker(db_path=ts_mod.METRICS_DB_PATH)
+        tracker.record_event("mcp:zcode", "BUNDLE", 300, 60)
+        tracker.record_event("mcp_session", "SCOPED_SEARCH", 200, 40)
+        tracker.record_event("proxy_session", "COMMAND_FILTER", 400, 100)
+        # Hook-recorded events already carry details.agent — must not be overridden.
+        tracker.record_event("hook_cursor", "PROMPT", 100, 50, details={"agent": "cursor"})
+
+        captured = []
+
+        def make_resp(req, *args, **kwargs):
+            captured.append(json.loads(req.data.decode("utf-8")))
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = json.dumps({"status": "synced"}).encode("utf-8")
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        mock_urlopen.side_effect = make_resp
+
+        res = TelemetrySync.sync(
+            cloud_url="http://mock-cloud.internal",
+            license_key="TS1.mock.key",
+            email="test@domain.com",
+        )
+        self.assertTrue(res["success"])
+        self.assertEqual(res["synced_events"], 4)
+
+        events = [ev for batch in captured for ev in batch.get("events", [])]
+        by_type = {ev["event_type"]: ev for ev in events}
+        self.assertEqual(by_type["BUNDLE"]["agent"], "zcode")
+        self.assertEqual(by_type["SCOPED_SEARCH"]["agent"], "mcp")
+        self.assertEqual(by_type["COMMAND_FILTER"]["agent"], "proxy")
+        self.assertEqual(by_type["PROMPT"]["agent"], "cursor")
+
+    @patch("urllib.request.urlopen")
     def test_sync_checkpoints_each_batch_on_partial_failure(self, mock_urlopen):
         tracker = MetricsTracker(db_path=ts_mod.METRICS_DB_PATH)
         for i in range(5):

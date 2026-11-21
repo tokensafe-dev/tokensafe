@@ -294,13 +294,13 @@ class TelemetrySync:
                     # event-type map so sync never blocks on schema drift.
                     try:
                         rows = cur.execute(
-                            "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, details, measurement "
+                            "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, session_id, details, measurement "
                             "FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
                             (current_last_id, page_limit)
                         ).fetchall()
                     except sqlite3.OperationalError:
                         rows = cur.execute(
-                            "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, details, "
+                            "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, session_id, details, "
                             "NULL as measurement "
                             "FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
                             (current_last_id, page_limit)
@@ -368,6 +368,19 @@ class TelemetrySync:
                                 agent_name = str(det.get("agent") or "")
                         except Exception:
                             pass
+                    # MCP-server events carry no details.agent: the stdio process
+                    # never learns the host agent directly, but the MCP initialize
+                    # handshake already encodes it in the session id (mcp:<client>,
+                    # e.g. mcp:zcode). Mirror MetricsTracker._infer_agent so those
+                    # events land on the feed attributed instead of rendering "—".
+                    if not agent_name:
+                        sid = str(r["session_id"] or "")
+                        if sid.startswith("mcp:"):
+                            agent_name = sid[4:]
+                        elif sid == "mcp_session":
+                            agent_name = "mcp"
+                        elif sid == "proxy_session":
+                            agent_name = "proxy"
 
                     formatted_items.append((ev_id, {
                         "event_type": str(r["event_type"] or "PROMPT"),
