@@ -130,6 +130,52 @@ class TestClaudeCodeAdapter(AdapterBase):
         })
         self.assertEqual(out, {})
 
+    def test_pretooluse_denies_write_with_hardcoded_secret(self):
+        # Write-path security parity (was Antigravity-only): a live key baked
+        # into a normal source file never reaches disk.
+        out = self._run_hook({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "src/billing.py", "content": 'STRIPE_KEY = "sk_live_' + "a" * 24 + '1"'},
+            "session_id": "cc_test_session",
+        })
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("Guard", out["hookSpecificOutput"]["permissionDecisionReason"])
+        # Blocked mass is counterfactual -> estimated, never measured
+        s = self._summary()
+        self.assertEqual(s["breakdown"].get("GUARD_SECRET_FALLBACK", {}).get("count", 0), 1)
+        self.assertGreater(s["breakdown"]["GUARD_SECRET_FALLBACK"]["estimated_saved"], 0)
+
+    def test_pretooluse_denies_edit_with_hardcoded_secret(self):
+        out = self._run_hook({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/auth.py", "old_string": "pass", "new_string": 'TOKEN = "ghp_' + "a" * 36 + '"'},
+            "session_id": "cc_test_session",
+        })
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_pretooluse_denies_multiedit_with_secret(self):
+        out = self._run_hook({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "MultiEdit",
+            "tool_input": {"file_path": "src/keys.py", "edits": [
+                {"old_string": "a", "new_string": "b"},
+                {"old_string": "c", "new_string": "AKIAIOSFODNN7EXAMPLE"},
+            ]},
+            "session_id": "cc_test_session",
+        })
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_pretooluse_allows_clean_write(self):
+        out = self._run_hook({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "src/definitely_missing_module_cc_test.py", "content": 'KEY = os.environ.get("API_KEY")\n'},
+            "session_id": "cc_test_session",
+        })
+        self.assertEqual(out, {})
+
     def test_posttooluse_compacts_verbose_success_output(self):
         raw = "\n".join(f"ok line {i}" for i in range(40)) + "\n==== 40 passed in 0.10s ===="
         out = self._run_hook({
@@ -257,6 +303,27 @@ class TestCursorAdapter(AdapterBase):
         out = self._run_hook({
             "hook_event_name": "beforeReadFile",
             "file_path": "/repo/src/main.ts",
+            "conversation_id": "cur_test",
+        })
+        self.assertEqual(out, {"permission": "allow"})
+
+    def test_before_edit_file_denies_secret(self):
+        # Opportunistic edit-payload security gate (parity with the
+        # Antigravity path; inert where Cursor never fires this event).
+        out = self._run_hook({
+            "hook_event_name": "beforeEditFile",
+            "file_path": "/repo/src/billing.py",
+            "new_string": 'STRIPE_KEY = "sk_live_' + "a" * 24 + '1"',
+            "conversation_id": "cur_test",
+        })
+        self.assertEqual(out["permission"], "deny")
+        self.assertIn("guard", out["user_message"].lower())
+
+    def test_before_edit_file_allows_clean_edit(self):
+        out = self._run_hook({
+            "hook_event_name": "beforeEditFile",
+            "file_path": "/repo/src/main.ts",
+            "new_string": "const x = 1;",
             "conversation_id": "cur_test",
         })
         self.assertEqual(out, {"permission": "allow"})

@@ -297,6 +297,67 @@ def guard_read(file_path: str, agent: str, session_id: str = "", transcript_path
     return result
 
 
+def extract_write_content(tool_name: str, tool_input: Dict[str, Any]) -> str:
+    """Collects the text an Edit-family tool would put on disk: Write content
+    variants, Edit new_string, MultiEdit edits[].new_string, Antigravity
+    Replacement. Empty when the payload carries no writable text."""
+    if not isinstance(tool_input, dict):
+        return ""
+    if tool_name == "MultiEdit":
+        edits = tool_input.get("edits")
+        if isinstance(edits, list):
+            return "\n".join(
+                str((e or {}).get("new_string") or "")
+                for e in edits if isinstance(e, dict)
+            )
+        return ""
+    for key in ("new_string", "NewString", "new_str", "Replacement", "content", "Content", "file_text"):
+        if tool_input.get(key):
+            return str(tool_input.get(key))
+    return ""
+
+
+def guard_file_content(file_path: str, content: str, agent: str = "", session_id: str = "", transcript_path: str = "") -> Dict[str, Any]:
+    """Pre-write SECURITY guard shared by every agent hook: runs
+    TokenSafeGuard.inspect_file_write (SECRET_FALLBACK, TLS_VERIFY_BYPASS,
+    SQL_INJECTION, INSECURE_CORS) on the payload about to hit disk. Previously
+    only the Antigravity path enforced this; Claude Code / ZCode / Cursor /
+    Kimi native Write/Edit bypassed the check entirely. Same deny/ask/allow
+    result shape as guard_command/guard_write. Fail-open like every adapter
+    guard path."""
+    result = {"decision": "allow", "reason": "", "saved_tokens": 0}
+    if not content or not isinstance(content, str):
+        return result
+    try:
+        from src.guard import TokenSafeGuard
+        guard_res = TokenSafeGuard.inspect_file_write(file_path or "", content)
+    except Exception:
+        return result
+    if guard_res.blocked:
+        est = max(1, count_tokens(content))
+        tracker = _get_tracker()
+        if tracker:
+            try:
+                tracker.record_event(
+                    session_id=session_id or f"hook_{agent}",
+                    event_type=f"GUARD_{guard_res.check_name}",
+                    original_tokens=est,
+                    optimized_tokens=0,
+                    details={"agent": agent, "tool": "write",
+                             "target_file": os.path.basename(file_path) if file_path else "unknown",
+                             "reason": guard_res.reason,
+                             "model": resolve_event_model(transcript_path, session_id)},
+                )
+            except Exception:
+                pass
+        result.update({
+            "decision": "deny",
+            "reason": f"🛡️ TokenSafe Guard: {guard_res.reason}",
+            "saved_tokens": est,
+        })
+    return result
+
+
 def guard_write(file_path: str, content: str, append: bool = False, agent: str = "", session_id: str = "", transcript_path: str = "") -> Dict[str, Any]:
     """Pre-write egress guard (v3.0.0): full-file Write over an existing file
     burns expensive OUTPUT tokens. Policy:

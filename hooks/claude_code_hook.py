@@ -22,7 +22,7 @@ PROJECT_ROOT = os.path.dirname(HOOK_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.adapter_core import TOKENSAFE_DIRECTIVES, compact_for_injection, guard_command, guard_write
+from src.adapter_core import TOKENSAFE_DIRECTIVES, compact_for_injection, extract_write_content, guard_command, guard_file_content, guard_write
 
 AGENT = "claude_code"
 
@@ -200,6 +200,18 @@ def handle(event: str, payload: dict) -> dict:
             file_path = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
             content = tool_input.get("content") or tool_input.get("Content") or tool_input.get("file_text") or ""
             append = bool(tool_input.get("append") or tool_input.get("Append") or False)
+            # Security first (parity with the Antigravity path): hardcoded
+            # secrets / TLS bypass / SQLi / CORS never reach disk, before any
+            # egress-economy steering.
+            sec_verdict = guard_file_content(file_path, str(content or ""), AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
+            if sec_verdict["decision"] == "deny":
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": sec_verdict["reason"],
+                    }
+                }
             verdict = guard_write(file_path, str(content or ""), append, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
             if verdict["decision"] == "deny":
                 return {
@@ -218,6 +230,19 @@ def handle(event: str, payload: dict) -> dict:
                     }
                 }
         elif tool in ("Edit", "MultiEdit", "edit_file", "replace_file_content"):
+            # Security first (parity with the Antigravity path): deny hardcoded
+            # secrets / TLS bypass / SQLi / CORS in the replacement text before
+            # the stale-file check (deny outranks ask).
+            sec_file = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
+            sec_verdict = guard_file_content(sec_file, extract_write_content(tool, tool_input), AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
+            if sec_verdict["decision"] == "deny":
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": sec_verdict["reason"],
+                    }
+                }
             # Stale-file edit guard: when the target changed on disk since the
             # model last saw it (build output, linters, another session), the
             # edit either corrupts content or fails and forces a costly full

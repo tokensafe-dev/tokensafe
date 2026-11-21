@@ -260,6 +260,72 @@ class TokenSafeGuard:
             return True
         return False
 
+    _GIT_COMMIT_VALUE_FLAGS = frozenset({
+        "-m", "--message", "-F", "--file", "-t", "--template",
+        "-C", "--reuse-message", "-c", "--reedit-message",
+        "--fixup", "--squash", "--author", "--date", "--cleanup",
+    })
+
+    @classmethod
+    def _partial_commit_sensitive_path(cls, sub_args: List[str]) -> Optional[str]:
+        """Sensitive file targeted by a partial commit ('git commit <path>',
+        'git commit --only <path>'), or None. Flag VALUES (-m "msg", --author,
+        --fixup ...) are skipped so commit messages can never false-positive."""
+        skip_next = False
+        for a in sub_args:
+            if skip_next:
+                skip_next = False
+                continue
+            if a.startswith("--only=") or a.startswith("--include="):
+                cand = a.split("=", 1)[1]
+                if cls._is_sensitive_filename(cand):
+                    return cand
+                continue
+            if a in cls._GIT_COMMIT_VALUE_FLAGS:
+                skip_next = True
+                continue
+            if a.startswith("-"):
+                continue
+            if cls._is_sensitive_filename(a):
+                return a
+        return None
+
+    @classmethod
+    def _stash_sensitive_target(cls, stash_args: List[str], git_dir: str) -> Optional[str]:
+        """Sensitive file a 'git stash push/save' would capture, or None.
+        Covers explicit pathspecs and untracked sweeps ('-u' / '-a')."""
+        include_untracked = False
+        saw_subcmd = False
+        skip_next = False
+        pathspecs: List[str] = []
+        for a in stash_args:
+            if skip_next:
+                skip_next = False
+                continue
+            if a in ("push", "save") and not saw_subcmd:
+                saw_subcmd = True
+                continue
+            if a in ("-m", "--message"):
+                skip_next = True
+                continue
+            if a.startswith("-m") and a != "-m":
+                continue
+            if a in ("-u", "-a", "--include-untracked", "--all") or (
+                a.startswith("-") and not a.startswith("--") and "u" in a
+            ):
+                include_untracked = True
+                continue
+            if a.startswith("-"):
+                continue
+            saw_subcmd = True
+            pathspecs.append(a)
+        for p in pathspecs:
+            if cls._is_sensitive_filename(p):
+                return p
+        if include_untracked and not pathspecs:
+            return cls._find_unignored_sensitive_file(git_dir)
+        return None
+
     @classmethod
     def inspect_command(cls, command: str, cwd: str = "") -> GuardResult:
         """
@@ -408,6 +474,29 @@ class TokenSafeGuard:
                                 f"Add '{sensitive}' to .gitignore or stage files explicitly to prevent credential leaks into git."
                             )
                         )
+                partial = cls._partial_commit_sensitive_path(sub_args)
+                if partial:
+                    return GuardResult(
+                        blocked=True,
+                        check_name="GIT_SECRET_STAGING",
+                        reason=(
+                            f"Blocked partial git commit of a sensitive credential file: '{cmd}'. "
+                            f"'{partial}' is an environment file or private key and must never "
+                            f"be committed to source control."
+                        )
+                    )
+            elif subcmd == "stash":
+                stash_sensitive = cls._stash_sensitive_target(sub_args, git_dir)
+                if stash_sensitive:
+                    return GuardResult(
+                        blocked=True,
+                        check_name="GIT_SECRET_STAGING",
+                        reason=(
+                            f"Blocked git stash capture of a sensitive credential file: '{cmd}'. "
+                            f"'{stash_sensitive}' would be stored inside the stash object; "
+                            f"add it to .gitignore instead of stashing it."
+                        )
+                    )
 
         # 2b. Secret-File Read Interception: reading credential stores (.env, private
         # keys, credential bundles) pulls live secrets into the model context —

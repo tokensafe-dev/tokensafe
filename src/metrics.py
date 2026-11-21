@@ -38,6 +38,7 @@ ESTIMATED_EVENT_TYPES = frozenset({
     "LOOP_GUARD",
     "SCOPED_SEARCH",
     "DIR_LIST",
+    "OUTPUT_GUARD",
     "GUARD_SECRET",
     "GUARD_DESTRUCTIVE",
     "GUARD_TLS_VERIFY_BYPASS",
@@ -48,9 +49,13 @@ ESTIMATED_EVENT_TYPES = frozenset({
 
 def resolve_measurement(event_type: str, explicit: Optional[str] = None) -> str:
     """Resolves the measurement label for an event: explicit override wins,
-    then the estimated-type map, then 'measured'."""
+    then the GUARD_ counterfactual prefix (blocked payloads never reach the
+    model, so every GUARD_* event is a heuristic guess regardless of the
+    historical check-name list), then the estimated-type map, then 'measured'."""
     if explicit in ("measured", "estimated"):
         return explicit
+    if event_type.startswith("GUARD_"):
+        return "estimated"
     return "estimated" if event_type in ESTIMATED_EVENT_TYPES else "measured"
 
 _METRICS_INIT_LOCK = threading.Lock()

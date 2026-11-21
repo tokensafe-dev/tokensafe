@@ -10,6 +10,9 @@ Honest capability matrix (per official Cursor hooks docs):
   beforeSubmitPrompt   -> allow/deny ONLY (no injection in Cursor yet):
                           records nothing, always allows. Kept as a no-op
                           so the hook wiring is future-proof.
+  beforeEditFile       -> allow/deny: secret/TLS/SQL gate on edit payloads,
+                          wired opportunistically (inert where the host
+                          never fires this event).
   stop / afterFileEdit -> observational no-ops.
 
 IMPORTANT: Cursor BLOCKS the action when a hook prints invalid JSON.
@@ -26,7 +29,7 @@ PROJECT_ROOT = os.path.dirname(HOOK_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.adapter_core import guard_command, guard_read
+from src.adapter_core import extract_write_content, guard_command, guard_file_content, guard_read
 
 AGENT = "cursor"
 
@@ -56,6 +59,19 @@ def handle(event: str, payload: dict) -> dict:
             return {"permission": "deny", "user_message": verdict["reason"]}
         return {"permission": "allow"}
 
+    if event == "beforeEditFile":
+        # Opportunistic security gate on edit payloads (hardcoded secrets /
+        # TLS bypass / SQLi / CORS — parity with the Antigravity path).
+        # Unknown/absent content fields fail open to allow.
+        edit_path = str(payload.get("file_path") or payload.get("path") or "")
+        tool_hint = "MultiEdit" if isinstance(payload.get("edits"), list) else "Edit"
+        edit_content = extract_write_content(tool_hint, payload)
+        if edit_content:
+            verdict = guard_file_content(edit_path, edit_content, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
+            if verdict["decision"] == "deny":
+                return {"permission": "deny", "user_message": verdict["reason"]}
+        return {"permission": "allow"}
+
     if event == "beforeSubmitPrompt":
         # Cursor cannot inject context (allow/deny only). Nothing honest to
         # record: the model still sees the full prompt. Always allow.
@@ -81,7 +97,7 @@ def main():
         response = _allow(event)
     if not isinstance(response, dict) or not response:
         response = _allow(event)
-    if event in ("beforeShellExecution", "beforeReadFile", "beforeSubmitPrompt", "stop"):
+    if event in ("beforeShellExecution", "beforeEditFile", "beforeReadFile", "beforeSubmitPrompt", "stop"):
         try:
             from src.telemetry_sync import TelemetrySync
             TelemetrySync.sync_background(throttle_seconds=0.0 if event == "stop" else 20.0)

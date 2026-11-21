@@ -246,13 +246,24 @@ class TestHonestyFlipForGuessedOriginals(unittest.TestCase):
 
     def test_resolve_measurement_type_map(self):
         from src.metrics import resolve_measurement
+        # Every GUARD_* (blocked payloads never reach the model) and
+        # OUTPUT_GUARD (counterfactual surgical-edit size) are estimated.
+        # Fix 2026-11-21: OUTPUT_GUARD flipped measured->estimated and the
+        # GUARD_ prefix rule now covers check names missing from the old list.
         for t in ("COMMAND_FILTER", "LOOP_GUARD", "GUARD_SECRET", "GUARD_DESTRUCTIVE",
                   "GUARD_TLS_VERIFY_BYPASS", "GUARD_JUNK_READ", "GUARD_INFINITE",
-                  "GUARD_RAW_CODE_SEARCH"):
+                  "GUARD_RAW_CODE_SEARCH", "GUARD_GIT_SECRET_STAGING",
+                  "GUARD_SECRET_FALLBACK", "GUARD_DESTRUCTIVE_RM",
+                  "GUARD_SECRET_FILE_READ", "GUARD_DATA_EXFILTRATION",
+                  "GUARD_SQL_INJECTION", "GUARD_INSECURE_CORS",
+                  "GUARD_ANY_FUTURE_CHECK", "OUTPUT_GUARD"):
             self.assertEqual(resolve_measurement(t), "estimated", t)
         # Real-byte events stay measured
-        for t in ("TOOL_READ", "AST_SKELETON", "GRAPH_SKELETON", "SUBAGENT_DEDUP", "OUTPUT_GUARD"):
+        for t in ("TOOL_READ", "AST_SKELETON", "GRAPH_SKELETON", "SUBAGENT_DEDUP"):
             self.assertEqual(resolve_measurement(t), "measured", t)
+        # Explicit override still wins over the type map and the GUARD_ prefix
+        self.assertEqual(resolve_measurement("GUARD_SECRET", "measured"), "measured")
+        self.assertEqual(resolve_measurement("OUTPUT_GUARD", "measured"), "measured")
 
     def test_retro_migration_relabels_command_filter_and_loop_guard(self):
         tmp = tempfile.mkdtemp(prefix="tokensafe_retro_gap_")
