@@ -125,6 +125,26 @@ model Post {
         fp2 = SchemaSlicer.compute_schema_fingerprint(root_api, "openapi")
         self.assertNotEqual(fp1, fp2, "OpenAPI fingerprint must change when referenced $ref file changes")
 
+    def test_schema_fingerprint_stable_across_mtime_change(self):
+        schema_dir = os.path.join(self.tmp_dir.name, "prisma_mtime", "schema")
+        os.makedirs(schema_dir, exist_ok=True)
+        user_file = os.path.join(schema_dir, "user.prisma")
+        with open(user_file, "w", encoding="utf-8") as f:
+            f.write("model User { id Int @id }")
+        post_file = os.path.join(schema_dir, "post.prisma")
+        with open(post_file, "w", encoding="utf-8") as f:
+            f.write("model Post { id Int @id }")
+
+        fp1 = SchemaSlicer.compute_schema_fingerprint(user_file, "prisma")
+
+        # Change mtime artificially (simulate touch or git clone on another machine)
+        future_time = time.time() + 3600
+        os.utime(user_file, (future_time, future_time))
+        os.utime(post_file, (future_time, future_time))
+
+        fp2 = SchemaSlicer.compute_schema_fingerprint(user_file, "prisma")
+        self.assertEqual(fp1, fp2, "Fingerprint must be deterministic based on content, not mtime")
+
     def test_l1_l2_caching_and_l3_team_sync(self):
         graphql_path = os.path.join(self.tmp_dir.name, "schema.graphql")
         with open(graphql_path, "w", encoding="utf-8") as f:

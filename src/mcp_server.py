@@ -1869,9 +1869,13 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         try:
             from src.format_parsers.lockfiles import LockfileReducer
             res = LockfileReducer.query_dependency(lock_p, pkg)
+            lock_bytes = res.pop("_lockfile_bytes", 0)
             json_text = json.dumps(res, indent=2, ensure_ascii=False)
             opt_tokens = count_tokens(json_text)
-            orig_tokens = 50000
+            if res.get("found"):
+                orig_tokens = max(1000, lock_bytes // 4) if lock_bytes else max(opt_tokens, 1000)
+            else:
+                orig_tokens = opt_tokens
             tracker.record_event(
                 session_id=_mcp_session_id(),
                 event_type="LOCKFILE_QUERY",
@@ -1892,9 +1896,13 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         try:
             from src.type_slicer import TypeSlicer
             res = TypeSlicer.slice_package_type(pkg, sym, project_root=proj_root)
+            dts_bytes = res.pop("_dts_bytes", 0)
             json_text = json.dumps(res, indent=2, ensure_ascii=False)
             opt_tokens = count_tokens(json_text)
-            orig_tokens = 15000
+            if res.get("found"):
+                orig_tokens = max(opt_tokens, dts_bytes // 4) if dts_bytes else max(opt_tokens, 500)
+            else:
+                orig_tokens = opt_tokens
             tracker.record_event(
                 session_id=_mcp_session_id(),
                 event_type="TYPE_SLICE",
@@ -1958,10 +1966,12 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         try:
             from src.mistakes import MistakesLedger
             entries = MistakesLedger.list_mistakes(project_root=proj_root)
+            team_entries = MistakesLedger.get_team_mistakes()
             guard = MistakesLedger.get_guard_prompt(project_root=proj_root)
             return {"content": [{"type": "text", "text": json.dumps({
                 "count": len(entries),
                 "entries": entries,
+                "team_entries": team_entries,
                 "active_guard": guard
             }, indent=2, ensure_ascii=False)}]}
         except Exception as e:

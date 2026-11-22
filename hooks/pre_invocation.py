@@ -74,6 +74,8 @@ def _handle(payload: dict) -> dict:
 
     tracker = MetricsTracker()
     inject_steps = []
+    workspace_paths = payload.get("workspacePaths") if isinstance(payload.get("workspacePaths"), list) else []
+    hook_cwd = str(payload.get("cwd") or (workspace_paths[0] if workspace_paths else "") or os.getcwd())
 
     # 0. Asynchronous telemetry sync (detached & throttled to 20s)
     try:
@@ -138,7 +140,7 @@ def _handle(payload: dict) -> dict:
     # 2.5 Proactive Anti-Stuck Guard (Inject recent failure lessons from MistakesLedger)
     try:
         from src.mistakes import MistakesLedger
-        active_guard = MistakesLedger.get_guard_prompt()
+        active_guard = MistakesLedger.get_guard_prompt(project_root=hook_cwd)
         if active_guard:
             inject_steps.append({
                 "systemMessage": {
@@ -280,22 +282,6 @@ def _handle(payload: dict) -> dict:
                     optimized_tokens=0,
                     details={"used_pct": budget["used_pct"], "window": budget["window_tokens"]}
                 )
-    except Exception:
-        pass
-
-    # 6. Anti-Stuck Dead-Ends Guard Prompt
-    try:
-        from src.mistakes import MistakesLedger
-        workspace_paths = payload.get("workspacePaths") if isinstance(payload.get("workspacePaths"), list) else []
-        hook_cwd = str(payload.get("cwd") or (workspace_paths[0] if workspace_paths else "") or os.getcwd())
-        mistake_guard = MistakesLedger.get_guard_prompt(project_root=hook_cwd)
-        if mistake_guard:
-            inject_steps.append({
-                "systemMessage": {
-                    "systemMessage": mistake_guard,
-                    "metadata": {"source": "anti_stuck_guard"}
-                }
-            })
     except Exception:
         pass
 

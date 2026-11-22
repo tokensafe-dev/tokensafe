@@ -12,7 +12,7 @@ import threading
 import urllib.request
 import urllib.error
 import urllib.parse
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from src.license_manager import LicenseManager
 from src.ssl_context import shared_ssl_context
 
@@ -207,6 +207,53 @@ class TeamCache:
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
+
+    @classmethod
+    def list_entries(
+        cls,
+        cache_type: str,
+        limit: int = 10,
+        timeout: Optional[float] = None,
+        lic_key: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Queries Shared Team Cache for recent entries of a specific type (e.g. TEAM_MISTAKE)."""
+        cloud_url = cls._get_cloud_url()
+        if cls._is_in_cooldown(cloud_url):
+            return []
+        if not lic_key:
+            is_team, resolved_key = cls._is_team_tier()
+            if not is_team:
+                return []
+            lic_key = resolved_key
+        if not cache_type:
+            return []
+
+        norm_type = cache_type.strip().upper()
+        if norm_type not in cls.ALLOWED_CACHE_TYPES:
+            return []
+
+        endpoint = f"{cloud_url}/api/team/cache/list?type={urllib.parse.quote(norm_type)}&limit={max(1, min(50, limit))}"
+        req = urllib.request.Request(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {lic_key}",
+                "User-Agent": "TokenSafe-TeamCache/1.0"
+            }
+        )
+        eff_timeout = cls.DEFAULT_TIMEOUT if timeout is None else max(0.05, float(timeout))
+        try:
+            with urllib.request.urlopen(req, timeout=eff_timeout, context=shared_ssl_context()) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    cls._clear_cooldown(cloud_url)
+                    return data.get("entries") or []
+        except urllib.error.HTTPError as he:
+            if he.code in (401, 403) or he.code >= 500:
+                cls._trip_cooldown(cloud_url)
+            return []
+        except Exception:
+            return []
+        return []
 
     @classmethod
     def get_stats(cls) -> Dict[str, Any]:

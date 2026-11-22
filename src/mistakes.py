@@ -14,6 +14,7 @@ import os
 import json
 import time
 import hashlib
+import threading
 import subprocess
 from typing import Dict, Any, List, Optional, Tuple
 from src.paths import resolve_data_dir, ensure_tokensafe_gitignore
@@ -190,6 +191,43 @@ class MistakesLedger:
                 pass
         return 0
 
+    _team_mistakes_cache: List[Dict[str, Any]] = []
+    _team_mistakes_fetched_at: float = 0.0
+    _team_mistakes_lock = threading.Lock()
+
+    @classmethod
+    def get_team_mistakes(cls, timeout: float = 0.6) -> List[Dict[str, Any]]:
+        """Retrieves scrubbed dead-end summaries shared across team members with 300s TTL cache."""
+        now = time.time()
+        with cls._team_mistakes_lock:
+            if cls._team_mistakes_cache and (now - cls._team_mistakes_fetched_at < 300.0):
+                return list(cls._team_mistakes_cache)
+
+        try:
+            from src.team_cache import TeamCache
+            raw_entries = TeamCache.list_entries("TEAM_MISTAKE", limit=10, timeout=timeout)
+            parsed: List[Dict[str, Any]] = []
+            for item in raw_entries:
+                val = item.get("value") or item.get("cached_value")
+                if isinstance(val, str):
+                    try:
+                        p_val = json.loads(val)
+                        if isinstance(p_val, dict):
+                            parsed.append(p_val)
+                        else:
+                            parsed.append({"summary": str(val)[:120]})
+                    except Exception:
+                        parsed.append({"summary": str(val)[:120]})
+                elif isinstance(val, dict):
+                    parsed.append(val)
+
+            with cls._team_mistakes_lock:
+                cls._team_mistakes_cache = parsed
+                cls._team_mistakes_fetched_at = now
+            return list(parsed)
+        except Exception:
+            return []
+
     @classmethod
     def should_force_ask(
         cls,
@@ -217,7 +255,19 @@ class MistakesLedger:
             f = (m.get("file") or "").lower()
             s = (m.get("summary") or "").lower()
             det = (m.get("details") or "").lower()
-            if (f and f in norm_target) or (norm_target in s) or (norm_target in det):
+
+            matched = False
+            if len(norm_target) >= 12:
+                # Substring matching for longer specific commands or file paths
+                if (f and f in norm_target) or (norm_target in s) or (norm_target in det):
+                    matched = True
+            else:
+                # Short targets (e.g. "npm", "ls"): exact equality against file, summary, or extracted command prefix
+                cmd_part = s.split(":", 1)[0].strip() if ":" in s else s.split()[0] if s.split() else ""
+                if (f and norm_target == f) or (norm_target == s) or (norm_target == cmd_part):
+                    matched = True
+
+            if matched:
                 matching.append(m)
 
         count = len(matching)
@@ -236,19 +286,40 @@ class MistakesLedger:
         max_items: int = 3
     ) -> Optional[str]:
         """
-        Generates a compact (<80 tokens) prompt guard from recent active mistakes.
+        Generates a compact (<100 tokens) prompt guard from recent active local and team mistakes.
         Injectable into system instructions or PreInvocation hooks.
         """
-        mistakes = cls.list_mistakes(project_root=project_root, active_only=True)
-        if not mistakes:
+        local_mistakes = cls.list_mistakes(project_root=project_root, active_only=True)
+        team_mistakes = cls.get_team_mistakes()
+        if not local_mistakes and not team_mistakes:
             return None
 
-        # Take the most recent active entries
-        recent = mistakes[-max_items:]
-        lines = ["[TokenSafe Anti-Stuck Guard: Prior Dead-Ends to Avoid in this Project]:"]
-        for m in reversed(recent):
+        lines = ["[TokenSafe Anti-Stuck Guard: Prior Dead-Ends to Avoid]:"]
+        local_summaries = set()
+
+        # Take up to max_items most recent active local entries
+        for m in reversed(local_mistakes[-max_items:]):
+            s = m.get("summary", "")
+            local_summaries.add(s.strip().lower())
             f = m.get("file")
             f_prefix = f"{f}: " if f else ""
-            lines.append(f"• {f_prefix}{m.get('summary', '')}")
+            lines.append(f"• {f_prefix}{s}")
+
+        # Merge up to 2 unique team mistakes
+        team_added = 0
+        for tm in team_mistakes:
+            if team_added >= 2:
+                break
+            ts = (tm.get("summary") or "").strip()
+            if not ts or ts.lower() in local_summaries:
+                continue
+            tf = tm.get("file")
+            tf_prefix = f"{tf}: " if tf else ""
+            lines.append(f"• team: {tf_prefix}{ts}")
+            local_summaries.add(ts.lower())
+            team_added += 1
+
+        if len(lines) == 1:
+            return None
 
         return "\n".join(lines)

@@ -99,6 +99,50 @@ class TestMistakesTeamSync(unittest.TestCase):
         self.assertIn("Circular import", prompt)
         self.assertIn("Missing redis host", prompt)
 
+    @patch("src.team_cache.TeamCache.list_entries")
+    def test_team_mistakes_merge_and_ttl_cache(self, mock_list_entries):
+        import json
+        MistakesLedger._team_mistakes_cache = []
+        MistakesLedger._team_mistakes_fetched_at = 0.0
+
+        mock_list_entries.return_value = [
+            {
+                "key_hash": "abc1",
+                "value": json.dumps({"file": "docker-compose.yml", "summary": "Postgres port conflict"}),
+            },
+            {
+                "key_hash": "abc2",
+                "value": json.dumps({"file": "service.py", "summary": "Circular import in service.py"}),  # duplicate with local
+            },
+            {
+                "key_hash": "abc3",
+                "value": json.dumps({"file": "auth.ts", "summary": "Clerk key expired"}),
+            }
+        ]
+
+        project_root = self.tmp_dir.name
+        # Record local mistake
+        MistakesLedger.record_failure(summary="Circular import in service.py", file_path="service.py", project_root=project_root)
+
+        # 1. Fetch team mistakes directly
+        team_items = MistakesLedger.get_team_mistakes()
+        self.assertEqual(len(team_items), 3)
+        mock_list_entries.assert_called_once()
+
+        # 2. Second call should hit in-memory TTL cache (not call API again)
+        team_items_cached = MistakesLedger.get_team_mistakes()
+        self.assertEqual(len(team_items_cached), 3)
+        self.assertEqual(mock_list_entries.call_count, 1)
+
+        # 3. Guard prompt should merge local + team (deduplicating circular import)
+        guard = MistakesLedger.get_guard_prompt(project_root=project_root)
+        self.assertIsNotNone(guard)
+        self.assertIn("Circular import in service.py", guard)
+        self.assertIn("team: docker-compose.yml: Postgres port conflict", guard)
+        self.assertIn("team: auth.ts: Clerk key expired", guard)
+        # Should not have duplicate "team: service.py: Circular import"
+        self.assertNotIn("team: service.py: Circular import", guard)
+
 
 if __name__ == "__main__":
     unittest.main()

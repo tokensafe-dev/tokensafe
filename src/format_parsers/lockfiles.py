@@ -27,6 +27,8 @@ class LockfileReducer:
         name = filename_or_path.lower().split("/")[-1].split("\\")[-1]
         return name in (
             "package-lock.json",
+            "bun.lock",
+            "bun.lockb",
             "pnpm-lock.yaml",
             "yarn.lock",
             "cargo.lock",
@@ -35,6 +37,24 @@ class LockfileReducer:
             "composer.lock",
             "go.sum",
         )
+
+    @classmethod
+    def _load_jsonc(cls, text: str) -> Optional[Dict[str, Any]]:
+        """Safely parses JSON or JSONC (JSON with comments and trailing commas)."""
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        try:
+            # Strip whole-line comments // ... without corrupting base64 hashes inside strings
+            no_comments = re.sub(r'^\s*//.*$', '', text, flags=re.MULTILINE)
+            # Strip trailing commas before } or ]
+            cleaned = re.sub(r',(\s*[}\]])', r'\1', no_comments)
+            return json.loads(cleaned)
+        except Exception:
+            return None
 
     @classmethod
     def reduce(cls, content: str, filename: str = "package-lock.json") -> Tuple[str, bool]:
@@ -47,12 +67,52 @@ class LockfileReducer:
 
         if fname == "package-lock.json":
             return cls._reduce_npm_lock(content)
+        elif fname in ("bun.lock", "bun.lockb"):
+            return cls._reduce_bun_lock(content, fname)
         elif fname == "cargo.lock":
             return cls._reduce_cargo_lock(content)
         elif fname == "poetry.lock":
             return cls._reduce_poetry_lock(content)
 
         return cls._generic_reduce(content, fname)
+
+    @classmethod
+    def _reduce_bun_lock(cls, content: str, fname: str = "bun.lock") -> Tuple[str, bool]:
+        data = cls._load_jsonc(content)
+        if not data or not isinstance(data, dict):
+            return cls._generic_reduce(content, fname)
+
+        packages = data.get("packages", {})
+        workspaces = data.get("workspaces", {})
+        root_ws = workspaces.get("") if isinstance(workspaces, dict) else {}
+        root_deps = {}
+        if isinstance(root_ws, dict):
+            root_deps = {**root_ws.get("dependencies", {}), **root_ws.get("devDependencies", {})}
+
+        direct_deps = {}
+        total_count = len(packages) if isinstance(packages, dict) else 0
+
+        for dep_name, range_ver in sorted(root_deps.items()):
+            resolved_ver = range_ver
+            if isinstance(packages, dict) and dep_name in packages:
+                val = packages[dep_name]
+                if isinstance(val, list) and len(val) > 0 and isinstance(val[0], str):
+                    resolved_ver = val[0].rsplit("@", 1)[1] if "@" in val[0] else val[0]
+            direct_deps[dep_name] = resolved_ver
+
+        lines = [
+            f"# [TokenSafe Lockfile Summary: {fname}]",
+            f"Total installed packages: {total_count}",
+            "",
+            "## Direct Dependencies:"
+        ]
+        for dname, dver in sorted(direct_deps.items()):
+            lines.append(f"  - {dname}: {dver}")
+
+        hash8, marker = stash_block(content, source="lockfile:bun")
+        lines.append("")
+        lines.append(marker)
+        return "\n".join(lines), True
 
     @classmethod
     def _reduce_npm_lock(cls, content: str) -> Tuple[str, bool]:
@@ -163,7 +223,7 @@ class LockfileReducer:
 
     @classmethod
     def find_lockfile(cls, directory: Optional[str] = None, start_dir: Optional[str] = None) -> Optional[str]:
-        """Locates the nearest lockfile in directory or parent directories up to git root."""
+        """Locates the nearest lockfile in directory or parent directories up to git root, or downward in monorepos."""
         target = directory or start_dir or os.getcwd()
         start = os.path.abspath(target)
         curr = start
@@ -171,6 +231,7 @@ class LockfileReducer:
             "package-lock.json", "bun.lock", "bun.lockb",
             "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock"
         )
+        # 1. Upward search
         for _ in range(6):
             for c in candidates:
                 cand_path = os.path.join(curr, c)
@@ -180,6 +241,26 @@ class LockfileReducer:
             if parent == curr:
                 break
             curr = parent
+
+        # 2. Downward search (bounded: depth <= 2, skip heavy/vendor dirs, cap 60 directories)
+        dirs_checked = 0
+        skip_dirs = {"node_modules", ".git", "dist", "build", ".next", ".cache", "data", "target", ".venv", "venv", "__pycache__"}
+        for root, dirs, files in os.walk(start):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+            dirs_checked += 1
+            if dirs_checked > 60:
+                break
+            rel_path = os.path.relpath(root, start)
+            rel_depth = 0 if rel_path == "." else rel_path.count(os.sep) + 1
+            if rel_depth > 2:
+                dirs[:] = []
+                continue
+            for c in candidates:
+                if c in files:
+                    cand_path = os.path.join(root, c)
+                    if os.path.isfile(cand_path):
+                        return cand_path
+
         return None
 
     @classmethod
@@ -187,6 +268,22 @@ class LockfileReducer:
         data_dir = resolve_data_dir()
         os.makedirs(data_dir, exist_ok=True)
         return os.path.join(data_dir, "lockfile_cache.db")
+
+    @classmethod
+    def _maybe_evict(cls, conn: sqlite3.Connection, max_rows: int = 5000) -> None:
+        """Evicts oldest entries when lockfile cache exceeds max_rows."""
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM lockfile_cache;").fetchone()
+            count = row[0] if row else 0
+            if count > max_rows:
+                excess = count - max_rows
+                conn.execute(
+                    "DELETE FROM lockfile_cache WHERE entry_key IN ("
+                    "SELECT entry_key FROM lockfile_cache ORDER BY cached_at ASC LIMIT ?"
+                    ");", (excess,)
+                )
+        except Exception:
+            pass
 
     @classmethod
     def _init_db(cls):
@@ -231,6 +328,7 @@ class LockfileReducer:
         try:
             with open(target_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
+            _lockfile_bytes = os.path.getsize(target_path)
         except Exception as e:
             return {"found": False, "package": package_name, "error": f"Failed to read {fname}: {e}"}
 
@@ -247,8 +345,10 @@ class LockfileReducer:
             row = conn.execute("SELECT json_result FROM lockfile_cache WHERE entry_key = ?", (entry_key,)).fetchone()
             if row:
                 res = json.loads(row[0])
-                res["source"] = "L2_cache"
-                return res
+                if res.get("found"):
+                    res["source"] = "L2_cache"
+                    res["_lockfile_bytes"] = _lockfile_bytes
+                    return res
         except Exception:
             pass
         finally:
@@ -264,25 +364,28 @@ class LockfileReducer:
             team_val = TeamCache.get("LOCKFILE_INDEX", entry_key, timeout=0.5)
             if team_val:
                 res = json.loads(team_val)
-                res["source"] = "L3_team_cache"
-                # Store back to L2
-                back_conn = None
-                try:
-                    back_conn = sqlite3.connect(db_path, timeout=5.0)
-                    back_conn.execute("""
-                        INSERT OR REPLACE INTO lockfile_cache (entry_key, lockfile_hash, package_name, json_result, cached_at)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (entry_key, lockfile_hash, package_name.strip().lower(), team_val, int(time.time())))
-                    back_conn.commit()
-                except Exception:
-                    pass
-                finally:
-                    if back_conn:
-                        try:
-                            back_conn.close()
-                        except Exception:
-                            pass
-                return res
+                if res.get("found"):
+                    res["source"] = "L3_team_cache"
+                    res["_lockfile_bytes"] = _lockfile_bytes
+                    # Store back to L2
+                    back_conn = None
+                    try:
+                        back_conn = sqlite3.connect(db_path, timeout=5.0)
+                        back_conn.execute("""
+                            INSERT OR REPLACE INTO lockfile_cache (entry_key, lockfile_hash, package_name, json_result, cached_at)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (entry_key, lockfile_hash, package_name.strip().lower(), team_val, int(time.time())))
+                        cls._maybe_evict(back_conn)
+                        back_conn.commit()
+                    except Exception:
+                        pass
+                    finally:
+                        if back_conn:
+                            try:
+                                back_conn.close()
+                            except Exception:
+                                pass
+                    return res
         except Exception:
             pass
 
@@ -290,40 +393,99 @@ class LockfileReducer:
         res = cls._parse_dependency(fname, content, package_name)
         res["lockfile"] = fname
         res["lockfile_path"] = target_path
+        res["_lockfile_bytes"] = _lockfile_bytes
 
-        # 4. Save to L2 SQLite and sync to L3 Team Cache
-        save_conn = None
-        try:
-            raw_json = json.dumps(res, ensure_ascii=False)
-            save_conn = sqlite3.connect(db_path, timeout=5.0)
-            save_conn.execute("""
-                INSERT OR REPLACE INTO lockfile_cache (entry_key, lockfile_hash, package_name, json_result, cached_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (entry_key, lockfile_hash, package_name.strip().lower(), raw_json, int(time.time())))
-            save_conn.commit()
-        except Exception:
-            pass
-        finally:
-            if save_conn:
-                try:
-                    save_conn.close()
-                except Exception:
-                    pass
+        # 4. Save to L2 SQLite and sync to L3 Team Cache (only positive found lookups)
+        if res.get("found"):
+            save_conn = None
+            try:
+                raw_json = json.dumps(res, ensure_ascii=False)
+                save_conn = sqlite3.connect(db_path, timeout=5.0)
+                save_conn.execute("""
+                    INSERT OR REPLACE INTO lockfile_cache (entry_key, lockfile_hash, package_name, json_result, cached_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (entry_key, lockfile_hash, package_name.strip().lower(), raw_json, int(time.time())))
+                cls._maybe_evict(save_conn)
+                save_conn.commit()
+            except Exception:
+                pass
+            finally:
+                if save_conn:
+                    try:
+                        save_conn.close()
+                    except Exception:
+                        pass
 
-        try:
-            from src.team_cache import TeamCache
-            TeamCache.put("LOCKFILE_INDEX", entry_key, json.dumps(res, ensure_ascii=False), tokens_saved=250)
-        except Exception:
-            pass
+            # Broadcast to L3 without leaking local filesystem paths or private byte counts
+            try:
+                from src.team_cache import TeamCache
+                team_payload = dict(res)
+                team_payload.pop("lockfile_path", None)
+                team_payload.pop("_lockfile_bytes", None)
+                TeamCache.put("LOCKFILE_INDEX", entry_key, json.dumps(team_payload, ensure_ascii=False), tokens_saved=250)
+            except Exception:
+                pass
 
         res["source"] = "parsed_live"
         return res
 
     @classmethod
     def _parse_dependency(cls, fname: str, content: str, pkg_name: str) -> Dict[str, Any]:
-        """Parses dependency entry from npm, cargo, poetry, or pnpm."""
+        """Parses dependency entry from npm, cargo, poetry, pnpm, or bun."""
         norm_pkg = pkg_name.strip()
-        if "package-lock" in fname or "bun.lock" in fname:
+        if "bun.lock" in fname:
+            try:
+                data = cls._load_jsonc(content)
+                if isinstance(data, dict):
+                    packages = data.get("packages")
+                    if isinstance(packages, dict):
+                        # 1. Direct package key (e.g. "marked", "@tanstack/react-query")
+                        val = packages.get(norm_pkg)
+                        # 2. Nested or prefixed node_modules/<pkg>
+                        if not val:
+                            exact_nm = f"node_modules/{norm_pkg}"
+                            val = packages.get(exact_nm)
+                        if not val:
+                            suffix = f"/node_modules/{norm_pkg}"
+                            for k, v in packages.items():
+                                if k.endswith(suffix):
+                                    val = v
+                                    break
+                        if val and isinstance(val, list) and len(val) > 0:
+                            spec = val[0] if isinstance(val[0], str) else ""
+                            ver = spec.rsplit("@", 1)[1] if "@" in spec else spec
+                            meta = val[2] if len(val) > 2 and isinstance(val[2], dict) else {}
+                            integrity = val[3] if len(val) > 3 and isinstance(val[3], str) else None
+                            return {
+                                "found": True,
+                                "package": norm_pkg,
+                                "version": ver,
+                                "resolved": integrity,
+                                "dependencies": meta.get("dependencies", {}),
+                                "peerDependencies": meta.get("peerDependencies", {}),
+                                "dev": False,
+                            }
+                    # 3. Fallback to workspaces[""] direct dependencies
+                    workspaces = data.get("workspaces", {})
+                    root_ws = workspaces.get("") if isinstance(workspaces, dict) else {}
+                    if isinstance(root_ws, dict):
+                        dev_deps = root_ws.get("devDependencies", {}) or {}
+                        prod_deps = root_ws.get("dependencies", {}) or {}
+                        all_root = {**prod_deps, **dev_deps}
+                        if norm_pkg in all_root:
+                            return {
+                                "found": True,
+                                "package": norm_pkg,
+                                "version": all_root[norm_pkg],
+                                "resolved": None,
+                                "dependencies": {},
+                                "peerDependencies": {},
+                                "dev": norm_pkg in dev_deps,
+                            }
+            except Exception:
+                pass
+
+        elif "package-lock" in fname:
             try:
                 data = json.loads(content)
                 packages = data.get("packages")

@@ -63,6 +63,27 @@ class TestHooksGuard(unittest.TestCase):
         self.assertTrue(overwritten_path.endswith(".summary.txt"))
         self.assertIn("query_dependency", res.get("reason", ""))
 
+    def test_pre_tool_use_bun_lock_interception(self):
+        bun_path = os.path.join(self.tmp_dir.name, "bun.lock")
+        with open(bun_path, "w", encoding="utf-8") as f:
+            f.write('{\n  "packages": {}\n}' + '\n' * 40)
+
+        payload = {
+            "conversationId": "test_bun_1",
+            "cwd": self.tmp_dir.name,
+            "toolCall": {
+                "name": "read_file",
+                "args": {"Path": bun_path}
+            }
+        }
+
+        res = handle_pre_tool_use(payload)
+        self.assertEqual(res["decision"], "allow")
+        self.assertIn("overwrite", res)
+        overwritten_path = res["overwrite"].get("Path")
+        self.assertIsNotNone(overwritten_path)
+        self.assertTrue(overwritten_path.endswith(".bun.lock.summary.txt"))
+
     def test_pre_tool_use_anti_stuck_hybrid_escalation(self):
         cmd = "npm run test:flaky"
         # Record 3 failures in mistakes ledger
@@ -109,6 +130,44 @@ class TestHooksGuard(unittest.TestCase):
         step_str = str(steps)
         self.assertIn("Anti-Stuck Guard", step_str)
         self.assertIn("Port 5432 in use", step_str)
+
+        # Check that guard banner is injected EXACTLY once, not duplicated
+        guard_injections = [
+            s for s in steps
+            if "Anti-Stuck Guard" in str(s) or "Prior Dead-Ends" in str(s)
+        ]
+        self.assertEqual(len(guard_injections), 1)
+
+    def test_should_force_ask_short_target_safety(self):
+        # 1. Record failure on specific command
+        MistakesLedger.record_failure(
+            summary="npm run build failed: syntax error",
+            source="command",
+            details="npm run build",
+            project_root=self.tmp_dir.name
+        )
+
+        # Short target "npm" (< 12 chars) must NOT trigger advisory or loop on unrelated commands
+        should_ask, reason = MistakesLedger.should_force_ask("npm", project_root=self.tmp_dir.name)
+        self.assertFalse(should_ask)
+        self.assertEqual(reason, "")
+
+        # Long target "npm run build" (>= 12 chars) should trigger soft advisory
+        should_ask, reason = MistakesLedger.should_force_ask("npm run build", project_root=self.tmp_dir.name)
+        self.assertFalse(should_ask)
+        self.assertIn("Advisory", reason)
+
+        # After 2 more failures, should escalate to force_ask
+        for i in range(2):
+            MistakesLedger.record_failure(
+                summary=f"npm run build failed attempt {i}: syntax error",
+                source="command",
+                details="npm run build",
+                project_root=self.tmp_dir.name
+            )
+        should_ask, reason = MistakesLedger.should_force_ask("npm run build", project_root=self.tmp_dir.name)
+        self.assertTrue(should_ask)
+        self.assertIn("Dead-End Loop", reason)
 
     def test_mcp_query_dependency_and_slice_type(self):
         from src.mcp_server import handle_tool_call

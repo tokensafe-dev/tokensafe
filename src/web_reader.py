@@ -162,9 +162,14 @@ class WebReader:
 
     @classmethod
     def sanitize_url(cls, url: str) -> str:
-        """Strips sensitive authentication & signature tokens from query strings for clean canonical caching."""
+        """Strips userinfo (user:pass@) and sensitive authentication & signature tokens from query strings for clean canonical caching."""
         try:
             parsed = urllib.parse.urlparse(url.strip())
+            netloc = parsed.netloc
+            if "@" in netloc:
+                _, _, netloc = netloc.rpartition("@")
+            clean_netloc = netloc.lower()
+
             qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
             cleaned_qs = [
                 (k, v) for k, v in qs
@@ -174,7 +179,7 @@ class WebReader:
             new_query = urllib.parse.urlencode(cleaned_qs)
             return urllib.parse.urlunparse((
                 parsed.scheme.lower(),
-                parsed.netloc.lower(),
+                clean_netloc,
                 parsed.path,
                 parsed.params,
                 new_query,
@@ -182,6 +187,22 @@ class WebReader:
             ))
         except Exception:
             return url.strip()
+
+    @classmethod
+    def has_auth_or_userinfo(cls, url: str, custom_headers: Optional[Dict[str, str]] = None) -> bool:
+        """Checks whether the request carries credentials, auth headers, or userinfo in URL."""
+        if custom_headers and any(
+            k.lower() in ("authorization", "cookie", "x-api-key")
+            for k in custom_headers
+        ):
+            return True
+        try:
+            parsed = urllib.parse.urlparse(url.strip())
+            if parsed.username or parsed.password or "@" in parsed.netloc:
+                return True
+        except Exception:
+            pass
+        return False
 
     @classmethod
     def _get_db_path(cls) -> str:
@@ -279,11 +300,8 @@ class WebReader:
         except Exception:
             pass
 
-        # 3. Check L3 Team Sync (Only if request carried no custom auth/cookie headers)
-        has_auth = bool(custom_headers and any(
-            k.lower() in ("authorization", "cookie", "x-api-key")
-            for k in custom_headers
-        ))
+        # 3. Check L3 Team Sync (Only if request carried no custom auth/cookie headers or userinfo)
+        has_auth = cls.has_auth_or_userinfo(url, custom_headers=custom_headers)
         if not has_auth:
             try:
                 from src.team_cache import TeamCache
@@ -335,10 +353,7 @@ class WebReader:
             pass
 
         # 3. Broadcast to L3 Team Sync
-        has_auth = bool(custom_headers and any(
-            k.lower() in ("authorization", "cookie", "x-api-key")
-            for k in custom_headers
-        ))
+        has_auth = cls.has_auth_or_userinfo(url, custom_headers=custom_headers)
         if sync_team and not has_auth:
             try:
                 from src.team_cache import TeamCache

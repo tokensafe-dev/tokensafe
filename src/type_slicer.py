@@ -38,6 +38,31 @@ class TypeSlicer:
             cls._mem_cache.clear()
 
     @classmethod
+    def _mem_put(cls, key: str, val: str, max_items: int = 100) -> None:
+        """Stores entry in LRU memory cache with fixed cap."""
+        with cls._mem_lock:
+            cls._mem_cache[key] = val
+            cls._mem_cache.move_to_end(key)
+            if len(cls._mem_cache) > max_items:
+                cls._mem_cache.popitem(last=False)
+
+    @classmethod
+    def _maybe_evict(cls, conn: sqlite3.Connection, max_rows: int = 5000) -> None:
+        """Evicts oldest entries when type cache exceeds max_rows."""
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM type_cache;").fetchone()
+            count = row[0] if row else 0
+            if count > max_rows:
+                excess = count - max_rows
+                conn.execute(
+                    "DELETE FROM type_cache WHERE type_key IN ("
+                    "SELECT type_key FROM type_cache ORDER BY cached_at ASC LIMIT ?"
+                    ");", (excess,)
+                )
+        except Exception:
+            pass
+
+    @classmethod
     def _get_db_path(cls) -> str:
         data_dir = resolve_data_dir()
         os.makedirs(data_dir, exist_ok=True)
@@ -61,10 +86,15 @@ class TypeSlicer:
                         version TEXT NOT NULL,
                         symbol TEXT NOT NULL,
                         type_code TEXT NOT NULL,
+                        dts_bytes INTEGER DEFAULT 0,
                         cached_at INTEGER NOT NULL,
                         hit_count INTEGER DEFAULT 1
                     );
                 """)
+                try:
+                    conn.execute("ALTER TABLE type_cache ADD COLUMN dts_bytes INTEGER DEFAULT 0;")
+                except Exception:
+                    pass
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_type_pkg ON type_cache(package_name);")
                 conn.commit()
                 cls._db_init_done = db_path
@@ -146,7 +176,7 @@ class TypeSlicer:
 
     @classmethod
     def _extract_symbol_block(cls, content: str, symbol: str) -> Optional[str]:
-        """Extracts full definition block for interface, type, class, function, or enum."""
+        """Extracts full definition block for interface, type, class, function, enum, or namespace with balanced braces."""
         pattern = re.compile(
             rf'(?:export\s+)?(?:declare\s+)?(?:default\s+)?(interface|type|class|enum|function|const|namespace)\s+{re.escape(symbol)}\b',
             re.MULTILINE
@@ -155,14 +185,18 @@ class TypeSlicer:
         if not match:
             return None
 
+        kind = match.group(1)
+        is_namespace = (kind == "namespace")
+        max_lines = 400 if is_namespace else 150
+
         start_pos = match.start()
-        # Find start of block or statement
         rest = content[start_pos:]
         lines = rest.splitlines()
 
         collected: List[str] = []
         open_braces = 0
         brace_started = False
+        truncated = False
 
         for line in lines:
             collected.append(line)
@@ -175,8 +209,14 @@ class TypeSlicer:
                 break
             if brace_started and open_braces <= 0:
                 break
-            if len(collected) > 120:  # safety cap
+            if len(collected) >= max_lines:
+                truncated = True
                 break
+
+        if truncated and open_braces > 0:
+            collected.append(f"  // ... [TokenSafe: truncated {open_braces} nested block(s)]")
+            for _ in range(open_braces):
+                collected.append("}")
 
         return "\n".join(collected)
 
@@ -266,20 +306,21 @@ class TypeSlicer:
             l2_conn = sqlite3.connect(db_path, timeout=5.0)
             l2_conn.execute("PRAGMA busy_timeout=5000;")
             row = l2_conn.execute(
-                "SELECT type_code FROM type_cache WHERE type_key = ?",
+                "SELECT type_code, dts_bytes FROM type_cache WHERE type_key = ?",
                 (type_key,)
             ).fetchone()
             if row:
                 code = row[0]
-                with cls._mem_lock:
-                    cls._mem_cache[type_key] = code
+                dts_b = row[1] if len(row) > 1 and row[1] else 0
+                cls._mem_put(type_key, code, max_items=100)
                 return {
                     "found": True,
                     "package": pkg_name,
                     "version": version,
                     "symbol": sym,
                     "type_code": code,
-                    "source": "L2_sqlite"
+                    "source": "L2_sqlite",
+                    "_dts_bytes": dts_b
                 }
         except Exception:
             pass
@@ -295,8 +336,7 @@ class TypeSlicer:
             from src.team_cache import TeamCache
             team_val = TeamCache.get("3RD_PARTY_DTS", type_key, timeout=0.5)
             if team_val:
-                with cls._mem_lock:
-                    cls._mem_cache[type_key] = team_val
+                cls._mem_put(type_key, team_val, max_items=100)
                 # Backfill L2
                 back_conn = None
                 try:
@@ -305,6 +345,7 @@ class TypeSlicer:
                         INSERT OR REPLACE INTO type_cache (type_key, package_name, version, symbol, type_code, cached_at)
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, (type_key, pkg_name, version, sym, team_val, int(time.time())))
+                    cls._maybe_evict(back_conn)
                     back_conn.commit()
                 except Exception:
                     pass
@@ -343,6 +384,8 @@ class TypeSlicer:
                 "error": f"No .d.ts declaration file located for '{pkg_name}'."
             }
 
+        dts_bytes = os.path.getsize(dts_file) if os.path.isfile(dts_file) else 0
+
         code_block = cls.slice_symbol_from_file(dts_file, sym)
         if not code_block:
             return {
@@ -354,18 +397,16 @@ class TypeSlicer:
             }
 
         # 5. Save to L1, L2 SQLite, and broadcast to L3 Team Sync
-        with cls._mem_lock:
-            cls._mem_cache[type_key] = code_block
-            if len(cls._mem_cache) > 100:
-                cls._mem_cache.popitem(last=False)
+        cls._mem_put(type_key, code_block, max_items=100)
 
         save_conn = None
         try:
             save_conn = sqlite3.connect(db_path, timeout=5.0)
             save_conn.execute("""
-                INSERT OR REPLACE INTO type_cache (type_key, package_name, version, symbol, type_code, cached_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (type_key, pkg_name, version, sym, code_block, int(time.time())))
+                INSERT OR REPLACE INTO type_cache (type_key, package_name, version, symbol, type_code, dts_bytes, cached_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (type_key, pkg_name, version, sym, code_block, dts_bytes, int(time.time())))
+            cls._maybe_evict(save_conn)
             save_conn.commit()
         except Exception:
             pass
@@ -388,5 +429,6 @@ class TypeSlicer:
             "version": version,
             "symbol": sym,
             "type_code": code_block,
-            "source": "parsed_live"
+            "source": "parsed_live",
+            "_dts_bytes": dts_bytes
         }

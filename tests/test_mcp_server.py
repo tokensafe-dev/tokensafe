@@ -399,6 +399,83 @@ class TestMCPServer(unittest.TestCase):
         self.assertNotIn("isError", res)
         self.assertIn("Scoped Search", res["content"][0]["text"])
 
+    @patch("src.metrics.MetricsTracker.record_event")
+    @patch("src.format_parsers.lockfiles.LockfileReducer.query_dependency")
+    def test_query_dependency_honest_metrics(self, mock_query, mock_record):
+        # Found package: honest tokens derived from _lockfile_bytes
+        mock_query.return_value = {
+            "found": True,
+            "package": "express",
+            "version": "4.19.2",
+            "_lockfile_bytes": 40000
+        }
+        res = handle_tool_call("query_dependency", {"package_name": "express"})
+        self.assertNotIn("isError", res)
+        data = json.loads(res["content"][0]["text"])
+        self.assertNotIn("_lockfile_bytes", data)
+
+        self.assertTrue(mock_record.called)
+        ev = mock_record.call_args[1]
+        self.assertEqual(ev["original_tokens"], 10000)  # 40000 // 4
+        self.assertNotEqual(ev["original_tokens"], 50000)  # NOT hardcoded 50k!
+
+        # Missing package: saved tokens must be 0 (orig == opt)
+        mock_record.reset_mock()
+        mock_query.return_value = {
+            "found": False,
+            "package": "non-existent",
+            "_lockfile_bytes": 40000
+        }
+        res_missing = handle_tool_call("query_dependency", {"package_name": "non-existent"})
+        ev_missing = mock_record.call_args[1]
+        self.assertEqual(ev_missing["original_tokens"], ev_missing["optimized_tokens"])
+
+    @patch("src.metrics.MetricsTracker.record_event")
+    @patch("src.type_slicer.TypeSlicer.slice_package_type")
+    def test_slice_external_type_honest_metrics(self, mock_slice, mock_record):
+        # Found type: honest tokens derived from _dts_bytes
+        mock_slice.return_value = {
+            "found": True,
+            "package": "stripe",
+            "symbol": "StripeConfig",
+            "type_code": "export interface StripeConfig { key: string; }",
+            "_dts_bytes": 20000
+        }
+        res = handle_tool_call("slice_external_type", {"package_name": "stripe", "symbol": "StripeConfig"})
+        self.assertNotIn("isError", res)
+        data = json.loads(res["content"][0]["text"])
+        self.assertNotIn("_dts_bytes", data)
+
+        self.assertTrue(mock_record.called)
+        ev = mock_record.call_args[1]
+        self.assertEqual(ev["original_tokens"], 5000)  # 20000 // 4
+        self.assertNotEqual(ev["original_tokens"], 15000)  # NOT hardcoded 15k!
+
+        # Missing type: saved tokens must be 0
+        mock_record.reset_mock()
+        mock_slice.return_value = {
+            "found": False,
+            "package": "stripe",
+            "symbol": "NonExistent",
+            "_dts_bytes": 20000
+        }
+        res_missing = handle_tool_call("slice_external_type", {"package_name": "stripe", "symbol": "NonExistent"})
+        ev_missing = mock_record.call_args[1]
+        self.assertEqual(ev_missing["original_tokens"], ev_missing["optimized_tokens"])
+
+    @patch("src.mistakes.MistakesLedger.get_team_mistakes")
+    @patch("src.mistakes.MistakesLedger.list_mistakes")
+    def test_get_mistakes_returns_team_entries(self, mock_list, mock_team):
+        mock_list.return_value = [{"summary": "Local mistake"}]
+        mock_team.return_value = [{"summary": "Team mistake from L3"}]
+
+        res = handle_tool_call("get_mistakes", {})
+        self.assertNotIn("isError", res)
+        data = json.loads(res["content"][0]["text"])
+        self.assertIn("team_entries", data)
+        self.assertEqual(len(data["team_entries"]), 1)
+        self.assertEqual(data["team_entries"][0]["summary"], "Team mistake from L3")
+
 
 if __name__ == "__main__":
     unittest.main()

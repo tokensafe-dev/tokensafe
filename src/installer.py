@@ -63,6 +63,7 @@ UNIFIED_TOKENSAFE_RULE = (
     "12. **Proof-of-Savings Turn Footer (strictly English)**:\n"
     "At the end of your response for any turn where tools were executed, files were inspected, commands were sanitized, or prompts were compacted, append a compact 1-line footer. The ENTIRE footer is product-facing copy — 100% English, including the savings breakdown in parentheses, regardless of the chat language:\n"
     "`⚡ **TokenSafe Turn Savings**: +<tokens> tokens saved on this turn (<breakdown in English>) | Cumulative Total: <total> tokens (≈$<usd> approx)`\n"
+    "13. **External Types & Lockfile Point Queries**: Use `tokensafe:slice_external_type(package_name, type_name)` to extract 3rd-party TypeScript interfaces from `node_modules` without crawling directories (-95% tokens, L1/L2/L3 cached). Use `tokensafe:query_dependency(lockfile_path, package_name)` for instant lockfile point lookups in <50 tokens; raw `read_file` on lockfiles without bounds is redirected to an index summary.\n"
 )
 
 # Short pointer written into PROJECT-level rule files when the full protocol is
@@ -70,10 +71,11 @@ UNIFIED_TOKENSAFE_RULE = (
 # Keeps every session's meta-context lean: ~110 tokens instead of ~850.
 POINTER_RULE = (
     "## TOKENSAFE GRAPH-FIRST OPTIMIZATION PROTOCOL\n"
-    "The full 12-point protocol is installed globally in the agent-level instructions "
+    "The full 13-point protocol is installed globally in the agent-level instructions "
     "(~/.zcode/AGENTS.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.kimi-code/AGENTS.md) and applies to this project. "
     "Core rules: never raw grep/find or `ls -la` — use `tokensafe:get_architecture_graph(project_path)` first for God Nodes, "
-    "`tokensafe:scoped_search`, `tokensafe:smart_read_file(path, symbol)`, `tokensafe:smart_bundle` and `tokensafe:list_dir`; "
+    "`tokensafe:scoped_search`, `tokensafe:smart_read_file(path, symbol)`, `tokensafe:slice_external_type`, `tokensafe:query_dependency`, "
+    "`tokensafe:smart_bundle` and `tokensafe:list_dir`; "
     "sanitize high-output commands via `tokensafe:sanitize_command`; check `tokensafe:context_budget` (Grade S-F) "
     "before large tasks and compact via `tokensafe:compact_conversation` (orientation digest active); never hardcode secret "
     "fallbacks; append the `⚡ TokenSafe Turn Savings` footer on tool-using turns.\n"

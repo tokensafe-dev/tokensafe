@@ -46,6 +46,31 @@ class SchemaSlicer:
             cls._mem_cache.clear()
 
     @classmethod
+    def _mem_put(cls, key: str, val: Tuple[str, Dict[str, Any]], max_items: int = 80) -> None:
+        """Stores entry in LRU memory cache with fixed cap."""
+        with cls._mem_lock:
+            cls._mem_cache[key] = val
+            cls._mem_cache.move_to_end(key)
+            if len(cls._mem_cache) > max_items:
+                cls._mem_cache.popitem(last=False)
+
+    @classmethod
+    def _maybe_evict(cls, conn: sqlite3.Connection, max_rows: int = 2000) -> None:
+        """Evicts oldest entries when schema cache exceeds max_rows."""
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM schema_cache;").fetchone()
+            count = row[0] if row else 0
+            if count > max_rows:
+                excess = count - max_rows
+                conn.execute(
+                    "DELETE FROM schema_cache WHERE cache_key IN ("
+                    "SELECT cache_key FROM schema_cache ORDER BY cached_at ASC LIMIT ?"
+                    ");", (excess,)
+                )
+        except Exception:
+            pass
+
+    @classmethod
     def _get_db_path(cls) -> str:
         data_dir = resolve_data_dir()
         os.makedirs(data_dir, exist_ok=True)
@@ -89,8 +114,8 @@ class SchemaSlicer:
         """
         Computes deterministic composite fingerprint:
         - For single file: SHA-256(content)[:16]
-        - For multi-file Prisma (prisma/schema/*.prisma): hashes all .prisma files and mtimes
-        - For OpenAPI with local $ref: hashes root + referenced local files
+        - For multi-file Prisma (prisma/schema/*.prisma): content hashes of all .prisma files
+        - For OpenAPI with local $ref: content hashes of root + referenced local files
         """
         abs_p = os.path.abspath(path)
         base_dir = os.path.dirname(abs_p)
@@ -104,8 +129,10 @@ class SchemaSlicer:
                 if len(prisma_files) > 1:
                     hasher = hashlib.sha256()
                     for pf in prisma_files:
-                        st = os.stat(pf)
-                        hasher.update(f"{os.path.basename(pf)}:{st.st_mtime}:{st.st_size}".encode("utf-8"))
+                        with open(pf, "rb") as pff:
+                            pf_bytes = pff.read()
+                        pf_hash = hashlib.sha256(pf_bytes).hexdigest()
+                        hasher.update(f"{os.path.basename(pf)}:{pf_hash}".encode("utf-8"))
                     return hasher.hexdigest()[:16]
             except Exception:
                 pass
@@ -123,7 +150,13 @@ class SchemaSlicer:
                         ref_rel = rm.decode("utf-8", errors="ignore")
                         cand = os.path.normpath(os.path.join(base_dir, ref_rel))
                         if os.path.isfile(cand):
-                            hasher.update(f"{cand}:{os.path.getmtime(cand)}".encode("utf-8"))
+                            try:
+                                with open(cand, "rb") as cf:
+                                    cand_bytes = cf.read()
+                                cand_hash = hashlib.sha256(cand_bytes).hexdigest()
+                                hasher.update(f"{ref_rel}:{cand_hash}".encode("utf-8"))
+                            except Exception:
+                                pass
                     return hasher.hexdigest()[:16]
             return h
         except Exception:
@@ -191,8 +224,7 @@ class SchemaSlicer:
                 text_cached, info_raw = row[0], row[1]
                 info_dict = json.loads(info_raw)
                 info_dict["source"] = "L2_sqlite"
-                with cls._mem_lock:
-                    cls._mem_cache[cache_key] = (text_cached, info_dict)
+                cls._mem_put(cache_key, (text_cached, info_dict), max_items=80)
                 return text_cached, info_dict
         except Exception:
             pass
@@ -212,8 +244,7 @@ class SchemaSlicer:
                 text_cached = parsed_team.get("sliced", "")
                 info_dict = parsed_team.get("info", {})
                 info_dict["source"] = "L3_team_cache"
-                with cls._mem_lock:
-                    cls._mem_cache[cache_key] = (text_cached, info_dict)
+                cls._mem_put(cache_key, (text_cached, info_dict), max_items=80)
                 # Store back to L2
                 back_conn = None
                 try:
@@ -222,6 +253,7 @@ class SchemaSlicer:
                         INSERT OR REPLACE INTO schema_cache (cache_key, schema_kind, fingerprint, target, sliced_text, info_json, cached_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (cache_key, kind, fp, norm_target, text_cached, json.dumps(info_dict), int(time.time())))
+                    cls._maybe_evict(back_conn)
                     back_conn.commit()
                 except Exception:
                     pass
@@ -260,10 +292,7 @@ class SchemaSlicer:
 
         # 6. Save to L1, L2 SQLite, and broadcast to L3 Team Sync
         info["source"] = "parsed_live"
-        with cls._mem_lock:
-            cls._mem_cache[cache_key] = (sliced, info)
-            if len(cls._mem_cache) > 80:
-                cls._mem_cache.popitem(last=False)
+        cls._mem_put(cache_key, (sliced, info), max_items=80)
 
         save_conn = None
         try:
@@ -272,6 +301,7 @@ class SchemaSlicer:
                 INSERT OR REPLACE INTO schema_cache (cache_key, schema_kind, fingerprint, target, sliced_text, info_json, cached_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (cache_key, kind, fp, norm_target, sliced, json.dumps(info), int(time.time())))
+            cls._maybe_evict(save_conn)
             save_conn.commit()
         except Exception:
             pass

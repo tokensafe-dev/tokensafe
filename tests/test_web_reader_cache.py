@@ -45,6 +45,14 @@ class TestWebReaderCache(unittest.TestCase):
         clean3 = sanitize_url(url3)
         self.assertEqual(url3, clean3)
 
+        # Userinfo (user:pass@) stripped
+        url4 = "https://admin:secret123@api.example.com/docs?page=2"
+        clean4 = sanitize_url(url4)
+        self.assertNotIn("admin", clean4)
+        self.assertNotIn("secret123", clean4)
+        self.assertNotIn("@", clean4)
+        self.assertEqual(clean4, "https://api.example.com/docs?page=2")
+
     @patch("urllib.request.build_opener")
     def test_l1_l2_caching_and_tier_tracking(self, mock_build_opener):
         # Mock opener and network response
@@ -120,6 +128,26 @@ class TestWebReaderCache(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(WebReader.last_tier, "live")
         # Should NOT push private docs with Auth headers to L3 TeamCache
+        mock_team_put.assert_not_called()
+
+    @patch("src.team_cache.TeamCache.put")
+    @patch("urllib.request.build_opener")
+    def test_userinfo_url_bypasses_l3(self, mock_build_opener, mock_team_put):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b"<html><body><h1>Userinfo Docs</h1></body></html>"
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.headers = {"Content-Type": "text/html"}
+
+        mock_opener = MagicMock()
+        mock_opener.open.return_value = mock_resp
+        mock_build_opener.return_value = mock_opener
+
+        url = "https://user:pass@example.com/docs"
+        content, ok, _ = WebReader.fetch_url(url)
+        self.assertTrue(ok)
+        self.assertEqual(WebReader.last_tier, "live")
+        # Should NOT push docs with userinfo to L3 TeamCache
         mock_team_put.assert_not_called()
 
 

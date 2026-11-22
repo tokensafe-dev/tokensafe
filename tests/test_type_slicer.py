@@ -112,6 +112,44 @@ export interface Response {
         self.assertEqual(res["source"], "L3_team_cache")
         self.assertIn("interface CloudSession", res["type_code"])
 
+    def test_large_namespace_truncation_and_balanced_braces(self):
+        # Create a huge namespace definition exceeding standard cap
+        lines = ["export namespace HugeApi {"]
+        for i in range(450):
+            lines.append(f"    export interface Item{i} {{\n        id: number;\n        name: string;\n    }}")
+        lines.append("}")
+        huge_content = "\n".join(lines)
+
+        extracted = TypeSlicer._extract_symbol_block(huge_content, "HugeApi")
+        self.assertIsNotNone(extracted)
+        self.assertIn("TokenSafe: truncated", extracted)
+
+        # Braces must be balanced!
+        open_count = extracted.count("{")
+        close_count = extracted.count("}")
+        self.assertEqual(open_count, close_count, f"Braces must be balanced: {open_count} open vs {close_count} close")
+
+    def test_dts_bytes_reported_and_cached(self):
+        pkg_dir = os.path.join(self.tmp_dir.name, "node_modules", "bytes-lib")
+        os.makedirs(pkg_dir, exist_ok=True)
+        with open(os.path.join(pkg_dir, "package.json"), "w") as f:
+            json.dump({"name": "bytes-lib", "version": "1.0.0", "types": "index.d.ts"}, f)
+        dts_content = "export interface MyInterface { field: string; }\n" * 10
+        with open(os.path.join(pkg_dir, "index.d.ts"), "w") as f:
+            f.write(dts_content)
+
+        # Live parse reports _dts_bytes
+        res1 = TypeSlicer.slice_package_type("bytes-lib", "MyInterface", project_root=self.tmp_dir.name)
+        self.assertTrue(res1["found"])
+        self.assertEqual(res1.get("_dts_bytes"), len(dts_content.encode("utf-8")))
+
+        # L2 hit also reports _dts_bytes
+        TypeSlicer.clear_memory_cache()
+        res2 = TypeSlicer.slice_package_type("bytes-lib", "MyInterface", project_root=self.tmp_dir.name)
+        self.assertTrue(res2["found"])
+        self.assertEqual(res2["source"], "L2_sqlite")
+        self.assertEqual(res2.get("_dts_bytes"), len(dts_content.encode("utf-8")))
+
 
 if __name__ == "__main__":
     unittest.main()
