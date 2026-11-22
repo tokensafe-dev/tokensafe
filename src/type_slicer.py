@@ -28,6 +28,9 @@ class TypeSlicer:
     """Targeted extractor of external library types and interfaces."""
 
     _mem_cache: "OrderedDict[str, str]" = OrderedDict()
+    # Bumped whenever the slicing algorithm changes: stale slices cached under
+    # an older key format can never resurface through L1/L2/L3 (poisoning guard).
+    _SLICER_VERSION = "v2"
     _mem_lock = threading.Lock()
     _db_init_done = False
     _db_init_lock = threading.Lock()
@@ -283,7 +286,7 @@ class TypeSlicer:
                 except Exception:
                     pass
 
-        type_key = f"{pkg_name}@{version}::{sym}"
+        type_key = f"{pkg_name}@{version}::{sym}::{cls._SLICER_VERSION}"
 
         # 1. Check L1 Memory
         with cls._mem_lock:

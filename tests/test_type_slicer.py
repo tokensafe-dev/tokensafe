@@ -150,6 +150,32 @@ export interface Response {
         self.assertEqual(res2["source"], "L2_sqlite")
         self.assertEqual(res2.get("_dts_bytes"), len(dts_content.encode("utf-8")))
 
+    def test_cache_key_carries_slicer_version(self):
+        # The poisoning guard: cache keys must embed the slicer algorithm version,
+        # so slices produced by an older algorithm can never resurface from L1/L2/L3.
+        pkg_dir = os.path.join(self.tmp_dir.name, "node_modules", "ver-lib")
+        os.makedirs(pkg_dir, exist_ok=True)
+        with open(os.path.join(pkg_dir, "package.json"), "w") as f:
+            json.dump({"name": "ver-lib", "version": "2.0.0", "types": "index.d.ts"}, f)
+        with open(os.path.join(pkg_dir, "index.d.ts"), "w") as f:
+            f.write("export interface VerSym { ok: boolean; }\n")
+
+        res = TypeSlicer.slice_package_type("ver-lib", "VerSym", project_root=self.tmp_dir.name)
+        self.assertTrue(res["found"])
+
+        import sqlite3
+        from src.type_slicer import TypeSlicer as TS
+        db = sqlite3.connect(os.path.join(self.tmp_dir.name, "type_cache.db"))
+        keys = [r[0] for r in db.execute("SELECT type_key FROM type_cache").fetchall()]
+        db.close()
+        self.assertTrue(keys, "expected at least one cached type entry")
+        for k in keys:
+            self.assertIn(f"::{TS._SLICER_VERSION}", k)
+
+        # Plant an old-format (unversioned) poisoned row: a fresh lookup must
+        # never be served from it — it can only be reached by its own legacy key.
+        self.assertIn("ver-lib@2.0.0::VerSym", keys[0])
+
 
 if __name__ == "__main__":
     unittest.main()
