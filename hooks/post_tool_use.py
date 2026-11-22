@@ -63,6 +63,44 @@ def main():
                 if tracked_path:
                     from src.file_state import FileState
                     FileState.record_seen(tracked_path)
+
+            # Anti-Stuck Failure Tracking: record command or test failure
+            if tool_name in ("run_command", "Bash", "ExecuteCommand", "terminal"):
+                tool_res = (
+                    payload.get("toolResponse")
+                    or payload.get("tool_result")
+                    or payload.get("result")
+                    or payload.get("response")
+                    or {}
+                )
+                exit_code = None
+                output_str = ""
+                if isinstance(tool_res, dict):
+                    exit_code = tool_res.get("exitCode") if "exitCode" in tool_res else tool_res.get("exit_code")
+                    output_str = str(tool_res.get("output") or tool_res.get("error") or tool_res.get("stderr") or "")
+                elif isinstance(tool_res, str):
+                    output_str = tool_res
+
+                cmd = str(args.get("CommandLine") or args.get("command") or "")
+                is_failed = False
+                if exit_code is not None and int(exit_code) != 0:
+                    is_failed = True
+                elif ("FAIL:" in output_str or "FAILED (" in output_str or "Traceback (most recent call last):" in output_str) and len(output_str) > 20:
+                    is_failed = True
+
+                if is_failed and cmd:
+                    try:
+                        from src.mistakes import MistakesLedger
+                        hook_cwd = str(payload.get("cwd") or os.getcwd())
+                        summary = f"Command failed (exit {exit_code or 'err'}): {cmd[:60]}"
+                        MistakesLedger.record_failure(
+                            summary=summary,
+                            source="command_failure",
+                            details=output_str[:300],
+                            project_root=hook_cwd
+                        )
+                    except Exception:
+                        pass
     except Exception:
         pass
 

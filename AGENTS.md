@@ -17,6 +17,11 @@ slices bulky tool calls (such as full-file reads), guards secrets and unsafe com
 - `src/tokenizer.py`: Zero-dependency, calibrated BPE token counter.
 - `src/compactor.py`: Semantic intent extractor and S-expression serializer.
 - `src/slicer.py`: Tool arguments optimizer (AST & line windowing).
+- `src/type_slicer.py`: 3rd-party TypeScript definition slicer (`@types`, `.d.ts`) with L1/L2/L3 caching.
+- `src/schema_slicer.py`: OpenAPI & multi-file Prisma schema contract optimizer with composite fingerprints.
+- `src/web_reader.py`: Sanitized documentation fetcher with 3-tier L1/L2/L3 caching.
+- `src/format_parsers/lockfiles.py`: Lockfile point queries (`query_dependency`) and index summarizer.
+- `src/mistakes.py`: Anti-stuck dead-end ledger with 2-tier hybrid escalation and team broadcast.
 - `src/metrics.py`: SQLite metrics persistence engine (`data/metrics.db`).
 - `src/dashboard.py`: Visual terminal & Markdown analytics visualizer.
 - `hooks/`: Lifecycle hook implementations (`PreInvocation`, `PreToolUse`, `PostToolUse`).

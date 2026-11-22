@@ -13,9 +13,9 @@ class TestMCPServer(unittest.TestCase):
             "compress_prompt", "context_budget", "compact_conversation", "sanitize_command",
             "slice_diff", "get_token_savings_metrics", "guard_inspect", "list_dir",
             "scoped_search", "read_web_page", "expand_ref", "optimize_image",
-            "prune_superseded", "get_mistakes"
+            "prune_superseded", "get_mistakes", "query_dependency", "slice_external_type"
         ]
-        self.assertEqual(len(tool_names), 18)
+        self.assertEqual(len(tool_names), 20)
         for t in expected_tools:
             self.assertIn(t, tool_names)
             # Verify each tool schema has name, description, inputSchema
@@ -153,6 +153,8 @@ class TestMCPServer(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
             os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
             try:
                 mod_path = os.path.join(tmpdir, "service.py")
@@ -179,12 +181,22 @@ class TestMCPServer(unittest.TestCase):
                     os.environ.pop("TOKENSAFE_DB_PATH", None)
                 else:
                     os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
 
     def test_zero_config_pointer_and_force_full_over_mcp(self):
         import os
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
             os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
             try:
                 target = os.path.join(tmpdir, "big.py")
@@ -226,12 +238,18 @@ class TestMCPServer(unittest.TestCase):
                     os.environ.pop("TOKENSAFE_DB_PATH", None)
                 else:
                     os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
 
     def test_unknown_client_without_tools_list_skips_pointer_safely(self):
         import os
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
             os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
             try:
                 target = os.path.join(tmpdir, "plain.py")
@@ -255,6 +273,10 @@ class TestMCPServer(unittest.TestCase):
                     os.environ.pop("TOKENSAFE_DB_PATH", None)
                 else:
                     os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
 
     def test_smart_read_file_relative_path_with_active_workspace(self):
         import os

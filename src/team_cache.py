@@ -25,6 +25,11 @@ class TeamCache:
     _cooldowns: Dict[str, float] = {}
     _cooldown_lock = threading.Lock()
 
+    ALLOWED_CACHE_TYPES = frozenset({
+        "PROMPT", "PROMPT_TMPL", "SKELETON", "ARCH_INDEX",
+        "WEB_DOCS", "LOCKFILE_INDEX", "TEAM_MISTAKE", "3RD_PARTY_DTS", "SCHEMA_CONTRACTS"
+    })
+
     @classmethod
     def _is_in_cooldown(cls, cloud_url: Optional[str] = None) -> bool:
         now = time.monotonic()
@@ -93,8 +98,12 @@ class TeamCache:
         if not cache_type or not key_text:
             return None
 
+        norm_type = cache_type.strip().upper()
+        if norm_type not in cls.ALLOWED_CACHE_TYPES:
+            return None
+
         h = cls.hash_key(key_text)
-        endpoint = f"{cloud_url}/api/team/cache?type={urllib.parse.quote(cache_type)}&hash={h}"
+        endpoint = f"{cloud_url}/api/team/cache?type={urllib.parse.quote(norm_type)}&hash={h}"
 
         req = urllib.request.Request(
             endpoint,
@@ -149,6 +158,14 @@ class TeamCache:
         if not cache_type or not key_text or not value:
             return
 
+        norm_type = cache_type.strip().upper()
+        if norm_type not in cls.ALLOWED_CACHE_TYPES:
+            return
+
+        # Hard bounded payload (256 KB)
+        if len(value) > 262_144:
+            return
+
         safe_value = value
         try:
             from src.secret_redactor import SecretRedactor
@@ -156,11 +173,14 @@ class TeamCache:
         except Exception:
             pass
 
+        if len(safe_value) > 262_144:
+            return
+
         h = cls.hash_key(key_text)
 
         def _worker():
             payload = {
-                "type": cache_type,
+                "type": norm_type,
                 "hash": h,
                 "value": safe_value,
                 "tokens_saved": max(0, int(tokens_saved or 0)),

@@ -86,9 +86,18 @@ def _head_tail(text: str, head: int = HEAD_LINES, tail: int = TAIL_LINES) -> str
 
 
 def _compact_read_result(text: str, path: str) -> Optional[str]:
-    """AST skeleton for source reads; head/tail fallback for unknown types.
-    Produces both candidates when possible and returns the shortest — the
+    """AST skeleton for source reads; lockfile reduction for lockfiles; head/tail fallback for unknown types.
+    Produces candidates when possible and returns the shortest — the
     skeleton only wins when it actually compresses substantially."""
+    try:
+        from src.format_parsers.lockfiles import LockfileReducer
+        if LockfileReducer.is_lockfile(path):
+            compacted_l, was_l = LockfileReducer.reduce(text, path)
+            if was_l:
+                return compacted_l
+    except Exception:
+        pass
+
     ext = os.path.splitext(path or "")[1].lower() or None
     candidates: List[str] = []
     lines = text.splitlines()

@@ -18,8 +18,14 @@ smart_read_file so agents use one familiar entry point.
 import json
 import os
 import re
+import hashlib
+import sqlite3
+import time
+import threading
+from collections import OrderedDict
 
 from src.tokenizer import count_tokens
+from src.paths import resolve_data_dir
 from typing import Any, Dict, List, Optional, Tuple
 
 _MAX_REF_CHAIN = 15
@@ -27,7 +33,101 @@ _MAX_SQL_BYTES = 4 * 1024 * 1024
 
 
 class SchemaSlicer:
-    """Detects schema files and produces targeted, token-cheap slices."""
+    """Detects schema files and produces targeted, token-cheap slices with L1/L2/L3 caching."""
+
+    _mem_cache: "OrderedDict[str, Tuple[str, Dict[str, Any]]]" = OrderedDict()
+    _mem_lock = threading.Lock()
+    _db_init_done = False
+    _db_init_lock = threading.Lock()
+
+    @classmethod
+    def clear_memory_cache(cls):
+        with cls._mem_lock:
+            cls._mem_cache.clear()
+
+    @classmethod
+    def _get_db_path(cls) -> str:
+        data_dir = resolve_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        return os.path.join(data_dir, "type_cache.db")
+
+    @classmethod
+    def _init_db(cls):
+        db_path = cls._get_db_path()
+        with cls._db_init_lock:
+            if cls._db_init_done == db_path and os.path.exists(db_path):
+                return
+            conn = None
+            try:
+                conn = sqlite3.connect(db_path, timeout=5.0)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA busy_timeout=5000;")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS schema_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        schema_kind TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        sliced_text TEXT NOT NULL,
+                        info_json TEXT NOT NULL,
+                        cached_at INTEGER NOT NULL
+                    );
+                """)
+                conn.commit()
+                cls._db_init_done = db_path
+            except Exception:
+                pass
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+    @classmethod
+    def compute_schema_fingerprint(cls, path: str, kind: str) -> str:
+        """
+        Computes deterministic composite fingerprint:
+        - For single file: SHA-256(content)[:16]
+        - For multi-file Prisma (prisma/schema/*.prisma): hashes all .prisma files and mtimes
+        - For OpenAPI with local $ref: hashes root + referenced local files
+        """
+        abs_p = os.path.abspath(path)
+        base_dir = os.path.dirname(abs_p)
+
+        # Multi-file Prisma check
+        if kind == "prisma" and os.path.basename(base_dir).lower() == "schema":
+            try:
+                prisma_files = sorted([
+                    os.path.join(base_dir, f) for f in os.listdir(base_dir) if f.endswith(".prisma")
+                ])
+                if len(prisma_files) > 1:
+                    hasher = hashlib.sha256()
+                    for pf in prisma_files:
+                        st = os.stat(pf)
+                        hasher.update(f"{os.path.basename(pf)}:{st.st_mtime}:{st.st_size}".encode("utf-8"))
+                    return hasher.hexdigest()[:16]
+            except Exception:
+                pass
+
+        # Single file hash or OpenAPI $ref
+        try:
+            with open(abs_p, "rb") as f:
+                content = f.read()
+            h = hashlib.sha256(content).hexdigest()[:16]
+            if kind == "openapi" and b"$ref" in content:
+                ref_matches = re.findall(rb'["\']?\$ref["\']?\s*:\s*["\'](\.[^"\'#]+)', content)
+                if ref_matches:
+                    hasher = hashlib.sha256(content)
+                    for rm in sorted(set(ref_matches)):
+                        ref_rel = rm.decode("utf-8", errors="ignore")
+                        cand = os.path.normpath(os.path.join(base_dir, ref_rel))
+                        if os.path.isfile(cand):
+                            hasher.update(f"{cand}:{os.path.getmtime(cand)}".encode("utf-8"))
+                    return hasher.hexdigest()[:16]
+            return h
+        except Exception:
+            return "unknown_fp"
 
     @classmethod
     def detect(cls, path: str) -> Optional[str]:
@@ -57,19 +157,92 @@ class SchemaSlicer:
 
     @classmethod
     def slice_file(cls, path: str, target: str = "") -> Tuple[str, Dict[str, Any]]:
-        """Returns (sliced_text, info). Empty `target` yields a compact overview.
+        """Returns (sliced_text, info). Empty `target` yields a compact overview with L1/L2/L3 caching."""
+        kind = cls.detect(path)
+        if not kind:
+            return "", {"kind": None}
 
-        Never EXPANDS: when the slice is not smaller than the raw file (tiny
-        toy schemas — QA sweep found 14-token graphql fixtures growing to 23),
-        the raw text is returned unchanged, same honest pass-through as
-        DiffSlicer."""
+        # 1. Compute composite fingerprint and cache key
+        norm_target = target.strip().lower()
+        fp = cls.compute_schema_fingerprint(path, kind)
+        cache_key = f"{kind}::{fp}::{norm_target}"
+
+        # 2. Check L1 Memory
+        with cls._mem_lock:
+            if cache_key in cls._mem_cache:
+                cls._mem_cache.move_to_end(cache_key)
+                hit_text, hit_info = cls._mem_cache[cache_key]
+                hit_info = dict(hit_info)
+                hit_info["source"] = "L1_memory"
+                return hit_text, hit_info
+
+        # 3. Check L2 SQLite
+        cls._init_db()
+        db_path = cls._get_db_path()
+        l2_conn = None
+        try:
+            l2_conn = sqlite3.connect(db_path, timeout=5.0)
+            l2_conn.execute("PRAGMA busy_timeout=5000;")
+            row = l2_conn.execute(
+                "SELECT sliced_text, info_json FROM schema_cache WHERE cache_key = ?",
+                (cache_key,)
+            ).fetchone()
+            if row:
+                text_cached, info_raw = row[0], row[1]
+                info_dict = json.loads(info_raw)
+                info_dict["source"] = "L2_sqlite"
+                with cls._mem_lock:
+                    cls._mem_cache[cache_key] = (text_cached, info_dict)
+                return text_cached, info_dict
+        except Exception:
+            pass
+        finally:
+            if l2_conn:
+                try:
+                    l2_conn.close()
+                except Exception:
+                    pass
+
+        # 4. Check L3 Team Sync
+        try:
+            from src.team_cache import TeamCache
+            team_val = TeamCache.get("SCHEMA_CONTRACTS", cache_key, timeout=0.5)
+            if team_val:
+                parsed_team = json.loads(team_val)
+                text_cached = parsed_team.get("sliced", "")
+                info_dict = parsed_team.get("info", {})
+                info_dict["source"] = "L3_team_cache"
+                with cls._mem_lock:
+                    cls._mem_cache[cache_key] = (text_cached, info_dict)
+                # Store back to L2
+                back_conn = None
+                try:
+                    back_conn = sqlite3.connect(db_path, timeout=5.0)
+                    back_conn.execute("""
+                        INSERT OR REPLACE INTO schema_cache (cache_key, schema_kind, fingerprint, target, sliced_text, info_json, cached_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (cache_key, kind, fp, norm_target, text_cached, json.dumps(info_dict), int(time.time())))
+                    back_conn.commit()
+                except Exception:
+                    pass
+                finally:
+                    if back_conn:
+                        try:
+                            back_conn.close()
+                        except Exception:
+                            pass
+                return text_cached, info_dict
+        except Exception:
+            pass
+
+        # 5. Compute fresh slice
         raw_text = ""
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 raw_text = f.read()
         except OSError:
             pass
-        kind = cls.detect(path)
+
         sliced = ""
         if kind == "openapi":
             sliced, info = cls._slice_openapi(path, target.strip())
@@ -81,8 +254,41 @@ class SchemaSlicer:
             sliced, info = cls._slice_sql(path, target.strip())
         else:
             return "", {"kind": None}
+
         if not target.strip() and count_tokens(sliced) >= count_tokens(raw_text):
-            return raw_text, info  # overview pass-through; targeted slices keep precision semantics
+            return raw_text, info
+
+        # 6. Save to L1, L2 SQLite, and broadcast to L3 Team Sync
+        info["source"] = "parsed_live"
+        with cls._mem_lock:
+            cls._mem_cache[cache_key] = (sliced, info)
+            if len(cls._mem_cache) > 80:
+                cls._mem_cache.popitem(last=False)
+
+        save_conn = None
+        try:
+            save_conn = sqlite3.connect(db_path, timeout=5.0)
+            save_conn.execute("""
+                INSERT OR REPLACE INTO schema_cache (cache_key, schema_kind, fingerprint, target, sliced_text, info_json, cached_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (cache_key, kind, fp, norm_target, sliced, json.dumps(info), int(time.time())))
+            save_conn.commit()
+        except Exception:
+            pass
+        finally:
+            if save_conn:
+                try:
+                    save_conn.close()
+                except Exception:
+                    pass
+
+        try:
+            from src.team_cache import TeamCache
+            payload = json.dumps({"sliced": sliced, "info": info}, ensure_ascii=False)
+            TeamCache.put("SCHEMA_CONTRACTS", cache_key, payload, tokens_saved=max(40, count_tokens(raw_text) - count_tokens(sliced)))
+        except Exception:
+            pass
+
         return sliced, info
 
     # ------------------------------------------------------------------ OpenAPI
@@ -238,7 +444,7 @@ class SchemaSlicer:
         out = [f"# Prisma {kind_name} {target}", body]
         # 1-hop: capitalized field types that are themselves defined blocks
         refs = set()
-        for fm in re.finditer(r"^\s{2,}\w+\??\s+([A-Z]\w*)(?:\[\])?(?:\s|$)", body, re.MULTILINE):
+        for fm in re.finditer(r"^\s{2,}\w+\s+([A-Z]\w*)(?:\?|\[\])?(?:\s|$)", body, re.MULTILINE):
             if fm.group(1) in blocks and fm.group(1) != target:
                 refs.add(fm.group(1))
         if refs:

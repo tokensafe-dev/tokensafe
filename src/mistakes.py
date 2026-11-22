@@ -15,8 +15,9 @@ import json
 import time
 import hashlib
 import subprocess
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from src.paths import resolve_data_dir, ensure_tokensafe_gitignore
+from src.secret_redactor import SecretRedactor
 
 
 def _find_project_mistakes_file(project_root: Optional[str] = None) -> str:
@@ -91,6 +92,16 @@ class MistakesLedger:
                     os.unlink(tmp_path)
             except OSError:
                 pass
+
+        # Broadcast to L3 Team Sync (scrubbed, non-blocking)
+        try:
+            from src.team_cache import TeamCache
+            safe_summary, _, _ = SecretRedactor.redact_text(summary.strip())
+            h = hashlib.sha256(f"{f_basename}:{safe_summary}".encode("utf-8")).hexdigest()[:16]
+            payload = json.dumps({"file": f_basename, "summary": safe_summary[:160], "timestamp": int(time.time())})
+            TeamCache.put("TEAM_MISTAKE", h, payload, tokens_saved=120)
+        except Exception:
+            pass
 
         return entry
 
@@ -178,6 +189,45 @@ class MistakesLedger:
             except Exception:
                 pass
         return 0
+
+    @classmethod
+    def should_force_ask(
+        cls,
+        target: str,
+        action_type: str = "command",
+        project_root: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """
+        Two-tier hybrid escalation policy:
+        - Returns (True, reason) ONLY if identical action/target failed > 2 times in last 30 minutes.
+        - Returns (False, reason) if 1-2 failures exist (soft advisory warning).
+        - Returns (False, "") if no recent failure detected.
+        """
+        if not target:
+            return False, ""
+        norm_target = target.strip().lower()
+        now = time.time()
+        window = 1800.0  # 30 minutes
+        mistakes = cls.list_mistakes(project_root=project_root, active_only=True)
+
+        matching = []
+        for m in mistakes:
+            if now - float(m.get("timestamp", 0) or 0) > window:
+                continue
+            f = (m.get("file") or "").lower()
+            s = (m.get("summary") or "").lower()
+            det = (m.get("details") or "").lower()
+            if (f and f in norm_target) or (norm_target in s) or (norm_target in det):
+                matching.append(m)
+
+        count = len(matching)
+        if count > 2:
+            last = matching[-1].get("summary", "")
+            return True, f"Dead-End Loop: Action on '{target[:60]}' repeatedly failed {count}x in last 30m. Prior failure: {last}"
+        elif count > 0:
+            last = matching[-1].get("summary", "")
+            return False, f"Advisory: Prior failure recorded on '{target[:50]}': {last}"
+        return False, ""
 
     @classmethod
     def get_guard_prompt(

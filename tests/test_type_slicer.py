@@ -1,0 +1,117 @@
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import json
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from src.type_slicer import TypeSlicer
+
+
+class TestTypeSlicer(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.orig_data_dir = os.environ.get("TOKENSAFE_DATA_DIR")
+        os.environ["TOKENSAFE_DATA_DIR"] = self.tmp_dir.name
+        TypeSlicer.clear_memory_cache()
+
+    def tearDown(self):
+        TypeSlicer.clear_memory_cache()
+        if self.orig_data_dir is not None:
+            os.environ["TOKENSAFE_DATA_DIR"] = self.orig_data_dir
+        else:
+            os.environ.pop("TOKENSAFE_DATA_DIR", None)
+        self.tmp_dir.cleanup()
+
+    def test_upward_node_modules_traversal(self):
+        # Create repo_root/node_modules/my-lib
+        repo_root = os.path.join(self.tmp_dir.name, "my-repo")
+        sub_package = os.path.join(repo_root, "packages", "sub-app")
+        os.makedirs(sub_package, exist_ok=True)
+
+        lib_dir = os.path.join(repo_root, "node_modules", "my-lib")
+        os.makedirs(lib_dir, exist_ok=True)
+        with open(os.path.join(lib_dir, "package.json"), "w") as f:
+            json.dump({"name": "my-lib", "version": "1.2.3", "types": "index.d.ts"}, f)
+
+        # Calling find_package_dir from deep sub-package should find node_modules in repo_root
+        found_dir = TypeSlicer.find_package_dir("my-lib", start_dir=sub_package)
+        self.assertIsNotNone(found_dir)
+        self.assertEqual(os.path.realpath(found_dir), os.path.realpath(lib_dir))
+
+    def test_slice_symbol_with_reexport_hops(self):
+        # Create a package with index.d.ts re-exporting from ./types
+        pkg_dir = os.path.join(self.tmp_dir.name, "node_modules", "express-style")
+        os.makedirs(pkg_dir, exist_ok=True)
+
+        with open(os.path.join(pkg_dir, "package.json"), "w") as f:
+            json.dump({"name": "express-style", "version": "4.18.0", "types": "index.d.ts"}, f)
+
+        with open(os.path.join(pkg_dir, "index.d.ts"), "w") as f:
+            f.write("export * from './types';\nexport interface App { name: string; }\n")
+
+        with open(os.path.join(pkg_dir, "types.d.ts"), "w") as f:
+            f.write("""
+export interface Request {
+    body: any;
+    params: Record<string, string>;
+    headers: Record<string, string>;
+}
+
+export interface Response {
+    status(code: number): this;
+    send(body: any): this;
+}
+""")
+
+        # Slice Request (requires 1-hop re-export follow)
+        res = TypeSlicer.slice_package_type("express-style", "Request", project_root=self.tmp_dir.name)
+        self.assertTrue(res["found"])
+        self.assertEqual(res["version"], "4.18.0")
+        self.assertIn("interface Request {", res["type_code"])
+        self.assertIn("body: any;", res["type_code"])
+        self.assertNotIn("interface Response", res["type_code"])
+
+        # Slice App (direct from index.d.ts)
+        res_app = TypeSlicer.slice_package_type("express-style", "App", project_root=self.tmp_dir.name)
+        self.assertTrue(res_app["found"])
+        self.assertIn("interface App", res_app["type_code"])
+
+    def test_l1_l2_caching(self):
+        pkg_dir = os.path.join(self.tmp_dir.name, "node_modules", "simple-lib")
+        os.makedirs(pkg_dir, exist_ok=True)
+        with open(os.path.join(pkg_dir, "package.json"), "w") as f:
+            json.dump({"name": "simple-lib", "version": "1.0.0", "types": "index.d.ts"}, f)
+        with open(os.path.join(pkg_dir, "index.d.ts"), "w") as f:
+            f.write("export interface Config { apiKey: string; }")
+
+        # Live parse
+        res1 = TypeSlicer.slice_package_type("simple-lib", "Config", project_root=self.tmp_dir.name)
+        self.assertTrue(res1["found"])
+        self.assertEqual(res1["source"], "parsed_live")
+
+        # L1 Memory Cache hit
+        res2 = TypeSlicer.slice_package_type("simple-lib", "Config", project_root=self.tmp_dir.name)
+        self.assertTrue(res2["found"])
+        self.assertEqual(res2["source"], "L1_memory")
+
+        # Clear L1 to test L2 SQLite hit
+        TypeSlicer.clear_memory_cache()
+        res3 = TypeSlicer.slice_package_type("simple-lib", "Config", project_root=self.tmp_dir.name)
+        self.assertTrue(res3["found"])
+        self.assertEqual(res3["source"], "L2_sqlite")
+
+    @patch("src.team_cache.TeamCache.get")
+    def test_l3_team_cache_hit(self, mock_team_get):
+        mock_team_get.return_value = "export interface CloudSession { id: string; user: string; }"
+
+        # Library not present on disk, but present in L3 Team Cache
+        res = TypeSlicer.slice_package_type("@cloud/client", "CloudSession", project_root=self.tmp_dir.name)
+        self.assertTrue(res["found"])
+        self.assertEqual(res["source"], "L3_team_cache")
+        self.assertIn("interface CloudSession", res["type_code"])
+
+
+if __name__ == "__main__":
+    unittest.main()

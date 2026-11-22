@@ -42,7 +42,7 @@ from src.paths import get_active_workspace, is_plugin_or_system_dir
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
-    "version": "4.3.3"
+    "version": "4.4.0"
 }
 
 # MCP client attribution: the initialize handshake carries clientInfo, which
@@ -295,16 +295,60 @@ TOOLS = [
     },
     {
         "name": "read_web_page",
-        "description": "Fetches a web page URL and converts it to clean, readable Markdown, stripping scripts, styles, navbars, and ads (-80-95% tokens compared to raw HTML).",
+        "description": "Fetches a web page URL and converts it to clean, readable Markdown with L1 memory, L2 SQLite (web_cache.db), and L3 Team Sync caching (-80-95% tokens compared to raw HTML, 0ms on cache hits).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
                     "description": "Web URL to fetch and convert to Markdown"
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "description": "If true, bypasses L1/L2/L3 cache and fetches fresh page content from network"
                 }
             },
             "required": ["url"]
+        }
+    },
+    {
+        "name": "query_dependency",
+        "description": "Fast targeted lookup of a package in project lockfiles (package-lock.json, bun.lock, Cargo.lock, pnpm-lock.yaml) returning exact version and direct dependencies in <20 tokens without dumping massive lockfiles.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "package_name": {
+                    "type": "string",
+                    "description": "Name of the dependency package to inspect (e.g. 'zod', 'react', 'tokio')"
+                },
+                "lockfile_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to lockfile; defaults to nearest lockfile in project"
+                }
+            },
+            "required": ["package_name"]
+        }
+    },
+    {
+        "name": "slice_external_type",
+        "description": "Extracts targeted type signatures, interfaces, or class declarations from 3rd-party library declaration files (.d.ts) in node_modules without directory crawling or reading multi-megabyte bundles.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "package_name": {
+                    "type": "string",
+                    "description": "Name of the npm package (e.g. '@stripe/stripe-js', 'fastify', 'zod')"
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Name of the interface, type, or function to extract (e.g. 'Stripe', 'FastifyReply')"
+                },
+                "project_root": {
+                    "type": "string",
+                    "description": "Optional project root directory"
+                }
+            },
+            "required": ["package_name", "symbol"]
         }
     },
     {
@@ -546,6 +590,8 @@ class _NoOpTracker:
         return {}
     def get_last_event(self, *args, **kwargs):
         return None
+    def get_monthly_saved_tokens(self, *args, **kwargs):
+        return 0
 
 
 class _SafeTrackerProxy:
@@ -1793,25 +1839,72 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
 
     elif name == "read_web_page":
         target_url = str(args.get("url") or args.get("link") or "").strip()
+        force_refresh = bool(args.get("force_refresh", False))
         if not target_url:
             return _fallback_error("read_web_page", "missing required 'url' argument")
         try:
             from src.web_reader import WebReader
-            content, ok, err = WebReader.fetch_url(target_url)
+            content, ok, err = WebReader.fetch_url(target_url, force_refresh=force_refresh)
             if not ok:
                 return _fallback_error("read_web_page", err or "failed to fetch web page")
             orig_t = max(1000, len(content) // 2)
             opt_t = count_tokens(content)
+            tier = getattr(WebReader, "last_tier", "live")
             tracker.record_event(
                 session_id=_mcp_session_id(),
                 event_type="WEB_READ",
                 original_tokens=orig_t,
                 optimized_tokens=opt_t,
-                details={"url": target_url[:80], "saved": max(0, orig_t - opt_t)}
+                details={"url": target_url[:80], "tier": tier, "saved": max(0, orig_t - opt_t)}
             )
             return {"content": [{"type": "text", "text": content}]}
         except Exception as e:
             return _fallback_error("read_web_page", f"error reading web page: {e}")
+
+    elif name == "query_dependency":
+        pkg = str(args.get("package_name") or args.get("package") or "").strip()
+        lock_p = str(args.get("lockfile_path") or args.get("path") or "").strip() or None
+        if not pkg:
+            return _fallback_error("query_dependency", "missing required 'package_name' argument")
+        try:
+            from src.format_parsers.lockfiles import LockfileReducer
+            res = LockfileReducer.query_dependency(lock_p, pkg)
+            json_text = json.dumps(res, indent=2, ensure_ascii=False)
+            opt_tokens = count_tokens(json_text)
+            orig_tokens = 50000
+            tracker.record_event(
+                session_id=_mcp_session_id(),
+                event_type="LOCKFILE_QUERY",
+                original_tokens=orig_tokens,
+                optimized_tokens=opt_tokens,
+                details={"package": pkg, "source": res.get("source", "parsed"), "found": res.get("found", False)}
+            )
+            return {"content": [{"type": "text", "text": json_text}]}
+        except Exception as e:
+            return _fallback_error("query_dependency", f"error resolving dependency: {e}")
+
+    elif name == "slice_external_type":
+        pkg = str(args.get("package_name") or args.get("package") or "").strip()
+        sym = str(args.get("symbol") or args.get("type") or args.get("type_name") or "").strip()
+        proj_root = str(args.get("project_root") or "").strip() or None
+        if not pkg or not sym:
+            return _fallback_error("slice_external_type", "missing required 'package_name' or 'symbol' argument")
+        try:
+            from src.type_slicer import TypeSlicer
+            res = TypeSlicer.slice_package_type(pkg, sym, project_root=proj_root)
+            json_text = json.dumps(res, indent=2, ensure_ascii=False)
+            opt_tokens = count_tokens(json_text)
+            orig_tokens = 15000
+            tracker.record_event(
+                session_id=_mcp_session_id(),
+                event_type="TYPE_SLICE",
+                original_tokens=orig_tokens,
+                optimized_tokens=opt_tokens,
+                details={"package": pkg, "symbol": sym, "source": res.get("source", "parsed"), "found": res.get("found", False)}
+            )
+            return {"content": [{"type": "text", "text": json_text}]}
+        except Exception as e:
+            return _fallback_error("slice_external_type", f"error slicing external type: {e}")
 
     elif name == "optimize_image":
         img_path = str(args.get("image_path") or args.get("path") or "").strip()

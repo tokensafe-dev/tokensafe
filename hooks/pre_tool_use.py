@@ -70,6 +70,11 @@ def _handle(payload: dict) -> dict:
     # 1. Loop Detector Guard (Applies to all tools)
     is_loop, repeat_count, loop_msg = LoopDetector.check_loop(conversation_id, tool_name, args)
     if is_loop:
+        try:
+            from src.mistakes import MistakesLedger
+            MistakesLedger.record_from_loop(tool_name, args, repeat_count, project_root=hook_cwd)
+        except Exception:
+            pass
         tracker.record_event(
             session_id=conversation_id,
             event_type="LOOP_GUARD",
@@ -140,6 +145,17 @@ def _handle(payload: dict) -> dict:
             _trigger_bg_sync()
             return {"decision": "deny", "reason": f"🛡️ TokenSafe Guard: {guard_res.reason}"}
 
+        # Anti-Stuck hybrid escalation check
+        try:
+            from src.mistakes import MistakesLedger
+            is_blocked, m_reason = MistakesLedger.should_force_ask(path or raw_path, action_type="edit_file", project_root=hook_cwd)
+            if is_blocked:
+                return {"decision": "force_ask", "reason": f"[TokenSafe Anti-Stuck Guard] {m_reason}"}
+            elif m_reason:
+                response["reason"] = m_reason
+        except Exception:
+            pass
+
     # 3. Output Guard (shared guard_write, v3.0.0): deny wholesale overwrite of
     #    large existing files to enforce edit_file; ask on small-delta writes.
     if tool_name == "write_file":
@@ -201,6 +217,35 @@ def _handle(payload: dict) -> dict:
                         }
                     )
                     return response
+            except Exception:
+                pass
+
+        # Step 3-Lockfile: Intercept raw lockfile reads and redirect to generated summary
+        if path and os.path.exists(path):
+            try:
+                from src.format_parsers.lockfiles import LockfileReducer
+                if LockfileReducer.is_lockfile(path):
+                    if start_line is None or end_line is None or (int(end_line) - int(start_line) > 50):
+                        summary_path = LockfileReducer.generate_lockfile_summary(path)
+                        if summary_path and os.path.exists(summary_path):
+                            orig_size = os.path.getsize(path)
+                            orig_t = max(orig_size // 4, 1000)
+                            with open(summary_path, "r", encoding="utf-8", errors="ignore") as sf:
+                                sum_t = count_tokens(sf.read())
+                            saved = max(orig_t - sum_t, 500)
+                            response["overwrite"] = {path_key: summary_path}
+                            response["reason"] = (
+                                f"Token Optimizer: Sliced lockfile to summary view (Saved ~{saved} tokens). "
+                                f"Use query_dependency(lockfile_path, package_name) to look up specific packages."
+                            )
+                            tracker.record_event(
+                                session_id=conversation_id,
+                                event_type="LOCKFILE_SUMMARY",
+                                original_tokens=orig_t,
+                                optimized_tokens=sum_t,
+                                details={"target_file": os.path.basename(path), "saved_tokens": saved}
+                            )
+                            return response
             except Exception:
                 pass
 
@@ -298,6 +343,17 @@ def _handle(payload: dict) -> dict:
             return {"decision": "deny", "reason": f"🛡️ TokenSafe Guard: {guard_res.reason}"}
         elif guard_res.warning_only:
             response["reason"] = f"⚠️ TokenSafe Guard Warning: {guard_res.reason}"
+
+        # Anti-Stuck hybrid escalation check
+        try:
+            from src.mistakes import MistakesLedger
+            is_blocked, m_reason = MistakesLedger.should_force_ask(cmd, action_type="command", project_root=hook_cwd)
+            if is_blocked:
+                return {"decision": "force_ask", "reason": f"[TokenSafe Anti-Stuck Guard] {m_reason}"}
+            elif m_reason:
+                response["reason"] = m_reason
+        except Exception:
+            pass
 
         if is_quota_exceeded:
             # Free tier quota reached: skip Pro diff/command optimization while Security Guards remain active

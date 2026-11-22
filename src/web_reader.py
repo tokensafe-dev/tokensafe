@@ -8,15 +8,22 @@ Fetches web pages (documentation, API references, articles) and strips clutter:
 - Stashes full raw HTML in TokenSafe reversible stash if content is large.
 """
 
+import os
 import re
 import ipaddress
 import urllib.request
 import urllib.parse
 import urllib.error
+import sqlite3
+import time
+import hashlib
+import threading
+from collections import OrderedDict
 from html.parser import HTMLParser
 from typing import Tuple, Optional, Dict, Any, List
 
 from src.stash import stash_block
+from src.paths import resolve_data_dir
 
 
 class _HTMLToMarkdownParser(HTMLParser):
@@ -137,9 +144,208 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 class WebReader:
-    """Safely fetches web pages and returns clean Markdown."""
+    """Safely fetches web pages and returns clean Markdown with Local First (L1/L2) + Team Sync (L3) caching."""
 
     _BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.169.254"}
+    _SENSITIVE_QUERY_PARAMS = {
+        "token", "auth", "key", "signature", "sig", "secret", "credential",
+        "session", "access_token", "api_key", "x-amz-signature", "x-amz-credential"
+    }
+
+    _TTL_SECONDS = 72 * 3600  # 72 hours
+    _MAX_DB_BYTES = 50 * 1024 * 1024  # 50 MB
+    _mem_cache: "OrderedDict[str, str]" = OrderedDict()
+    _mem_lock = threading.Lock()
+    _db_init_done = False
+    _db_init_lock = threading.Lock()
+    last_tier: str = "live"
+
+    @classmethod
+    def sanitize_url(cls, url: str) -> str:
+        """Strips sensitive authentication & signature tokens from query strings for clean canonical caching."""
+        try:
+            parsed = urllib.parse.urlparse(url.strip())
+            qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            cleaned_qs = [
+                (k, v) for k, v in qs
+                if k.lower() not in cls._SENSITIVE_QUERY_PARAMS and not k.lower().startswith("x-amz-")
+            ]
+            cleaned_qs.sort(key=lambda x: x[0])
+            new_query = urllib.parse.urlencode(cleaned_qs)
+            return urllib.parse.urlunparse((
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                parsed.path,
+                parsed.params,
+                new_query,
+                ""  # drop fragments
+            ))
+        except Exception:
+            return url.strip()
+
+    @classmethod
+    def _get_db_path(cls) -> str:
+        data_dir = resolve_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        return os.path.join(data_dir, "web_cache.db")
+
+    @classmethod
+    def _init_db(cls):
+        db_path = cls._get_db_path()
+        with cls._db_init_lock:
+            if cls._db_init_done == db_path and os.path.exists(db_path):
+                return
+            try:
+                with sqlite3.connect(db_path, timeout=5.0) as conn:
+                    conn.execute("PRAGMA journal_mode=WAL;")
+                    conn.execute("PRAGMA busy_timeout=5000;")
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS web_cache (
+                            url_hash TEXT PRIMARY KEY,
+                            canonical_url TEXT NOT NULL,
+                            markdown TEXT NOT NULL,
+                            fetched_at INTEGER NOT NULL,
+                            size_bytes INTEGER NOT NULL,
+                            hit_count INTEGER DEFAULT 1
+                        );
+                    """)
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_web_cache_fetched ON web_cache(fetched_at);")
+                    conn.commit()
+                cls._db_init_done = db_path
+            except Exception:
+                pass
+
+    @classmethod
+    def clear_memory_cache(cls):
+        with cls._mem_lock:
+            cls._mem_cache.clear()
+
+    @classmethod
+    def _maybe_evict_l2(cls, conn: sqlite3.Connection):
+        """Maintains 50MB hard storage bound using LRU eviction."""
+        try:
+            db_path = cls._get_db_path()
+            if os.path.exists(db_path) and os.path.getsize(db_path) > cls._MAX_DB_BYTES:
+                conn.execute("""
+                    DELETE FROM web_cache WHERE url_hash IN (
+                        SELECT url_hash FROM web_cache ORDER BY fetched_at ASC LIMIT 100
+                    );
+                """)
+        except Exception:
+            pass
+
+    @classmethod
+    def get_cached(
+        cls,
+        url: str,
+        custom_headers: Optional[Dict[str, str]] = None
+    ) -> Tuple[Optional[str], str]:
+        """
+        Queries L1 memory, L2 SQLite, and L3 Team Cache in sequence.
+        Returns (content, tier) where tier in ("L1", "L2", "L3") or (None, "miss").
+        """
+        clean_url = cls.sanitize_url(url)
+        url_hash = hashlib.sha256(clean_url.encode("utf-8")).hexdigest()
+
+        # 1. Check L1 Memory
+        with cls._mem_lock:
+            if url_hash in cls._mem_cache:
+                cls._mem_cache.move_to_end(url_hash)
+                cls.last_tier = "L1"
+                return cls._mem_cache[url_hash], "L1"
+
+        # 2. Check L2 SQLite
+        cls._init_db()
+        db_path = cls._get_db_path()
+        now = int(time.time())
+        try:
+            with sqlite3.connect(db_path, timeout=5.0) as conn:
+                conn.execute("PRAGMA busy_timeout=5000;")
+                row = conn.execute(
+                    "SELECT markdown, fetched_at FROM web_cache WHERE url_hash = ?",
+                    (url_hash,)
+                ).fetchone()
+                if row:
+                    md, fetched_at = row[0], int(row[1])
+                    if now - fetched_at < cls._TTL_SECONDS:
+                        conn.execute("UPDATE web_cache SET hit_count = hit_count + 1 WHERE url_hash = ?", (url_hash,))
+                        conn.commit()
+                        with cls._mem_lock:
+                            cls._mem_cache[url_hash] = md
+                            if len(cls._mem_cache) > 50:
+                                cls._mem_cache.popitem(last=False)
+                        cls.last_tier = "L2"
+                        return md, "L2"
+        except Exception:
+            pass
+
+        # 3. Check L3 Team Sync (Only if request carried no custom auth/cookie headers)
+        has_auth = bool(custom_headers and any(
+            k.lower() in ("authorization", "cookie", "x-api-key")
+            for k in custom_headers
+        ))
+        if not has_auth:
+            try:
+                from src.team_cache import TeamCache
+                team_val = TeamCache.get("WEB_DOCS", clean_url, timeout=0.6)
+                if team_val:
+                    cls.set_cached(url, team_val, sync_team=False)
+                    cls.last_tier = "L3"
+                    return team_val, "L3"
+            except Exception:
+                pass
+
+        cls.last_tier = "live"
+        return None, "miss"
+
+    @classmethod
+    def set_cached(cls, url: str, markdown: str, sync_team: bool = True, custom_headers: Optional[Dict[str, str]] = None) -> None:
+        """Stores clean Markdown into L1, L2 SQLite, and asynchronously broadcasts to L3 Team Cache."""
+        if not url or not markdown:
+            return
+        clean_url = cls.sanitize_url(url)
+        url_hash = hashlib.sha256(clean_url.encode("utf-8")).hexdigest()
+        now = int(time.time())
+        size_bytes = len(markdown.encode("utf-8"))
+
+        # 1. Save L1
+        with cls._mem_lock:
+            cls._mem_cache[url_hash] = markdown
+            cls._mem_cache.move_to_end(url_hash)
+            if len(cls._mem_cache) > 50:
+                cls._mem_cache.popitem(last=False)
+
+        # 2. Save L2 SQLite
+        cls._init_db()
+        db_path = cls._get_db_path()
+        try:
+            with sqlite3.connect(db_path, timeout=5.0) as conn:
+                conn.execute("PRAGMA busy_timeout=5000;")
+                conn.execute("""
+                    INSERT INTO web_cache (url_hash, canonical_url, markdown, fetched_at, size_bytes, hit_count)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(url_hash) DO UPDATE SET
+                        markdown = excluded.markdown,
+                        fetched_at = excluded.fetched_at,
+                        size_bytes = excluded.size_bytes;
+                """, (url_hash, clean_url, markdown, now, size_bytes))
+                cls._maybe_evict_l2(conn)
+                conn.commit()
+        except Exception:
+            pass
+
+        # 3. Broadcast to L3 Team Sync
+        has_auth = bool(custom_headers and any(
+            k.lower() in ("authorization", "cookie", "x-api-key")
+            for k in custom_headers
+        ))
+        if sync_team and not has_auth:
+            try:
+                from src.team_cache import TeamCache
+                est_saved = max(50, len(markdown) // 4)
+                TeamCache.put("WEB_DOCS", clean_url, markdown, tokens_saved=est_saved)
+            except Exception:
+                pass
 
     @classmethod
     def is_safe_url(cls, url: str) -> bool:
@@ -151,7 +357,6 @@ class WebReader:
             if host in cls._BLOCKED_HOSTS or host.endswith(".local"):
                 return False
             # Literal IPs (v4/v6) — exact range checks instead of string prefixes
-            # (the old prefix check missed 172.17-172.31 and all of IPv6).
             try:
                 ip = ipaddress.ip_address(host)
                 if (
@@ -190,21 +395,36 @@ class WebReader:
         return md, False
 
     @classmethod
-    def fetch_url(cls, url: str, timeout: float = 8.0) -> Tuple[str, bool, Optional[str]]:
+    def fetch_url(
+        cls,
+        url: str,
+        timeout: float = 8.0,
+        force_refresh: bool = False,
+        custom_headers: Optional[Dict[str, str]] = None
+    ) -> Tuple[str, bool, Optional[str]]:
         """
-        Fetches URL, converts to clean Markdown.
+        Fetches URL or returns cached Markdown from L1/L2/L3.
         Returns (content_or_error, is_success, opt_error_msg).
+        Sets cls.last_tier to "L1", "L2", "L3", or "live".
         """
         if not cls.is_safe_url(url):
             return "", False, f"Refused to fetch potentially unsafe or internal URL: {url}"
 
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; TokenSafeBot/3.3; +https://tokensafe.dev)",
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
-            }
-        )
+        # Check Local First & Team Sync caches unless force_refresh
+        if not force_refresh:
+            cached_val, tier = cls.get_cached(url, custom_headers=custom_headers)
+            if cached_val:
+                cls.last_tier = tier
+                return cached_val, True, None
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; TokenSafeBot/3.3; +https://tokensafe.dev)",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
+        }
+        if custom_headers:
+            headers.update(custom_headers)
+
+        req = urllib.request.Request(url, headers=headers)
 
         try:
             _opener = urllib.request.build_opener(_SafeRedirectHandler)
@@ -222,8 +442,15 @@ class WebReader:
 
             if "text/html" in content_type or "<html" in raw_text.lower():
                 md, _ = cls.html_to_markdown(raw_text, url=url)
-                return md, True, None
             else:
-                return raw_text, True, None
+                md = raw_text
+
+            cls.last_tier = "live"
+            cls.set_cached(url, md, sync_team=True, custom_headers=custom_headers)
+            return md, True, None
         except Exception as e:
+            cls.last_tier = "error"
             return "", False, f"Fetch error: {e}"
+
+
+sanitize_url = WebReader.sanitize_url
