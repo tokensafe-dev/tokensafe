@@ -27,7 +27,7 @@ from src.paths import resolve_data_dir
 class TypeSlicer:
     """Targeted extractor of external library types and interfaces."""
 
-    _mem_cache: "OrderedDict[str, str]" = OrderedDict()
+    _mem_cache: "OrderedDict[str, Any]" = OrderedDict()
     # Bumped whenever the slicing algorithm changes: stale slices cached under
     # an older key format can never resurface through L1/L2/L3 (poisoning guard).
     _SLICER_VERSION = "v2"
@@ -41,10 +41,10 @@ class TypeSlicer:
             cls._mem_cache.clear()
 
     @classmethod
-    def _mem_put(cls, key: str, val: str, max_items: int = 100) -> None:
+    def _mem_put(cls, key: str, val: str, dts_bytes: int = 0, max_items: int = 100) -> None:
         """Stores entry in LRU memory cache with fixed cap."""
         with cls._mem_lock:
-            cls._mem_cache[key] = val
+            cls._mem_cache[key] = (val, dts_bytes)
             cls._mem_cache.move_to_end(key)
             if len(cls._mem_cache) > max_items:
                 cls._mem_cache.popitem(last=False)
@@ -292,13 +292,16 @@ class TypeSlicer:
         with cls._mem_lock:
             if type_key in cls._mem_cache:
                 cls._mem_cache.move_to_end(type_key)
+                cached = cls._mem_cache[type_key]
+                code_val, dts_val = cached if isinstance(cached, tuple) else (cached, 0)
                 return {
                     "found": True,
                     "package": pkg_name,
                     "version": version,
                     "symbol": sym,
-                    "type_code": cls._mem_cache[type_key],
-                    "source": "L1_memory"
+                    "type_code": code_val,
+                    "source": "L1_memory",
+                    "_dts_bytes": dts_val
                 }
 
         # 2. Check L2 SQLite
@@ -315,7 +318,7 @@ class TypeSlicer:
             if row:
                 code = row[0]
                 dts_b = row[1] if len(row) > 1 and row[1] else 0
-                cls._mem_put(type_key, code, max_items=100)
+                cls._mem_put(type_key, code, dts_bytes=dts_b, max_items=100)
                 return {
                     "found": True,
                     "package": pkg_name,
@@ -339,15 +342,26 @@ class TypeSlicer:
             from src.team_cache import TeamCache
             team_val = TeamCache.get("3RD_PARTY_DTS", type_key, timeout=0.5)
             if team_val:
-                cls._mem_put(type_key, team_val, max_items=100)
+                code_block = team_val
+                dts_bytes = 0
+                if team_val.startswith("{"):
+                    try:
+                        p_val = json.loads(team_val)
+                        if isinstance(p_val, dict) and "code" in p_val:
+                            code_block = str(p_val["code"])
+                            dts_bytes = int(p_val.get("dts_bytes", 0) or 0)
+                    except Exception:
+                        pass
+
+                cls._mem_put(type_key, code_block, dts_bytes=dts_bytes, max_items=100)
                 # Backfill L2
                 back_conn = None
                 try:
                     back_conn = sqlite3.connect(db_path, timeout=5.0)
                     back_conn.execute("""
-                        INSERT OR REPLACE INTO type_cache (type_key, package_name, version, symbol, type_code, cached_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (type_key, pkg_name, version, sym, team_val, int(time.time())))
+                        INSERT OR REPLACE INTO type_cache (type_key, package_name, version, symbol, type_code, dts_bytes, cached_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (type_key, pkg_name, version, sym, code_block, dts_bytes, int(time.time())))
                     cls._maybe_evict(back_conn)
                     back_conn.commit()
                 except Exception:
@@ -363,8 +377,9 @@ class TypeSlicer:
                     "package": pkg_name,
                     "version": version,
                     "symbol": sym,
-                    "type_code": team_val,
-                    "source": "L3_team_cache"
+                    "type_code": code_block,
+                    "source": "L3_team_cache",
+                    "_dts_bytes": dts_bytes
                 }
         except Exception:
             pass
@@ -400,7 +415,7 @@ class TypeSlicer:
             }
 
         # 5. Save to L1, L2 SQLite, and broadcast to L3 Team Sync
-        cls._mem_put(type_key, code_block, max_items=100)
+        cls._mem_put(type_key, code_block, dts_bytes=dts_bytes, max_items=100)
 
         save_conn = None
         try:
@@ -422,7 +437,9 @@ class TypeSlicer:
 
         try:
             from src.team_cache import TeamCache
-            TeamCache.put("3RD_PARTY_DTS", type_key, code_block, tokens_saved=max(30, len(code_block)//4))
+            payload = json.dumps({"code": code_block, "dts_bytes": dts_bytes}, ensure_ascii=False)
+            tokens_saved = max(30, (dts_bytes // 4) if dts_bytes else len(code_block) // 4)
+            TeamCache.put("3RD_PARTY_DTS", type_key, payload, tokens_saved=tokens_saved)
         except Exception:
             pass
 

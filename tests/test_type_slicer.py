@@ -106,11 +106,37 @@ export interface Response {
     def test_l3_team_cache_hit(self, mock_team_get):
         mock_team_get.return_value = "export interface CloudSession { id: string; user: string; }"
 
-        # Library not present on disk, but present in L3 Team Cache
+        # Library not present on disk, but present in L3 Team Cache (legacy raw string)
         res = TypeSlicer.slice_package_type("@cloud/client", "CloudSession", project_root=self.tmp_dir.name)
         self.assertTrue(res["found"])
         self.assertEqual(res["source"], "L3_team_cache")
         self.assertIn("interface CloudSession", res["type_code"])
+        self.assertEqual(res.get("_dts_bytes"), 0)
+
+    @patch("src.team_cache.TeamCache.get")
+    def test_l3_team_cache_with_dts_bytes_and_l2_backfill(self, mock_team_get):
+        mock_team_get.return_value = json.dumps({
+            "code": "export interface TeamUser { id: string; role: string; }",
+            "dts_bytes": 18500
+        })
+
+        # L3 hit with JSON payload containing dts_bytes
+        res = TypeSlicer.slice_package_type("@org/team", "TeamUser", project_root=self.tmp_dir.name)
+        self.assertTrue(res["found"])
+        self.assertEqual(res["source"], "L3_team_cache")
+        self.assertIn("interface TeamUser", res["type_code"])
+        self.assertEqual(res.get("_dts_bytes"), 18500)
+
+        # L1 hit should preserve _dts_bytes
+        res_l1 = TypeSlicer.slice_package_type("@org/team", "TeamUser", project_root=self.tmp_dir.name)
+        self.assertEqual(res_l1["source"], "L1_memory")
+        self.assertEqual(res_l1.get("_dts_bytes"), 18500)
+
+        # Clear L1: L2 SQLite hit should also preserve dts_bytes backfilled from L3
+        TypeSlicer.clear_memory_cache()
+        res_l2 = TypeSlicer.slice_package_type("@org/team", "TeamUser", project_root=self.tmp_dir.name)
+        self.assertEqual(res_l2["source"], "L2_sqlite")
+        self.assertEqual(res_l2.get("_dts_bytes"), 18500)
 
     def test_large_namespace_truncation_and_balanced_braces(self):
         # Create a huge namespace definition exceeding standard cap
