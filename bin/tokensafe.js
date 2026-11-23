@@ -114,6 +114,8 @@ Usage:
   tokensafe [command] [options]
 
 Commands:
+  tokensafe create <name>      Greenfield project scaffolder (tokensafe-ui + tokensafe-python)
+  tokensafe init               Initialize TokenSafe ecosystem in current directory
   tokensafe stats              Show token economy savings & performance metrics
   tokensafe sync               Synchronize local token metrics with Cloud Dashboard
   tokensafe html               Generate and open interactive browser dashboard

@@ -97,6 +97,8 @@ def summarize_unittest_output(raw: str, full_traceback: bool = False) -> str:
 def _print_help():
     print("TokenSafe CLI — usage: tokensafe <command> [args]\n")
     print("Commands:")
+    print("  create <name> [--template ...] Greenfield project scaffolder (tokensafe-ui + tokensafe-python)")
+    print("  init [--template ...]          Initialize TokenSafe stack in current directory")
     print("  stats / markdown / html        Savings analytics (terminal / .md report / dashboard)")
     print("  status                         One-screen health check: hooks, weekly savings, tier, sync")
     print("  budget [--transcript=...]      Context Window Budget HUD & Context Quality Score (Grade S-F)")
@@ -554,6 +556,112 @@ def main(argv: Optional[List[str]] = None):
             print("  tokensafe guard \"<command>\"       Audit a terminal command line")
             print("  tokensafe guard check \"<command>\" Audit a terminal command line")
             print("  tokensafe guard audit [path]      Recursively audit source files for secrets & vulnerabilities\n")
+
+    elif command in ("create", "new"):
+        from src.scaffold import ProjectScaffolder
+        project_name = None
+        template = "fullstack"
+        force = False
+
+        i = 1
+        while i < len(args):
+            arg = args[i]
+            if arg in ("--help", "-h"):
+                print("\n⚡ TokenSafe Project Scaffolder\n")
+                print("Usage:")
+                print("  tokensafe create <project-name> [options]\n")
+                print("Options:")
+                print("  --template <type>   fullstack (default), ui, backend, python, go")
+                print("  --force, -f         Overwrite existing files")
+                print("  --help, -h          Show this help screen\n")
+                print("Examples:")
+                print("  tokensafe create my-app")
+                print("  tokensafe create my-dashboard --template ui")
+                print("  tokensafe create store-api --template backend\n")
+                return
+            elif arg in ("--template", "-t") and i + 1 < len(args):
+                template = args[i + 1]
+                i += 2
+                continue
+            elif arg.startswith("--template="):
+                template = arg.split("=", 1)[1]
+            elif arg in ("--force", "-f"):
+                force = True
+            elif not arg.startswith("-") and project_name is None:
+                project_name = arg
+            i += 1
+
+        if not project_name:
+            print("\n❌ Error: Project name is required.")
+            print("Usage: tokensafe create <project-name> [--template fullstack|ui|backend]\n")
+            return
+
+        target_dir = os.path.abspath(project_name)
+        try:
+            res = ProjectScaffolder.scaffold(
+                target_dir=target_dir,
+                project_name=project_name,
+                template=template,
+                force=force,
+            )
+            print(f"\n\033[1m\033[36m⚡ TOKENSAFE GREENFIELD SCAFFOLDER ⚡\033[0m\n")
+            print(f"  ✔ Created project: \033[1m{res['project_name']}\033[0m")
+            print(f"  ✔ Template:       \033[32m{res['template']}\033[0m")
+            print(f"  ✔ Location:       {res['target_dir']}")
+            print(f"  ✔ Files created:  {len(res['created_files'])}\n")
+            print("Next steps:")
+            print(f"  cd {project_name}")
+            if template in ("fullstack", "ui"):
+                sub = "frontend" if template == "fullstack" else "."
+                print(f"  cd {sub} && npm install && npm run dev")
+            if template in ("fullstack", "backend", "python", "fastapi"):
+                sub = "backend" if template == "fullstack" else "."
+                print(f"  cd {sub} && pip install -e . && python main.py")
+            print("\n  OUMV runtime and agent directives are pre-configured out-of-the-box.\n")
+        except Exception as e:
+            print(f"\n❌ Scaffolding failed: {e}\n")
+
+    elif command == "init":
+        from src.scaffold import ProjectScaffolder
+        template = "fullstack"
+        force = False
+
+        i = 1
+        while i < len(args):
+            arg = args[i]
+            if arg in ("--help", "-h"):
+                print("\n⚡ TokenSafe Project Initializer\n")
+                print("Usage:")
+                print("  tokensafe init [options]\n")
+                print("Options:")
+                print("  --template <type>   fullstack (default), ui, backend, python, go")
+                print("  --force, -f         Overwrite existing files\n")
+                return
+            elif arg in ("--template", "-t") and i + 1 < len(args):
+                template = args[i + 1]
+                i += 2
+                continue
+            elif arg.startswith("--template="):
+                template = arg.split("=", 1)[1]
+            elif arg in ("--force", "-f"):
+                force = True
+            i += 1
+
+        cwd = os.getcwd()
+        project_name = os.path.basename(cwd)
+        try:
+            res = ProjectScaffolder.scaffold(
+                target_dir=cwd,
+                project_name=project_name,
+                template=template,
+                force=force,
+            )
+            print(f"\n\033[1m\033[36m⚡ TOKENSAFE PROJECT INITIALIZED ⚡\033[0m\n")
+            print(f"  ✔ Initialized:    \033[1m{res['project_name']}\033[0m")
+            print(f"  ✔ Template:       \033[32m{res['template']}\033[0m")
+            print(f"  ✔ Files created:  {len(res['created_files'])}\n")
+        except Exception as e:
+            print(f"\n❌ Initialization failed: {e}\n")
 
     elif command == "proxy":
         from src.proxy import run_proxy

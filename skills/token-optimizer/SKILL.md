@@ -154,6 +154,72 @@ TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to i
 
 ---
 
+## Greenfield Ecosystem Architecture & Component Generation
+
+When building greenfield applications with the TokenSafe ecosystem (`tokensafe create` or `tokensafe init`):
+
+### 1. Frontend: `tokensafe-ui`
+`tokensafe-ui` is a deterministic, token-efficient frontend framework designed for AI coding agents. It provides zero-bundle DOM parity, reactive state, and automatic OUMV introspection.
+
+**Component Anatomy (`src/App.tsx` / `src/components/`):**
+```typescript
+import { defineComponent, z, bind, h } from 'tokensafe-ui';
+
+export const UserCard = defineComponent({
+  id: 'user-card',
+  // Zod-enforced reactive state (introspectable via oumv_observe L2)
+  state: {
+    username: z.string().default('Alice'),
+    active: z.boolean().default(true),
+    score: z.number().default(100),
+  },
+  // Pure actions for deterministic simulation in oumv_verify
+  actions: {
+    toggleActive: (s) => ({ ...s, active: !s.active }),
+    addScore: (s, delta: number) => ({ ...s, score: s.score + delta }),
+    setName: (s, username: string) => ({ ...s, username }),
+  },
+  // HyperScript rendering with required data-agent-id attributes for deterministic targeting
+  render: ({ state, emit }) =>
+    h('div', { class: 'card', 'data-agent-id': 'user-card:container' },
+      h('h2', { 'data-agent-id': 'user-card:title' }, state.username),
+      h('p', { 'data-agent-id': 'user-card:status' }, state.active ? 'Online' : 'Offline'),
+      h('button', {
+        'data-agent-id': 'user-card:btn-toggle',
+        onClick: () => emit.toggleActive()
+      }, 'Toggle Status'),
+      h('input', {
+        'data-agent-id': 'user-card:input-name',
+        ...bind(emit.setName, state.username)
+      })
+    )
+});
+```
+
+### 2. Backend: `tokensafe-python` (FastAPI)
+`tokensafe-python` instruments FastAPI services with UARP JSON-RPC 2.0 (`/__oumv/rpc`) and SQLAlchemy transactional sandboxes.
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from tokensafe_python.adapters.fastapi import mount_tokensafe
+
+app = FastAPI(title="App API")
+
+class TaskCreate(BaseModel):
+    title: str = Field(..., example="Implement feature")
+    done: bool = False
+
+@app.post("/api/tasks", status_code=201)
+def create_task(task: TaskCreate):
+    return {"id": 1, **task.model_dump()}
+
+# 1-line UARP mounting: registers /__oumv/rpc, /__oumv/health, and writes .tokensafe/runtime.json
+mount_tokensafe(app, port=8000)
+```
+
+---
+
 ## Proof-of-Savings Turn Footer (always in English)
 
 At the end of any response where tools were executed, files were inspected, commands were sanitized, or prompts were compacted, append a compact 1-line footer in English:
