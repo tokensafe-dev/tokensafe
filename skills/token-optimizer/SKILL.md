@@ -125,32 +125,32 @@ TokenSafe actively maximizes provider KV-cache hit rates alongside token compres
 
 ## Universal OUMV Protocol (Runtime Introspection & Verification)
 
-TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to inspect, reason about, edit, and verify running Frontend and Backend services in real time without heavy headless browsers or unconstrained shell curls:
+TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to inspect, reason about, edit, and verify running Frontend (`tokensafe-ui`, React 18/19 with Zustand/Redux/Context/useReducer, Vue 3) and Backend (FastAPI, Go, Node.js) services in real time without heavy headless browsers or unconstrained shell curls:
 
 1. **LIVE RUNTIME HEALTH (`oumv_status`)**:
    - Call `tokensafe:oumv_status()` to inspect connection status and capabilities of running DevServers (Frontend ports 5173/3000, Backend ports 8080/8000).
 
 2. **PROGRESSIVE CONTEXT OBSERVATION (`oumv_observe`)**:
-   - Never dump raw HTML or giant JSON payloads. Observe progressively:
-     - **L0 (Page Pulse ~20 tokens)**: Status, active route, error counts (`level="L0"`).
+   - Never dump raw HTML or giant JSON payloads. Observe progressively across native components, React, Vue, or backend APIs:
+     - **L0 (Page Pulse ~20 tokens)**: Status, active route, mounted components/roots, error counts (`level="L0"`).
      - **L1 (Surface ~150 tokens)**: Interactive map of endpoints, models, buttons, and ARIA roles (`level="L1"`).
-     - **L2 (Contract ~80 tokens)**: Targeted component props or API DTO schemas (`level="L2", target="ModelName"`).
-     - **L3 (Source)**: Targeted symbol source with line mapping.
-     - **L4 (Traces)**: Event stream, signal mutations, and state snapshot.
+     - **L2 (Contract ~80 tokens)**: Targeted component state contract, props, Zod schema, or API DTO schemas (`level="L2", target="ModelName"`).
+     - **L3 (Source)**: Targeted symbol source with line mapping and OCC version hash token.
+     - **L4 (Traces)**: Event stream, signal mutations, store subscriptions (Zustand/Redux/Context updates), and state snapshot diffs.
 
 3. **RUNTIME CAUSALITY & WHY-STATE (`oumv_understand`)**:
    - Never guess state flows or assume dependencies.
    - Call `tokensafe:oumv_understand(query="causality", target="POST /api/orders")` to query live dependencies:
      `Route ➔ Handler ➔ ValidatesWith ➔ Model ➔ DB Table` or `Signal ➔ Computed ➔ Effect ➔ DOM Binding`.
-   - Call `tokensafe:oumv_understand(query="impact", target="model:User")` before refactoring to know exactly what breaks.
+   - Call `tokensafe:oumv_understand(query="impact", target="cart")` before refactoring to know exactly what breaks.
 
 4. **SANDBOXED ACTION VERIFICATION (`oumv_verify`)**:
    - Sub-millisecond to low-millisecond local action verification inside transactional sandbox.
-   - For backend endpoints: call `tokensafe:oumv_verify(target="POST /api/products", payload={...})` — executes the request in-memory with automatic database rollback (`rolledBack: true`) and returns structured state diffs (`diff`) and HTTP status code.
-   - For frontend UI: verifies synthetic events and accessibility surface diffs without spawning browser automation.
+   - **For backend endpoints**: call `tokensafe:oumv_verify(target="POST /api/products", payload={...})` — executes the request in-memory with automatic database rollback (`rolledBack: true`) and returns structured state diffs (`diff`) and HTTP status code.
+   - **For frontend UI**: call `tokensafe:oumv_verify(target="cart", action="addItem", payload={...})` — executes synthetic events, component actions, Zustand/Redux actions, or reducer dispatches in memory, returning structured `stateDiff` and `surfaceDiff` without spawning heavy browser automation.
 
 5. **OPTIMISTIC CONCURRENCY MUTATIONS (`oumv_mutate`)**:
-   - Submits surgical edits verified against `expectedVersion` with built-in syntax and security leak guards.
+   - Submits surgical edits verified against `expectedVersion` with built-in Babel AST TSX/JSX syntax guards and security leak prevention.
 
 ---
 

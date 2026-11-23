@@ -44,7 +44,10 @@ class OUMVGateway:
         fe_candidates = [
             *( [env_fe] if env_fe else [] ),
             "http://localhost:5173/__oumv/rpc",
+            "http://localhost:5173/__tokensafe_ui/rpc",
+            "http://localhost:5173/__agent_dom/rpc",
             "http://localhost:3000/__oumv/rpc",
+            "http://localhost:3000/__tokensafe_ui/rpc",
             "http://localhost:4173/__oumv/rpc",
             "http://localhost:5174/__oumv/rpc",
             "http://localhost:8081/__oumv/rpc",
@@ -223,7 +226,7 @@ class OUMVGateway:
             return results
 
         url = cls._resolve_client_url(runtime=runtime, target=target)
-        return cls._rpc_call(url, "oumv/observe", {"level": level, "target": target})
+        return cls._rpc_call(url, "oumv/observe", {"level": level, "target": target, "componentId": target})
 
     # 3. Tool: oumv_understand
     @classmethod
@@ -244,13 +247,13 @@ class OUMVGateway:
                     report["backendError"] = str(e)
             if fe:
                 try:
-                    report["frontendCausality"] = cls._rpc_call(fe["url"], "oumv/understand", {"query": query, "target": target})
+                    report["frontendCausality"] = cls._rpc_call(fe["url"], "oumv/understand", {"query": query, "target": target, "componentId": target})
                 except Exception as e:
                     report["frontendError"] = str(e)
             return report
 
         url = cls._resolve_client_url(runtime=runtime, target=target)
-        return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target})
+        return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target, "componentId": target})
 
     # 4. Tool: oumv_mutate
     @classmethod
@@ -258,8 +261,10 @@ class OUMVGateway:
         url = cls._resolve_client_url(runtime=runtime, target=path)
         return cls._rpc_call(url, "oumv/applyEdit", {
             "path": path,
+            "filePath": path,
             "symbol": symbol,
             "replacement": replacement,
+            "source": replacement,
             "expectedVersion": expected_version,
         })
 
@@ -269,6 +274,7 @@ class OUMVGateway:
         url = cls._resolve_client_url(runtime=runtime, target=target)
         return cls._rpc_call(url, "oumv/verify", {
             "target": target,
+            "componentId": target,
             "action": action,
             "payload": payload or {},
         })

@@ -397,31 +397,31 @@ TOOLS = [
     },
     {
         "name": "oumv_observe",
-        "description": "Progressive semantic context observation (L0 Pulse ~30 tokens, L1 Surface ~150 tokens, L2 Contract ~80 tokens, L3 Source, L4 Traces) without wasting tokens on raw dumps.",
+        "description": "Progressive semantic context observation across tokensafe-ui, React 18/19 (Zustand/Redux/Context/useReducer), Vue 3, and Backend (L0 Pulse ~30t, L1 Surface ~150t, L2 Contract ~80t, L3 Source, L4 Traces) without wasting tokens on raw dumps.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "level": {"type": "string", "enum": ["L0", "L1", "L2", "L3", "L4"], "default": "L0", "description": "Observation level (L0: Pulse, L1: Surface, L2: Contract, L3: Source, L4: Traces)"},
-                "target": {"type": "string", "description": "Target route (e.g. 'POST /api/products'), DOM element ('#submit-btn'), or symbol"},
+                "target": {"type": "string", "description": "Target component ID, route (e.g. 'POST /api/products'), or DOM element ('#submit-btn')"},
                 "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto", "description": "Target runtime (frontend, backend, or auto-detect)"}
             }
         }
     },
     {
         "name": "oumv_understand",
-        "description": "Answers 'Why is state X / why is button disabled?' or performs impact analysis by querying runtime signal & causality graph.",
+        "description": "Answers 'Why is state X / why is button disabled?' or performs impact analysis by querying runtime signal & causality graph for tokensafe-ui, React, Vue, and Backend services.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "enum": ["causality", "impact", "why_state"], "default": "causality", "description": "Query type (causality, impact, why_state)"},
-                "target": {"type": "string", "description": "Target endpoint (e.g. 'POST /api/products') or UI element ('#submit-btn')"},
+                "target": {"type": "string", "description": "Target component ID, state key, endpoint, or UI element"},
                 "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto", "description": "Target runtime"}
             }
         }
     },
     {
         "name": "oumv_mutate",
-        "description": "Applies Optimistic Concurrency Control (OCC) source edit or simulates state mutations with syntax & security guards.",
+        "description": "Applies Optimistic Concurrency Control (OCC) source edit with Babel AST JSX/TSX syntax guards, TypeScript verification, and secret leak prevention.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -436,12 +436,12 @@ TOOLS = [
     },
     {
         "name": "oumv_verify",
-        "description": "Instantly verifies actions in memory (UI synthetic actions or Backend HTTP/DB transactional sandbox) with structured state diffs and rollback.",
+        "description": "Instantly verifies actions in memory (UI synthetic actions, React reducers/Zustand/Redux actions, Context updaters, or Backend transactional sandbox) with structured state and surface diffs.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "Action target (e.g. 'POST /api/v1/orders' or '#submit-btn')"},
-                "action": {"type": "string", "default": "invoke", "description": "Action name (invoke, click, submit)"},
+                "target": {"type": "string", "description": "Action target (component ID, e.g. 'cart', or 'POST /api/v1/orders' or '#submit-btn')"},
+                "action": {"type": "string", "default": "invoke", "description": "Action name (invoke, click, submit, or store action)"},
                 "payload": {"type": "object", "description": "Request body or action payload"},
                 "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto"}
             },
