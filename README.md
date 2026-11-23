@@ -135,6 +135,10 @@ tokensafe mcp disable <server>
 # Compile and preview the Friday team ROI digest
 tokensafe digest
 
+# Scaffold a new token-optimized project for AI agents
+tokensafe create my-app --template fullstack  # tokensafe-ui + tokensafe-python
+tokensafe create my-service --template go     # tokensafe-backend (Go)
+
 # Activate a Team or Solo license key
 tokensafe activate TS2.eyJlbWFpbCI6...
 ```
