@@ -2557,6 +2557,63 @@ WantedBy=default.target
             except Exception as e:
                 print(f"  {YELLOW}⚠{RESET} pip update skipped: {e}")
 
+        # 3b. Check and upgrade TokenSafe ecosystem packages (Frontend & Backend)
+        print(f"\n  {CYAN}→{RESET} Checking TokenSafe Ecosystem packages (UI & Backend)...")
+        target_npm_bins = upgraded_npm_bins or ([primary_npm] if primary_npm else [])
+        for npm_bin in target_npm_bins:
+            npm_env = cls._npm_subprocess_env(npm_bin)
+            for pkg in ("tokensafe-ui", "create-tokensafe-ui"):
+                try:
+                    res = subprocess.run([npm_bin, "list", "-g", "--depth=0", pkg], env=npm_env, capture_output=True, text=True, timeout=10)
+                    if f"{pkg}@" in (res.stdout or ""):
+                        print(f"    {CYAN}→{RESET} Updating global {pkg} ({npm_bin} install -g {pkg}@latest)...")
+                        up_res = subprocess.run([npm_bin, "install", "-g", f"{pkg}@latest"], env=npm_env, capture_output=True, text=True, timeout=120)
+                        if up_res.returncode == 0:
+                            print(f"    {GREEN}✔{RESET} {pkg} upgraded successfully.")
+                except Exception:
+                    pass
+
+        if pip_cmd:
+            try:
+                res = subprocess.run([pip_cmd, "list"], capture_output=True, text=True, timeout=10)
+                if "tokensafe-python" in (res.stdout or ""):
+                    print(f"    {CYAN}→{RESET} Updating backend package ({pip_cmd} install --upgrade tokensafe-python)...")
+                    up_res = subprocess.run([pip_cmd, "install", "--upgrade", "tokensafe-python"], capture_output=True, text=True, timeout=120)
+                    if up_res.returncode == 0:
+                        print(f"    {GREEN}✔{RESET} tokensafe-python upgraded successfully.")
+            except Exception:
+                pass
+
+        # Project-level dependencies update (if inside a TokenSafe project)
+        cwd = os.getcwd()
+        for cand_pkg in [os.path.join(cwd, "package.json"), os.path.join(cwd, "frontend", "package.json")]:
+            if os.path.isfile(cand_pkg):
+                try:
+                    with open(cand_pkg, "r", encoding="utf-8") as f:
+                        txt = f.read()
+                    if "tokensafe-ui" in txt:
+                        pdir = os.path.dirname(cand_pkg)
+                        pm = "pnpm" if shutil.which("pnpm") else ("npm" if shutil.which("npm") else None)
+                        if pm:
+                            print(f"    {CYAN}→{RESET} Updating local tokensafe-ui in {pdir} ({pm} update tokensafe-ui)...")
+                            subprocess.run([pm, "update", "tokensafe-ui"], cwd=pdir, capture_output=True, text=True, timeout=60)
+                            print(f"    {GREEN}✔{RESET} Local tokensafe-ui updated.")
+                except Exception:
+                    pass
+
+        for cand_py in [os.path.join(cwd, "pyproject.toml"), os.path.join(cwd, "backend", "pyproject.toml")]:
+            if os.path.isfile(cand_py):
+                try:
+                    with open(cand_py, "r", encoding="utf-8") as f:
+                        txt = f.read()
+                    if "tokensafe-python" in txt and pip_cmd:
+                        pdir = os.path.dirname(cand_py)
+                        print(f"    {CYAN}→{RESET} Updating local tokensafe-python in {pdir}...")
+                        subprocess.run([pip_cmd, "install", "--upgrade", "tokensafe-python"], cwd=pdir, capture_output=True, text=True, timeout=60)
+                        print(f"    {GREEN}✔{RESET} Local tokensafe-python updated.")
+                except Exception:
+                    pass
+
         # 4. Re-synchronize all detected agents
         print(f"\n  {CYAN}→{RESET} Re-synchronizing AI Agent MCP configs & rules...")
         agents = cls.detect_available_agents()
