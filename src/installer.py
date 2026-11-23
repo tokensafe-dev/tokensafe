@@ -1241,6 +1241,10 @@ WantedBy=default.target
                 "command": PYTHON_BIN,
                 "args": [MCP_SERVER_PATH]
             }
+            data["mcpServers"]["tokensafe-mcp"] = {
+                "command": "npx",
+                "args": ["-y", "tokensafe-mcp"]
+            }
 
             cls._atomic_write_json(config_file, data)
 
@@ -1281,6 +1285,10 @@ WantedBy=default.target
             data["mcpServers"]["tokensafe"] = {
                 "command": PYTHON_BIN,
                 "args": [MCP_SERVER_PATH]
+            }
+            data["mcpServers"]["tokensafe-mcp"] = {
+                "command": "npx",
+                "args": ["-y", "tokensafe-mcp"]
             }
 
             cls._atomic_write_json(config_file, data)
@@ -1350,6 +1358,10 @@ WantedBy=default.target
                     "command": PYTHON_BIN,
                     "args": [MCP_SERVER_PATH]
                 }
+                data["mcpServers"]["tokensafe-mcp"] = {
+                    "command": "npx",
+                    "args": ["-y", "tokensafe-mcp"]
+                }
                 cls._atomic_write_json(config_file, data)
 
             if "agents_md_path" in info:
@@ -1374,6 +1386,12 @@ WantedBy=default.target
                 "args": [MCP_SERVER_PATH],
                 "tools": ["*"]
             }
+            data["mcpServers"]["tokensafe-mcp"] = {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "tokensafe-mcp"],
+                "tools": ["*"]
+            }
             cls._atomic_write_json(config_file, data)
             return True, f"Configured MCP for GitHub Copilot in {config_file}"
 
@@ -1393,6 +1411,10 @@ WantedBy=default.target
             data["mcp"]["servers"]["tokensafe"] = {
                 "command": PYTHON_BIN,
                 "args": [MCP_SERVER_PATH]
+            }
+            data["mcp"]["servers"]["tokensafe-mcp"] = {
+                "command": "npx",
+                "args": ["-y", "tokensafe-mcp"]
             }
 
             cls._atomic_write_json(config_file, data)
@@ -1420,6 +1442,10 @@ WantedBy=default.target
                 data["mcpServers"]["tokensafe"] = {
                     "command": PYTHON_BIN,
                     "args": [MCP_SERVER_PATH]
+                }
+                data["mcpServers"]["tokensafe-mcp"] = {
+                    "command": "npx",
+                    "args": ["-y", "tokensafe-mcp"]
                 }
                 cls._atomic_write_json(mcp_file, data)
 
@@ -1518,8 +1544,14 @@ WantedBy=default.target
             if os.path.exists(config_file):
                 data, err = cls._load_json_with_backup(config_file)
                 if not err and data and isinstance(data.get("mcpServers"), dict):
+                    mutated = False
                     if "tokensafe" in data["mcpServers"]:
                         data["mcpServers"].pop("tokensafe")
+                        mutated = True
+                    if "tokensafe-mcp" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe-mcp")
+                        mutated = True
+                    if mutated:
                         cls._atomic_write_json(config_file, data)
 
             cls._remove_path_safely(info.get("skills_path"))
@@ -1533,8 +1565,14 @@ WantedBy=default.target
             if os.path.exists(config_file):
                 data, err = cls._load_json_with_backup(config_file)
                 if not err and data and isinstance(data.get("mcpServers"), dict):
+                    mutated = False
                     if "tokensafe" in data["mcpServers"]:
                         data["mcpServers"].pop("tokensafe")
+                        mutated = True
+                    if "tokensafe-mcp" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe-mcp")
+                        mutated = True
+                    if mutated:
                         cls._atomic_write_json(config_file, data)
 
             if "skills_path" in info:
@@ -1579,8 +1617,14 @@ WantedBy=default.target
                 config_file = info["config_path"]
                 data, err = cls._load_json_with_backup(config_file)
                 if not err and data and isinstance(data.get("mcpServers"), dict):
+                    mutated = False
                     if "tokensafe" in data["mcpServers"]:
                         data["mcpServers"].pop("tokensafe")
+                        mutated = True
+                    if "tokensafe-mcp" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe-mcp")
+                        mutated = True
+                    if mutated:
                         cls._atomic_write_json(config_file, data)
 
             if "agents_md_path" in info:
@@ -1596,8 +1640,14 @@ WantedBy=default.target
             if os.path.exists(config_file):
                 data, err = cls._load_json_with_backup(config_file)
                 if not err and data and isinstance(data.get("mcpServers"), dict):
+                    mutated = False
                     if "tokensafe" in data["mcpServers"]:
                         data["mcpServers"].pop("tokensafe")
+                        mutated = True
+                    if "tokensafe-mcp" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe-mcp")
+                        mutated = True
+                    if mutated:
                         cls._atomic_write_json(config_file, data)
             return True, f"Removed MCP for GitHub Copilot in {config_file}"
 
@@ -1608,8 +1658,14 @@ WantedBy=default.target
                 if not err and data:
                     mcp = data.get("mcp")
                     if isinstance(mcp, dict) and isinstance(mcp.get("servers"), dict):
+                        mutated = False
                         if "tokensafe" in mcp["servers"]:
                             mcp["servers"].pop("tokensafe")
+                            mutated = True
+                        if "tokensafe-mcp" in mcp["servers"]:
+                            mcp["servers"].pop("tokensafe-mcp")
+                            mutated = True
+                        if mutated:
                             cls._atomic_write_json(config_file, data)
 
             if "skills_path" in info:
@@ -1628,8 +1684,14 @@ WantedBy=default.target
             if mcp_file and os.path.exists(mcp_file):
                 data, err = cls._load_json_with_backup(mcp_file)
                 if not err and data and isinstance(data.get("mcpServers"), dict):
+                    mutated = False
                     if "tokensafe" in data["mcpServers"]:
                         data["mcpServers"].pop("tokensafe")
+                        mutated = True
+                    if "tokensafe-mcp" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe-mcp")
+                        mutated = True
+                    if mutated:
                         cls._atomic_write_json(mcp_file, data)
 
             managed_plugin_path = info.get("managed_plugin_path")
@@ -1878,6 +1940,10 @@ WantedBy=default.target
                         "command": PYTHON_BIN,
                         "args": [MCP_SERVER_PATH]
                     }
+                    data["mcpServers"]["tokensafe-mcp"] = {
+                        "command": "npx",
+                        "args": ["-y", "tokensafe-mcp"]
+                    }
                     cls._atomic_write_json(cursor_mcp, data)
                     created.append(".cursor/mcp.json")
         except Exception:
@@ -2032,8 +2098,14 @@ WantedBy=default.target
             try:
                 data, err = cls._load_json_with_backup(cursor_mcp)
                 if not err and data and isinstance(data.get("mcpServers"), dict):
+                    mutated = False
                     if "tokensafe" in data["mcpServers"]:
                         data["mcpServers"].pop("tokensafe")
+                        mutated = True
+                    if "tokensafe-mcp" in data["mcpServers"]:
+                        data["mcpServers"].pop("tokensafe-mcp")
+                        mutated = True
+                    if mutated:
                         if not data["mcpServers"] and list(data.keys()) == ["mcpServers"]:
                             os.remove(cursor_mcp)
                         else:
