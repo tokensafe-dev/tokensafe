@@ -77,378 +77,396 @@ def _client_supports_pointers() -> bool:
     return bool(_MCP_CLIENT_NAME and any(k in _MCP_CLIENT_NAME for k in _KNOWN_POINTER_CLIENTS))
 
 
-TOOLS = [
-    {
-        "name": "smart_read_file",
-        "description": "AST-skeleton file reader: keeps the target function/class body + 1-line 1-hop dependency signatures, folds inert code (-90-99% tokens). Relative or absolute paths. Schema files (OpenAPI/Prisma/GraphQL/SQL) auto-slice via 'symbol'. For 3+ related symbols use smart_bundle instead.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path (relative to workspace or absolute)"},
-                "symbol": {"type": "string", "description": "Optional: function/method/class/component or schema model/type/table to extract (omit for whole-file skeleton)"},
-                "include_deps": {"type": "boolean", "description": "Include 1-hop dependency signatures (default true)"},
-                "dep_mode": {"type": "string", "enum": ["signature", "full"], "description": "'signature' (default) = 1-line dep signatures; 'full' = inline dependency bodies"},
-                "force_full": {"type": "boolean", "description": "Bypass pointer dedup — use only after context compaction or as a fresh subagent"},
-                "start_line": {"type": "integer", "description": "Optional: starting line number"},
-                "end_line": {"type": "integer", "description": "Optional: ending line number"}
-            },
-            "required": ["path"]
-        }
-    },
-    {
-        "name": "smart_bundle",
-        "description": "Reads 2-8 related symbols across files as ONE merged bundle: per-file skeletons, deduplicated shared imports, merged 1-hop dep signatures. Replaces 3+ separate smart_read_file calls in a single roundtrip.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "targets": {
-                    "type": "array",
-                    "maxItems": 8,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string", "description": "File path (relative or absolute)"},
-                            "symbol": {"type": "string", "description": "Optional symbol to keep unfolded"}
-                        },
-                        "required": ["path"]
-                    },
-                    "description": "Up to 8 {path, symbol} targets; several symbols of one file = separate entries"
-                },
-                "include_deps": {"type": "boolean", "description": "Include merged 1-hop dep signatures (default true)"},
-                "dep_mode": {"type": "string", "enum": ["signature", "full"], "description": "Parity only; bundles always merge signatures"},
-                "force_full": {"type": "boolean", "description": "Bypass session pointer dedup"}
-            },
-            "required": ["targets"]
-        }
-    },
-    {
-        "name": "get_architecture_graph",
-        "description": "Returns top architectural God Nodes and dependency topology for the target project in < 250 tokens without file crawling. Call this BEFORE reading files or searching.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "project_path": {"type": "string", "description": "Target project root directory. IMPORTANT: Always pass the absolute directory path (e.g. '/path/to/repo') when working in multi-workspace setups or repositories outside CWD."}
-            }
-        }
-    },
-    {
-        "name": "get_api_surface",
-        "description": "Generates and returns a compact markdown map of all exported interfaces, classes, and types in the project without crawling files.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "project_path": {"type": "string", "description": "Target project root directory. IMPORTANT: Always pass the absolute directory path (e.g. '/path/to/repo') when working in multi-workspace setups or repositories outside CWD."}
-            }
-        }
-    },
-    {
-        "name": "compress_prompt",
-        "description": "Compresses a verbose developer prompt into an ultra-dense TOCP S-Expression via DeepSeek-V3 / Regex.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "prompt": {"type": "string", "description": "Natural language request from developer"}
-            },
-            "required": ["prompt"]
-        }
-    },
-    {
-        "name": "context_budget",
-        "description": "Context Budget HUD & Context Quality Score (Grade S/A/B/C/F): estimates context window usage, headroom %, static tool/skill tax, and outputs a unified health grade. Call before large multi-step tasks. When warning/critical or Grade C/F, call tokensafe:compact_conversation.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "model": {"type": "string", "description": "Optional: model name to resolve window size (default: env TOKENSAFE_CONTEXT_WINDOW or 200k)"},
-                "window_tokens": {"type": "integer", "description": "Optional: explicit context window size in tokens"},
-                "session_id": {"type": "string", "description": "Optional: session identifier (default: mcp_session)"},
-                "transcript_path": {"type": "string", "description": "Optional: path to the session JSONL transcript; when provided, REAL history mass is measured instead of the instrumented floor (recommended)"}
-            }
-        }
-    },
-    {
-        "name": "compact_conversation",
-        "description": "On-demand context compaction: folds a long agent conversation transcript into a Consolidated State Ledger with a 3-line Post-Compaction Orientation Digest (Active Goal, Last State, Next Focus) so the agent immediately resumes without losing flow. Use when context_budget reports warning/critical or Grade C/F.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "transcript_path": {"type": "string", "description": "Path to the JSONL transcript of the current session"},
-                "invocation_num": {"type": "integer", "description": "Optional: current turn number (default 3; folding requires >= 3 turns)"}
-            },
-            "required": ["transcript_path"]
-        }
-    },
-    {
-        "name": "sanitize_command",
-        "description": "Per-stage shell command rewrites: prunes lockfiles, caps unbounded git log/show/blame/rg "
-                     "and docker/kubectl logs, strips git push progress animations (--no-progress), wraps git commit "
-                     "with tokensafe wrap when pre-commit/husky hooks exist, and quiets npm/pip installs, bounds cat/curl output. "
-                     "Compound commands (a && b ; c) are optimized per stage without breaking operators. Test commands "
-                     "(bun test, pytest, python -m unittest, vitest, jest) are automatically wrapped or forced into run-once mode "
-                     "(CI=true, --watch=false, --forceExit) so passing suites emit a clean 1-line summary and agents never hang on watch mode. "
-                     "Pass optional cwd for test commands to unlock package.json runner detection for opaque yarn/npm test scripts.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "Raw bash command line"},
-                "cmd": {"type": "string", "description": "Alias for command"},
-                "cwd": {"type": "string", "description": "Optional working directory the command will run in; enables the package.json peek that identifies the runner behind opaque yarn/npm test scripts"}
-            }
-        }
-    },
-    {
-        "name": "slice_diff",
-        "description": "Slices unified diffs, omitting lockfiles and minimizing context lines to reduce tokens by up to 80%.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "diff": {"type": "string", "description": "Raw git diff text"},
-                "max_context": {"type": "integer", "description": "Maximum surrounding context lines (default: 2)"}
-            },
-            "required": ["diff"]
-        }
-    },
-    {
-        "name": "get_token_savings_metrics",
-        "description": "Returns cumulative token and cost savings analytics.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {}
-        }
-    },
-    {
-        "name": "guard_inspect",
-        "description": "Pre-flight security & hygiene audit for commands or code snippets. Detects secret leaks, SQL injection, TLS bypass (incl. git-level), CORS wildcard, destructive commands, raw grep, in-place stream editing (sed -i, perl -i), and never-terminating streams (tail -f, watch, docker attach).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "Optional: Terminal command line to audit"},
-                "cmd": {"type": "string", "description": "Alias for command"},
-                "code": {"type": "string", "description": "Optional: Code snippet, replacement diff, or file content to audit"},
-                "file_path": {"type": "string", "description": "Optional: File path being written or modified"}
-            }
-        }
-    },
-    {
-        "name": "list_dir",
-        "description": "Returns a clean, token-efficient directory tree up to depth N without permissions, timestamps, or ignored folders (node_modules, .git, dist, .env). Replaces verbose ls -la. Pass '.' for project root or a subfolder like 'src'.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Path to the directory (relative to workspace or absolute, e.g. '.', './src')"},
-                "depth": {"type": "integer", "description": "Maximum traversal depth (default: 2, max: 4)"},
-                "max_entries": {"type": "integer", "description": "Maximum entries to display before pruning (default: 80)"}
-            },
-            "required": ["path"]
-        }
-    },
-    {
-        "name": "scoped_search",
-        "description": "Safe, token-bounded symbol/text search replacing raw grep/find (-90% tokens). '|' or \\d in query auto-enables regex when use_regex is omitted; false forces literal.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Text, identifier, or symbol name"
-                },
-                "scope": {
-                    "type": "string",
-                    "description": "Filter: 'code', 'config', 'all', extension ('go', '*.py'), or subfolder ('internal/promo') (default 'all')"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Directory to search (alias for project_path; relative or absolute)"
-                },
-                "project_path": {
-                    "type": "string",
-                    "description": "Optional root directory (defaults to current project)"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Max matching lines (default 25, max 100)"
-                },
-                "case_sensitive": {
-                    "type": "boolean",
-                    "description": "Case-sensitive search (default false)"
-                },
-                "use_regex": {
-                    "type": "boolean",
-                    "description": "Omit = auto-detect ('|', \\d → regex); false = literal; true = regex"
-                }
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "expand_ref",
-        "description": "Expands a previously folded or stashed tool, command, file, or MCP result by its 8-character hex hash anchor (e.g. 'a1b2c3d4' or '#a1b2c3d4'). Returns the full original text that TokenSafe folded.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "hash": {
-                    "type": "string",
-                    "description": "8-character hex hash from the fold marker (e.g. 'a1b2c3d4' or '#a1b2c3d4')"
-                }
-            },
-            "required": ["hash"]
-        }
-    },
-    {
-        "name": "read_web_page",
-        "description": "Fetches a web page URL and converts it to clean, readable Markdown with L1 memory, L2 SQLite (web_cache.db), and L3 Team Sync caching (-80-95% tokens compared to raw HTML, 0ms on cache hits).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "Web URL to fetch and convert to Markdown"
-                },
-                "force_refresh": {
-                    "type": "boolean",
-                    "description": "If true, bypasses L1/L2/L3 cache and fetches fresh page content from network"
-                }
-            },
-            "required": ["url"]
-        }
-    },
-    {
-        "name": "query_dependency",
-        "description": "Fast targeted lookup of a package in project lockfiles (package-lock.json, bun.lock, Cargo.lock, pnpm-lock.yaml) returning exact version and direct dependencies in <20 tokens without dumping massive lockfiles.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "package_name": {
-                    "type": "string",
-                    "description": "Name of the dependency package to inspect (e.g. 'zod', 'react', 'tokio')"
-                },
-                "lockfile_path": {
-                    "type": "string",
-                    "description": "Optional explicit path to lockfile; defaults to nearest lockfile in project"
-                }
-            },
-            "required": ["package_name"]
-        }
-    },
-    {
-        "name": "slice_external_type",
-        "description": "Extracts targeted type signatures, interfaces, or class declarations from 3rd-party library declaration files (.d.ts) in node_modules without directory crawling or reading multi-megabyte bundles.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "package_name": {
-                    "type": "string",
-                    "description": "Name of the npm package (e.g. '@stripe/stripe-js', 'fastify', 'zod')"
-                },
-                "symbol": {
-                    "type": "string",
-                    "description": "Name of the interface, type, or function to extract (e.g. 'Stripe', 'FastifyReply')"
-                },
-                "project_root": {
-                    "type": "string",
-                    "description": "Optional project root directory"
-                }
-            },
-            "required": ["package_name", "symbol"]
-        }
-    },
-    {
-        "name": "optimize_image",
-        "description": "Downscales oversized screenshots/diagrams before passing them to LLM vision endpoints. Resizes images exceeding max_edge (default: 1024px) while preserving aspect ratio and crispness, keeping the original image intact on disk (-50-75% vision tokens).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "image_path": {"type": "string", "description": "Absolute or relative path to the image file"},
-                "max_edge": {"type": "integer", "description": "Maximum width/height in pixels (default: 1024)"}
-            },
-            "required": ["image_path"]
-        }
-    },
-    {
-        "name": "prune_superseded",
-        "description": "Prunes obsolete intermediate tool read outputs in long conversation transcripts that have since been modified by subsequent edits or re-read in later steps (-30-40% context mass).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "transcript_path": {"type": "string", "description": "Path to the JSONL conversation transcript to prune"}
-            },
-            "required": ["transcript_path"]
-        }
-    },
-    {
-        "name": "get_mistakes",
-        "description": "Returns known dead-ends, failed hypotheses, and reverted code changes for this project to prevent repeating unsuccessful approaches.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "project_root": {"type": "string", "description": "Optional project root directory (defaults to current project)"},
-                "clear": {"type": "boolean", "description": "If true, clears the mistakes ledger"}
-            }
-        }
-    },
-    {
-        "name": "oumv_status",
-        "description": "Reports live health and capability status of connected Frontend (tokensafe-ui/React) and Backend (FastAPI/Go/Node) OUMV runtimes.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "workspace_dir": {"type": "string", "description": "Optional workspace root directory"}
-            }
-        }
-    },
-    {
-        "name": "oumv_observe",
-        "description": "Progressive semantic context observation across tokensafe-ui, React 18/19 (Zustand/Redux/Context/useReducer), Vue 3, and Backend (L0 Pulse ~30t, L1 Surface ~150t, L2 Contract ~80t, L3 Source, L4 Traces) without wasting tokens on raw dumps.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "level": {"type": "string", "enum": ["L0", "L1", "L2", "L3", "L4"], "default": "L0", "description": "Observation level (L0: Pulse, L1: Surface, L2: Contract, L3: Source, L4: Traces)"},
-                "target": {"type": "string", "description": "Target component ID, route (e.g. 'POST /api/products'), or DOM element ('#submit-btn')"},
-                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto", "description": "Target runtime (frontend, backend, or auto-detect)"}
-            }
-        }
-    },
-    {
-        "name": "oumv_understand",
-        "description": "Answers 'Why is state X / why is button disabled?' or performs impact analysis by querying runtime signal & causality graph for tokensafe-ui, React, Vue, and Backend services.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "enum": ["causality", "impact", "why_state"], "default": "causality", "description": "Query type (causality, impact, why_state)"},
-                "target": {"type": "string", "description": "Target component ID, state key, endpoint, or UI element"},
-                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto", "description": "Target runtime"}
-            }
-        }
-    },
-    {
-        "name": "oumv_mutate",
-        "description": "Applies Optimistic Concurrency Control (OCC) source edit with Babel AST JSX/TSX syntax guards, TypeScript verification, and secret leak prevention.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path to modify"},
-                "symbol": {"type": "string", "description": "Target symbol to edit"},
-                "replacement": {"type": "string", "description": "Replacement source code"},
-                "expectedVersion": {"type": "string", "description": "Expected version token for optimistic concurrency"},
-                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto"}
-            },
-            "required": ["path"]
-        }
-    },
-    {
-        "name": "oumv_verify",
-        "description": "Instantly verifies actions in memory (UI synthetic actions, React reducers/Zustand/Redux actions, Context updaters, or Backend transactional sandbox) with structured state and surface diffs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Action target (component ID, e.g. 'cart', or 'POST /api/v1/orders' or '#submit-btn')"},
-                "action": {"type": "string", "default": "invoke", "description": "Action name (invoke, click, submit, or store action)"},
-                "payload": {"type": "object", "description": "Request body or action payload"},
-                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto"}
-            },
-            "required": ["target"]
-        }
-    }
-]
+TOOLS = [   {   'annotations': {'readOnlyHint': True},
+        'description': 'AST-skeleton file reader: keeps the target function/class body + 1-line 1-hop dependency '
+                       'signatures, folds inert code (-90-99% tokens). Relative or absolute paths. Schema files '
+                       "(OpenAPI/Prisma/GraphQL/SQL) auto-slice via 'symbol'. For 3+ related symbols use smart_bundle "
+                       'instead.',
+        'inputSchema': {   'properties': {   'dep_mode': {   'description': "'signature' (default) = 1-line dep "
+                                                                            "signatures; 'full' = inline dependency "
+                                                                            'bodies',
+                                                             'enum': ['signature', 'full'],
+                                                             'type': 'string'},
+                                             'end_line': {   'description': 'Optional: ending line number',
+                                                             'type': 'integer'},
+                                             'force_full': {   'description': 'Bypass pointer dedup — use only after '
+                                                                              'context compaction or as a fresh '
+                                                                              'subagent',
+                                                               'type': 'boolean'},
+                                             'include_deps': {   'description': 'Include 1-hop dependency signatures '
+                                                                                '(default true)',
+                                                                 'type': 'boolean'},
+                                             'path': {   'description': 'File path (relative to workspace or absolute)',
+                                                         'type': 'string'},
+                                             'start_line': {   'description': 'Optional: starting line number',
+                                                               'type': 'integer'},
+                                             'symbol': {   'description': 'Optional: function/method/class/component '
+                                                                          'or schema model/type/table to extract (omit '
+                                                                          'for whole-file skeleton)',
+                                                           'type': 'string'}},
+                           'required': ['path'],
+                           'type': 'object'},
+        'name': 'smart_read_file'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Reads 2-8 related symbols across files as ONE merged bundle: per-file skeletons, deduplicated '
+                       'shared imports, merged 1-hop dep signatures. Replaces 3+ separate smart_read_file calls in a '
+                       'single roundtrip.',
+        'inputSchema': {   'properties': {   'dep_mode': {   'description': 'Parity only; bundles always merge '
+                                                                            'signatures',
+                                                             'enum': ['signature', 'full'],
+                                                             'type': 'string'},
+                                             'force_full': {   'description': 'Bypass session pointer dedup',
+                                                               'type': 'boolean'},
+                                             'include_deps': {   'description': 'Include merged 1-hop dep signatures '
+                                                                                '(default true)',
+                                                                 'type': 'boolean'},
+                                             'targets': {   'description': 'Up to 8 {path, symbol} targets; several '
+                                                                           'symbols of one file = separate entries',
+                                                            'items': {   'properties': {   'path': {   'description': 'File '
+                                                                                                                      'path '
+                                                                                                                      '(relative '
+                                                                                                                      'or '
+                                                                                                                      'absolute)',
+                                                                                                       'type': 'string'},
+                                                                                           'symbol': {   'description': 'Optional '
+                                                                                                                        'symbol '
+                                                                                                                        'to '
+                                                                                                                        'keep '
+                                                                                                                        'unfolded',
+                                                                                                         'type': 'string'}},
+                                                                         'required': ['path'],
+                                                                         'type': 'object'},
+                                                            'maxItems': 8,
+                                                            'type': 'array'}},
+                           'required': ['targets'],
+                           'type': 'object'},
+        'name': 'smart_bundle'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Returns top architectural God Nodes and dependency topology for the target project in < 250 '
+                       'tokens without file crawling. Call this BEFORE reading files or searching.',
+        'inputSchema': {   'properties': {   'project_path': {   'description': 'Target project root directory. '
+                                                                                'IMPORTANT: Always pass the absolute '
+                                                                                "directory path (e.g. '/path/to/repo') "
+                                                                                'when working in multi-workspace '
+                                                                                'setups or repositories outside CWD.',
+                                                                 'type': 'string'}},
+                           'type': 'object'},
+        'name': 'get_architecture_graph'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Generates and returns a compact markdown map of all exported interfaces, classes, and types in '
+                       'the project without crawling files.',
+        'inputSchema': {   'properties': {   'project_path': {   'description': 'Target project root directory. '
+                                                                                'IMPORTANT: Always pass the absolute '
+                                                                                "directory path (e.g. '/path/to/repo') "
+                                                                                'when working in multi-workspace '
+                                                                                'setups or repositories outside CWD.',
+                                                                 'type': 'string'}},
+                           'type': 'object'},
+        'name': 'get_api_surface'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Compresses a verbose developer prompt into an ultra-dense TOCP S-Expression via DeepSeek-V3 / '
+                       'Regex.',
+        'inputSchema': {   'properties': {   'prompt': {   'description': 'Natural language request from developer',
+                                                           'type': 'string'}},
+                           'required': ['prompt'],
+                           'type': 'object'},
+        'name': 'compress_prompt'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Context Budget HUD & Context Quality Score (Grade S/A/B/C/F): estimates context window usage, '
+                       'headroom %, static tool/skill tax, and outputs a unified health grade. Call before large '
+                       'multi-step tasks. When warning/critical or Grade C/F, call tokensafe:compact_conversation.',
+        'inputSchema': {   'properties': {   'model': {   'description': 'Optional: model name to resolve window size '
+                                                                         '(default: env TOKENSAFE_CONTEXT_WINDOW or '
+                                                                         '200k)',
+                                                          'type': 'string'},
+                                             'session_id': {   'description': 'Optional: session identifier (default: '
+                                                                              'mcp_session)',
+                                                               'type': 'string'},
+                                             'transcript_path': {   'description': 'Optional: path to the session '
+                                                                                   'JSONL transcript; when provided, '
+                                                                                   'REAL history mass is measured '
+                                                                                   'instead of the instrumented floor '
+                                                                                   '(recommended)',
+                                                                    'type': 'string'},
+                                             'window_tokens': {   'description': 'Optional: explicit context window '
+                                                                                 'size in tokens',
+                                                                  'type': 'integer'}},
+                           'type': 'object'},
+        'name': 'context_budget'},
+    {   'annotations': {'destructiveHint': False, 'readOnlyHint': False},
+        'description': 'On-demand context compaction: folds a long agent conversation transcript into a Consolidated '
+                       'State Ledger with a 3-line Post-Compaction Orientation Digest (Active Goal, Last State, Next '
+                       'Focus) so the agent immediately resumes without losing flow. Use when context_budget reports '
+                       'warning/critical or Grade C/F.',
+        'inputSchema': {   'properties': {   'invocation_num': {   'description': 'Optional: current turn number '
+                                                                                  '(default 3; folding requires >= 3 '
+                                                                                  'turns)',
+                                                                   'type': 'integer'},
+                                             'transcript_path': {   'description': 'Path to the JSONL transcript of '
+                                                                                   'the current session',
+                                                                    'type': 'string'}},
+                           'required': ['transcript_path'],
+                           'type': 'object'},
+        'name': 'compact_conversation'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Per-stage shell command rewrites: prunes lockfiles, caps unbounded git log/show/blame/rg and '
+                       'docker/kubectl logs, strips git push progress animations (--no-progress), wraps git commit '
+                       'with tokensafe wrap when pre-commit/husky hooks exist, and quiets npm/pip installs, bounds '
+                       'cat/curl output. Compound commands (a && b ; c) are optimized per stage without breaking '
+                       'operators. Test commands (bun test, pytest, python -m unittest, vitest, jest) are '
+                       'automatically wrapped or forced into run-once mode (CI=true, --watch=false, --forceExit) so '
+                       'passing suites emit a clean 1-line summary and agents never hang on watch mode. Pass optional '
+                       'cwd for test commands to unlock package.json runner detection for opaque yarn/npm test '
+                       'scripts.',
+        'inputSchema': {   'properties': {   'cmd': {'description': 'Alias for command', 'type': 'string'},
+                                             'command': {'description': 'Raw bash command line', 'type': 'string'},
+                                             'cwd': {   'description': 'Optional working directory the command will '
+                                                                       'run in; enables the package.json peek that '
+                                                                       'identifies the runner behind opaque yarn/npm '
+                                                                       'test scripts',
+                                                        'type': 'string'}},
+                           'type': 'object'},
+        'name': 'sanitize_command'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Slices unified diffs, omitting lockfiles and minimizing context lines to reduce tokens by up '
+                       'to 80%.',
+        'inputSchema': {   'properties': {   'diff': {'description': 'Raw git diff text', 'type': 'string'},
+                                             'max_context': {   'description': 'Maximum surrounding context lines '
+                                                                               '(default: 2)',
+                                                                'type': 'integer'}},
+                           'required': ['diff'],
+                           'type': 'object'},
+        'name': 'slice_diff'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Returns cumulative token and cost savings analytics.',
+        'inputSchema': {'properties': {}, 'type': 'object'},
+        'name': 'get_token_savings_metrics'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Pre-flight security & hygiene audit for commands or code snippets. Detects secret leaks, SQL '
+                       'injection, TLS bypass (incl. git-level), CORS wildcard, destructive commands, raw grep, '
+                       'in-place stream editing (sed -i, perl -i), and never-terminating streams (tail -f, watch, '
+                       'docker attach).',
+        'inputSchema': {   'properties': {   'cmd': {'description': 'Alias for command', 'type': 'string'},
+                                             'code': {   'description': 'Optional: Code snippet, replacement diff, or '
+                                                                        'file content to audit',
+                                                         'type': 'string'},
+                                             'command': {   'description': 'Optional: Terminal command line to audit',
+                                                            'type': 'string'},
+                                             'file_path': {   'description': 'Optional: File path being written or '
+                                                                             'modified',
+                                                              'type': 'string'}},
+                           'type': 'object'},
+        'name': 'guard_inspect'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Returns a clean, token-efficient directory tree up to depth N without permissions, timestamps, '
+                       "or ignored folders (node_modules, .git, dist, .env). Replaces verbose ls -la. Pass '.' for "
+                       "project root or a subfolder like 'src'.",
+        'inputSchema': {   'properties': {   'depth': {   'description': 'Maximum traversal depth (default: 2, max: 4)',
+                                                          'type': 'integer'},
+                                             'max_entries': {   'description': 'Maximum entries to display before '
+                                                                               'pruning (default: 80)',
+                                                                'type': 'integer'},
+                                             'path': {   'description': 'Path to the directory (relative to workspace '
+                                                                        "or absolute, e.g. '.', './src')",
+                                                         'type': 'string'}},
+                           'required': ['path'],
+                           'type': 'object'},
+        'name': 'list_dir'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': "Safe, token-bounded symbol/text search replacing raw grep/find (-90% tokens). '|' or \\d in "
+                       'query auto-enables regex when use_regex is omitted; false forces literal.',
+        'inputSchema': {   'properties': {   'case_sensitive': {   'description': 'Case-sensitive search (default '
+                                                                                  'false)',
+                                                                   'type': 'boolean'},
+                                             'max_results': {   'description': 'Max matching lines (default 25, max '
+                                                                               '100)',
+                                                                'type': 'integer'},
+                                             'path': {   'description': 'Directory to search (alias for project_path; '
+                                                                        'relative or absolute)',
+                                                         'type': 'string'},
+                                             'project_path': {   'description': 'Optional root directory (defaults to '
+                                                                                'current project)',
+                                                                 'type': 'string'},
+                                             'query': {   'description': 'Text, identifier, or symbol name',
+                                                          'type': 'string'},
+                                             'scope': {   'description': "Filter: 'code', 'config', 'all', extension "
+                                                                         "('go', '*.py'), or subfolder "
+                                                                         "('internal/promo') (default 'all')",
+                                                          'type': 'string'},
+                                             'use_regex': {   'description': "Omit = auto-detect ('|', \\d → regex); "
+                                                                             'false = literal; true = regex',
+                                                              'type': 'boolean'}},
+                           'required': ['query'],
+                           'type': 'object'},
+        'name': 'scoped_search'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Expands a previously folded or stashed tool, command, file, or MCP result by its 8-character '
+                       "hex hash anchor (e.g. 'a1b2c3d4' or '#a1b2c3d4'). Returns the full original text that "
+                       'TokenSafe folded.',
+        'inputSchema': {   'properties': {   'hash': {   'description': '8-character hex hash from the fold marker '
+                                                                        "(e.g. 'a1b2c3d4' or '#a1b2c3d4')",
+                                                         'type': 'string'}},
+                           'required': ['hash'],
+                           'type': 'object'},
+        'name': 'expand_ref'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Fetches a web page URL and converts it to clean, readable Markdown with L1 memory, L2 SQLite '
+                       '(web_cache.db), and L3 Team Sync caching (-80-95% tokens compared to raw HTML, 0ms on cache '
+                       'hits).',
+        'inputSchema': {   'properties': {   'force_refresh': {   'description': 'If true, bypasses L1/L2/L3 cache and '
+                                                                                 'fetches fresh page content from '
+                                                                                 'network',
+                                                                  'type': 'boolean'},
+                                             'url': {   'description': 'Web URL to fetch and convert to Markdown',
+                                                        'type': 'string'}},
+                           'required': ['url'],
+                           'type': 'object'},
+        'name': 'read_web_page'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Fast targeted lookup of a package in project lockfiles (package-lock.json, bun.lock, '
+                       'Cargo.lock, pnpm-lock.yaml) returning exact version and direct dependencies in <20 tokens '
+                       'without dumping massive lockfiles.',
+        'inputSchema': {   'properties': {   'lockfile_path': {   'description': 'Optional explicit path to lockfile; '
+                                                                                 'defaults to nearest lockfile in '
+                                                                                 'project',
+                                                                  'type': 'string'},
+                                             'package_name': {   'description': 'Name of the dependency package to '
+                                                                                "inspect (e.g. 'zod', 'react', "
+                                                                                "'tokio')",
+                                                                 'type': 'string'}},
+                           'required': ['package_name'],
+                           'type': 'object'},
+        'name': 'query_dependency'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Extracts targeted type signatures, interfaces, or class declarations from 3rd-party library '
+                       'declaration files (.d.ts) in node_modules without directory crawling or reading multi-megabyte '
+                       'bundles.',
+        'inputSchema': {   'properties': {   'package_name': {   'description': 'Name of the npm package (e.g. '
+                                                                                "'@stripe/stripe-js', 'fastify', "
+                                                                                "'zod')",
+                                                                 'type': 'string'},
+                                             'project_root': {   'description': 'Optional project root directory',
+                                                                 'type': 'string'},
+                                             'symbol': {   'description': 'Name of the interface, type, or function to '
+                                                                          "extract (e.g. 'Stripe', 'FastifyReply')",
+                                                           'type': 'string'}},
+                           'required': ['package_name', 'symbol'],
+                           'type': 'object'},
+        'name': 'slice_external_type'},
+    {   'annotations': {'destructiveHint': False, 'readOnlyHint': False},
+        'description': 'Downscales oversized screenshots/diagrams before passing them to LLM vision endpoints. Resizes '
+                       'images exceeding max_edge (default: 1024px) while preserving aspect ratio and crispness, '
+                       'keeping the original image intact on disk (-50-75% vision tokens).',
+        'inputSchema': {   'properties': {   'image_path': {   'description': 'Absolute or relative path to the image '
+                                                                              'file',
+                                                               'type': 'string'},
+                                             'max_edge': {   'description': 'Maximum width/height in pixels (default: '
+                                                                            '1024)',
+                                                             'type': 'integer'}},
+                           'required': ['image_path'],
+                           'type': 'object'},
+        'name': 'optimize_image'},
+    {   'annotations': {'destructiveHint': False, 'readOnlyHint': False},
+        'description': 'Prunes obsolete intermediate tool read outputs in long conversation transcripts that have '
+                       'since been modified by subsequent edits or re-read in later steps (-30-40% context mass).',
+        'inputSchema': {   'properties': {   'transcript_path': {   'description': 'Path to the JSONL conversation '
+                                                                                   'transcript to prune',
+                                                                    'type': 'string'}},
+                           'required': ['transcript_path'],
+                           'type': 'object'},
+        'name': 'prune_superseded'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Returns known dead-ends, failed hypotheses, and reverted code changes for this project to '
+                       'prevent repeating unsuccessful approaches.',
+        'inputSchema': {   'properties': {   'clear': {   'description': 'If true, clears the mistakes ledger',
+                                                          'type': 'boolean'},
+                                             'project_root': {   'description': 'Optional project root directory '
+                                                                                '(defaults to current project)',
+                                                                 'type': 'string'}},
+                           'type': 'object'},
+        'name': 'get_mistakes'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Reports live health and capability status of connected Frontend (tokensafe-ui/React) and '
+                       'Backend (FastAPI/Go/Node) OUMV runtimes.',
+        'inputSchema': {   'properties': {   'workspace_dir': {   'description': 'Optional workspace root directory',
+                                                                  'type': 'string'}},
+                           'type': 'object'},
+        'name': 'oumv_status'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Progressive semantic context observation across tokensafe-ui, React 18/19 '
+                       '(Zustand/Redux/Context/useReducer), Vue 3, and Backend (L0 Pulse ~30t, L1 Surface ~150t, L2 '
+                       'Contract ~80t, L3 Source, L4 Traces) without wasting tokens on raw dumps.',
+        'inputSchema': {   'properties': {   'level': {   'default': 'L0',
+                                                          'description': 'Observation level (L0: Pulse, L1: Surface, '
+                                                                         'L2: Contract, L3: Source, L4: Traces)',
+                                                          'enum': ['L0', 'L1', 'L2', 'L3', 'L4'],
+                                                          'type': 'string'},
+                                             'runtime': {   'default': 'auto',
+                                                            'description': 'Target runtime (frontend, backend, or '
+                                                                           'auto-detect)',
+                                                            'enum': ['frontend', 'backend', 'auto'],
+                                                            'type': 'string'},
+                                             'target': {   'description': "Target component ID, route (e.g. 'POST "
+                                                                          "/api/products'), or DOM element "
+                                                                          "('#submit-btn')",
+                                                           'type': 'string'}},
+                           'type': 'object'},
+        'name': 'oumv_observe'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': "Answers 'Why is state X / why is button disabled?' or performs impact analysis by querying "
+                       'runtime signal & causality graph for tokensafe-ui, React, Vue, and Backend services.',
+        'inputSchema': {   'properties': {   'query': {   'default': 'causality',
+                                                          'description': 'Query type (causality, impact, why_state)',
+                                                          'enum': ['causality', 'impact', 'why_state'],
+                                                          'type': 'string'},
+                                             'runtime': {   'default': 'auto',
+                                                            'description': 'Target runtime',
+                                                            'enum': ['frontend', 'backend', 'auto'],
+                                                            'type': 'string'},
+                                             'target': {   'description': 'Target component ID, state key, endpoint, '
+                                                                          'or UI element',
+                                                           'type': 'string'}},
+                           'type': 'object'},
+        'name': 'oumv_understand'},
+    {   'annotations': {'destructiveHint': False, 'readOnlyHint': False},
+        'description': 'Applies Optimistic Concurrency Control (OCC) source edit with Babel AST JSX/TSX syntax guards, '
+                       'TypeScript verification, and secret leak prevention.',
+        'inputSchema': {   'properties': {   'expectedVersion': {   'description': 'Expected version token for '
+                                                                                   'optimistic concurrency',
+                                                                    'type': 'string'},
+                                             'path': {'description': 'File path to modify', 'type': 'string'},
+                                             'replacement': {   'description': 'Replacement source code',
+                                                                'type': 'string'},
+                                             'runtime': {   'default': 'auto',
+                                                            'description': "Target runtime environment ('frontend', "
+                                                                           "'backend', or 'auto')",
+                                                            'enum': ['frontend', 'backend', 'auto'],
+                                                            'type': 'string'},
+                                             'symbol': {'description': 'Target symbol to edit', 'type': 'string'}},
+                           'required': ['path'],
+                           'type': 'object'},
+        'name': 'oumv_mutate'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Instantly verifies actions in memory (UI synthetic actions, React reducers/Zustand/Redux '
+                       'actions, Context updaters, or Backend transactional sandbox) with structured state and surface '
+                       'diffs.',
+        'inputSchema': {   'properties': {   'action': {   'default': 'invoke',
+                                                           'description': 'Action name (invoke, click, submit, or '
+                                                                          'store action)',
+                                                           'type': 'string'},
+                                             'payload': {   'description': 'Request body or action payload',
+                                                            'type': 'object'},
+                                             'runtime': {   'default': 'auto',
+                                                            'description': "Target runtime environment ('frontend', "
+                                                                           "'backend', or 'auto')",
+                                                            'enum': ['frontend', 'backend', 'auto'],
+                                                            'type': 'string'},
+                                             'target': {   'description': "Action target (component ID, e.g. 'cart', "
+                                                                          "or 'POST /api/v1/orders' or '#submit-btn')",
+                                                           'type': 'string'}},
+                           'required': ['target'],
+                           'type': 'object'},
+        'name': 'oumv_verify'}]
 
 def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024:
@@ -2233,8 +2251,11 @@ def run_mcp_server():
                 TelemetrySync.sync_background()
             except Exception:
                 pass
+            req_version = str(params.get("protocolVersion") or "")
+            supported_versions = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
+            negotiated_version = req_version if req_version in supported_versions else "2025-06-18"
             response["result"] = {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": negotiated_version,
                 "capabilities": {"tools": {}},
                 "serverInfo": SERVER_INFO
             }
