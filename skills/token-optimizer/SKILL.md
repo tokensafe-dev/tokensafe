@@ -1,18 +1,18 @@
 ---
 name: token-optimizer
 description: >-
-  MANDATORY code inspection and architecture navigation skill.
+  MANDATORY code inspection, architecture navigation, and live runtime verification skill.
   Activate whenever inspecting files, searching code, locating components/functions/classes,
-  reading implementations, analyzing dependencies, or navigating codebase architecture.
-  Replaces wasteful terminal grep/find with zero-loss AST smart slicing (-90% tokens),
-  extracts definitions with 1-hop dependencies, enforces security guards, and tracks token efficiency metrics.
+  reading implementations, analyzing dependencies, navigating architecture, or interacting with live systems.
+  Replaces wasteful terminal grep/find with zero-loss AST smart slicing (-90% tokens) and enables
+  OUMV (Observe, Understand, Mutate, Verify) runtime verification across frontend and backend dev-servers.
 ---
 
-# TokenSafe Optimization & Architecture Intelligence Skill
+# TokenSafe Optimization, Architecture & OUMV Runtime Skill
 
-TokenSafe is the zero-loss token economy, context governor, and security engine for autonomous AI coding agents.
+TokenSafe is the zero-loss token economy, context governor, security engine, and runtime verification layer for autonomous AI coding agents.
 It replaces brute-force terminal crawls (`grep`, `find`, `cat`) with deterministic AST symbol extraction,
-folds multi-turn conversation history, slices verbose tool outputs, and guards against secret leaks and destructive actions.
+folds multi-turn conversation history, guards against secret leaks, and standardizes live runtime interaction via the **Universal OUMV Protocol (UARP)**.
 
 ---
 
@@ -120,6 +120,37 @@ TokenSafe actively maximizes provider KV-cache hit rates alongside token compres
 2. **Multi-Breakpoint Cache Control**: `PromptCacheNormalizer` sorts `tools` deterministically and places Anthropic `cache_control: {"type": "ephemeral"}` across tools, static system instructions, and the penultimate completed turn; OpenAI requests receive deterministic `prompt_cache_key`.
 3. **Deterministic Prefix Normalization**: Ephemeral timestamps, hit counters, and session IDs are stripped from static prefixes, and `AgentFirewall` headers remain byte-deterministic across hits.
 4. **Parametric Prompt Template Caching**: `DistillationCache` extracts file paths and symbols into positional slots (`<FILE_0>`, `<SYM_0>`) so structurally identical prompts hit L1/L2/L3 caches with 0 LLM roundtrips.
+
+---
+
+## Universal OUMV Protocol (Runtime Introspection & Verification)
+
+TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to inspect, reason about, edit, and verify running Frontend and Backend services in real time without heavy headless browsers or unconstrained shell curls:
+
+1. **LIVE RUNTIME HEALTH (`oumv_status`)**:
+   - Call `tokensafe:oumv_status()` to inspect connection status and capabilities of running DevServers (Frontend ports 5173/3000, Backend ports 8080/8000).
+
+2. **PROGRESSIVE CONTEXT OBSERVATION (`oumv_observe`)**:
+   - Never dump raw HTML or giant JSON payloads. Observe progressively:
+     - **L0 (Page Pulse ~20 tokens)**: Status, active route, error counts (`level="L0"`).
+     - **L1 (Surface ~150 tokens)**: Interactive map of endpoints, models, buttons, and ARIA roles (`level="L1"`).
+     - **L2 (Contract ~80 tokens)**: Targeted component props or API DTO schemas (`level="L2", target="ModelName"`).
+     - **L3 (Source)**: Targeted symbol source with line mapping.
+     - **L4 (Traces)**: Event stream, signal mutations, and state snapshot.
+
+3. **RUNTIME CAUSALITY & WHY-STATE (`oumv_understand`)**:
+   - Never guess state flows or assume dependencies.
+   - Call `tokensafe:oumv_understand(query="causality", target="POST /api/orders")` to query live dependencies:
+     `Route ➔ Handler ➔ ValidatesWith ➔ Model ➔ DB Table` or `Signal ➔ Computed ➔ Effect ➔ DOM Binding`.
+   - Call `tokensafe:oumv_understand(query="impact", target="model:User")` before refactoring to know exactly what breaks.
+
+4. **SANDBOXED ACTION VERIFICATION (`oumv_verify`)**:
+   - Sub-millisecond to low-millisecond local action verification inside transactional sandbox.
+   - For backend endpoints: call `tokensafe:oumv_verify(target="POST /api/products", payload={...})` — executes the request in-memory with automatic database rollback (`rolledBack: true`) and returns structured state diffs (`diff`) and HTTP status code.
+   - For frontend UI: verifies synthetic events and accessibility surface diffs without spawning browser automation.
+
+5. **OPTIMISTIC CONCURRENCY MUTATIONS (`oumv_mutate`)**:
+   - Submits surgical edits verified against `expectedVersion` with built-in syntax and security leak guards.
 
 ---
 

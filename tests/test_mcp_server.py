@@ -13,9 +13,10 @@ class TestMCPServer(unittest.TestCase):
             "compress_prompt", "context_budget", "compact_conversation", "sanitize_command",
             "slice_diff", "get_token_savings_metrics", "guard_inspect", "list_dir",
             "scoped_search", "read_web_page", "expand_ref", "optimize_image",
-            "prune_superseded", "get_mistakes", "query_dependency", "slice_external_type"
+            "prune_superseded", "get_mistakes", "query_dependency", "slice_external_type",
+            "oumv_status", "oumv_observe", "oumv_understand", "oumv_mutate", "oumv_verify"
         ]
-        self.assertEqual(len(tool_names), 20)
+        self.assertEqual(len(tool_names), 25)
         for t in expected_tools:
             self.assertIn(t, tool_names)
             # Verify each tool schema has name, description, inputSchema

@@ -384,6 +384,69 @@ TOOLS = [
                 "clear": {"type": "boolean", "description": "If true, clears the mistakes ledger"}
             }
         }
+    },
+    {
+        "name": "oumv_status",
+        "description": "Reports live health and capability status of connected Frontend (tokensafe-ui/React) and Backend (FastAPI/Go/Node) OUMV runtimes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_dir": {"type": "string", "description": "Optional workspace root directory"}
+            }
+        }
+    },
+    {
+        "name": "oumv_observe",
+        "description": "Progressive semantic context observation (L0 Pulse ~30 tokens, L1 Surface ~150 tokens, L2 Contract ~80 tokens, L3 Source, L4 Traces) without wasting tokens on raw dumps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "enum": ["L0", "L1", "L2", "L3", "L4"], "default": "L0", "description": "Observation level (L0: Pulse, L1: Surface, L2: Contract, L3: Source, L4: Traces)"},
+                "target": {"type": "string", "description": "Target route (e.g. 'POST /api/products'), DOM element ('#submit-btn'), or symbol"},
+                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto", "description": "Target runtime (frontend, backend, or auto-detect)"}
+            }
+        }
+    },
+    {
+        "name": "oumv_understand",
+        "description": "Answers 'Why is state X / why is button disabled?' or performs impact analysis by querying runtime signal & causality graph.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "enum": ["causality", "impact", "why_state"], "default": "causality", "description": "Query type (causality, impact, why_state)"},
+                "target": {"type": "string", "description": "Target endpoint (e.g. 'POST /api/products') or UI element ('#submit-btn')"},
+                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto", "description": "Target runtime"}
+            }
+        }
+    },
+    {
+        "name": "oumv_mutate",
+        "description": "Applies Optimistic Concurrency Control (OCC) source edit or simulates state mutations with syntax & security guards.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to modify"},
+                "symbol": {"type": "string", "description": "Target symbol to edit"},
+                "replacement": {"type": "string", "description": "Replacement source code"},
+                "expectedVersion": {"type": "string", "description": "Expected version token for optimistic concurrency"},
+                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto"}
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "oumv_verify",
+        "description": "Instantly verifies actions in memory (UI synthetic actions or Backend HTTP/DB transactional sandbox) with structured state diffs and rollback.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Action target (e.g. 'POST /api/v1/orders' or '#submit-btn')"},
+                "action": {"type": "string", "default": "invoke", "description": "Action name (invoke, click, submit)"},
+                "payload": {"type": "object", "description": "Request body or action payload"},
+                "runtime": {"type": "string", "enum": ["frontend", "backend", "auto"], "default": "auto"}
+            },
+            "required": ["target"]
+        }
     }
 ]
 
@@ -1976,6 +2039,62 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             }, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("get_mistakes", f"error reading mistakes ledger: {e}")
+
+    elif name == "oumv_status":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            ws = str(args.get("workspace_dir") or "").strip() or None
+            res = OUMVGateway.status(workspace_dir=ws)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_status", f"failed to check OUMV status: {e}")
+
+    elif name == "oumv_observe":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            lvl = str(args.get("level") or "L0").strip()
+            tgt = str(args.get("target") or "").strip() or None
+            rt = str(args.get("runtime") or "auto").strip()
+            res = OUMVGateway.observe(level=lvl, target=tgt, runtime=rt)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_observe", f"failed to observe OUMV runtime: {e}")
+
+    elif name == "oumv_understand":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            qry = str(args.get("query") or "causality").strip()
+            tgt = str(args.get("target") or "").strip() or None
+            rt = str(args.get("runtime") or "auto").strip()
+            res = OUMVGateway.understand(query=qry, target=tgt, runtime=rt)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_understand", f"failed to query OUMV understanding: {e}")
+
+    elif name == "oumv_mutate":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            p = str(args.get("path") or "").strip()
+            sym = str(args.get("symbol") or "").strip() or None
+            rep = args.get("replacement")
+            ev = str(args.get("expectedVersion") or "").strip() or None
+            rt = str(args.get("runtime") or "auto").strip()
+            res = OUMVGateway.mutate(path=p, symbol=sym, replacement=rep, expected_version=ev, runtime=rt)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_mutate", f"failed to apply OUMV mutation: {e}")
+
+    elif name == "oumv_verify":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            tgt = str(args.get("target") or "").strip()
+            act = str(args.get("action") or "invoke").strip()
+            payload = args.get("payload") if isinstance(args.get("payload"), dict) else None
+            rt = str(args.get("runtime") or "auto").strip()
+            res = OUMVGateway.verify(target=tgt, action=act, payload=payload, runtime=rt)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_verify", f"failed to execute OUMV verification: {e}")
 
     return _fallback_error(name, f"unknown tool '{name}'")
 

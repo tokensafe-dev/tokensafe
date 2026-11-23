@@ -64,6 +64,7 @@ UNIFIED_TOKENSAFE_RULE = (
     "At the end of your response for any turn where tools were executed, files were inspected, commands were sanitized, or prompts were compacted, append a compact 1-line footer. The ENTIRE footer is product-facing copy — 100% English, including the savings breakdown in parentheses, regardless of the chat language:\n"
     "`⚡ **TokenSafe Turn Savings**: +<tokens> tokens saved on this turn (<breakdown in English>) | Cumulative Total: <total> tokens (≈$<usd> approx)`\n"
     "13. **External Types & Lockfile Point Queries**: Use `tokensafe:slice_external_type(package_name, type_name)` to extract 3rd-party TypeScript interfaces from `node_modules` without crawling directories (-95% tokens, L1/L2/L3 cached). Use `tokensafe:query_dependency(lockfile_path, package_name)` for instant lockfile point lookups in <50 tokens; raw `read_file` on lockfiles without bounds is redirected to an index summary.\n"
+    "14. **Universal OUMV Protocol (Runtime Introspection & Verification)**: For live Frontend (ports 5173/3000) and Backend (ports 8080/8000) services, inspect connectivity via `tokensafe:oumv_status()`. Observe state progressively: `tokensafe:oumv_observe(level='L0')` for pulse (~20 tokens), `L1` for endpoints/models surface (~150 tokens), `L2` for target contracts or DTO schemas. Never guess state flows — query runtime causality via `tokensafe:oumv_understand(query='causality')` or `why_state`. Verify actions in-memory inside transactional sandboxes with automatic DB rollback via `tokensafe:oumv_verify(target='POST /api/...', payload={...})` instead of heavy browser runs or blind shell curls.\n"
 )
 
 # Short pointer written into PROJECT-level rule files when the full protocol is
@@ -71,11 +72,12 @@ UNIFIED_TOKENSAFE_RULE = (
 # Keeps every session's meta-context lean: ~110 tokens instead of ~850.
 POINTER_RULE = (
     "## TOKENSAFE GRAPH-FIRST OPTIMIZATION PROTOCOL\n"
-    "The full 13-point protocol is installed globally in the agent-level instructions "
+    "The full 14-point protocol is installed globally in the agent-level instructions "
     "(~/.zcode/AGENTS.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.kimi-code/AGENTS.md) and applies to this project. "
     "Core rules: never raw grep/find or `ls -la` — use `tokensafe:get_architecture_graph(project_path)` first for God Nodes, "
     "`tokensafe:scoped_search`, `tokensafe:smart_read_file(path, symbol)`, `tokensafe:slice_external_type`, `tokensafe:query_dependency`, "
     "`tokensafe:smart_bundle` and `tokensafe:list_dir`; "
+    "use `tokensafe:oumv_status`, `tokensafe:oumv_observe(L0/L1/L2)`, `tokensafe:oumv_understand` and `tokensafe:oumv_verify` for live runtime introspection; "
     "sanitize high-output commands via `tokensafe:sanitize_command`; check `tokensafe:context_budget` (Grade S-F) "
     "before large tasks and compact via `tokensafe:compact_conversation` (orientation digest active); never hardcode secret "
     "fallbacks; append the `⚡ TokenSafe Turn Savings` footer on tool-using turns.\n"
@@ -1241,10 +1243,7 @@ WantedBy=default.target
                 "command": PYTHON_BIN,
                 "args": [MCP_SERVER_PATH]
             }
-            data["mcpServers"]["tokensafe-mcp"] = {
-                "command": "npx",
-                "args": ["-y", "tokensafe-mcp"]
-            }
+            data["mcpServers"].pop("tokensafe-mcp", None)
 
             cls._atomic_write_json(config_file, data)
 
@@ -1286,10 +1285,7 @@ WantedBy=default.target
                 "command": PYTHON_BIN,
                 "args": [MCP_SERVER_PATH]
             }
-            data["mcpServers"]["tokensafe-mcp"] = {
-                "command": "npx",
-                "args": ["-y", "tokensafe-mcp"]
-            }
+            data["mcpServers"].pop("tokensafe-mcp", None)
 
             cls._atomic_write_json(config_file, data)
 
@@ -1358,10 +1354,7 @@ WantedBy=default.target
                     "command": PYTHON_BIN,
                     "args": [MCP_SERVER_PATH]
                 }
-                data["mcpServers"]["tokensafe-mcp"] = {
-                    "command": "npx",
-                    "args": ["-y", "tokensafe-mcp"]
-                }
+                data["mcpServers"].pop("tokensafe-mcp", None)
                 cls._atomic_write_json(config_file, data)
 
             if "agents_md_path" in info:
@@ -1386,12 +1379,7 @@ WantedBy=default.target
                 "args": [MCP_SERVER_PATH],
                 "tools": ["*"]
             }
-            data["mcpServers"]["tokensafe-mcp"] = {
-                "type": "stdio",
-                "command": "npx",
-                "args": ["-y", "tokensafe-mcp"],
-                "tools": ["*"]
-            }
+            data["mcpServers"].pop("tokensafe-mcp", None)
             cls._atomic_write_json(config_file, data)
             return True, f"Configured MCP for GitHub Copilot in {config_file}"
 
@@ -1412,10 +1400,7 @@ WantedBy=default.target
                 "command": PYTHON_BIN,
                 "args": [MCP_SERVER_PATH]
             }
-            data["mcp"]["servers"]["tokensafe-mcp"] = {
-                "command": "npx",
-                "args": ["-y", "tokensafe-mcp"]
-            }
+            data["mcp"]["servers"].pop("tokensafe-mcp", None)
 
             cls._atomic_write_json(config_file, data)
 
@@ -1443,10 +1428,7 @@ WantedBy=default.target
                     "command": PYTHON_BIN,
                     "args": [MCP_SERVER_PATH]
                 }
-                data["mcpServers"]["tokensafe-mcp"] = {
-                    "command": "npx",
-                    "args": ["-y", "tokensafe-mcp"]
-                }
+                data["mcpServers"].pop("tokensafe-mcp", None)
                 cls._atomic_write_json(mcp_file, data)
 
             managed_plugin_path = info.get("managed_plugin_path")
@@ -1940,10 +1922,7 @@ WantedBy=default.target
                         "command": PYTHON_BIN,
                         "args": [MCP_SERVER_PATH]
                     }
-                    data["mcpServers"]["tokensafe-mcp"] = {
-                        "command": "npx",
-                        "args": ["-y", "tokensafe-mcp"]
-                    }
+                    data["mcpServers"].pop("tokensafe-mcp", None)
                     cls._atomic_write_json(cursor_mcp, data)
                     created.append(".cursor/mcp.json")
         except Exception:

@@ -6,13 +6,6 @@
         "-c",
         "exec \"${TOKENSAFE_PYTHON:-python3}\" \"$PLUGIN_ROOT/src/mcp_server.py\""
       ]
-    },
-    "tokensafe-mcp": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "tokensafe-mcp"
-      ]
     }
   }
 }
