@@ -83,6 +83,21 @@ class VersionChecker:
         except Exception:
             return None
 
+    @staticmethod
+    def parse_semver(v: str) -> Tuple[int, int, int]:
+        """Parses a version string into a (major, minor, patch) integer tuple."""
+        clean = str(v or "").strip().lstrip("v")
+        parts = re.findall(r"\d+", clean)
+        nums = [int(p) for p in parts[:3]]
+        while len(nums) < 3:
+            nums.append(0)
+        return (nums[0], nums[1], nums[2])
+
+    @classmethod
+    def is_newer_version(cls, candidate: str, current: str) -> bool:
+        """Returns True strictly when candidate is semantically strictly greater than current."""
+        return cls.parse_semver(candidate) > cls.parse_semver(current)
+
     @classmethod
     def save_cache(cls, data: Dict[str, Any]):
         cache_path = cls.get_cache_path()
@@ -159,6 +174,13 @@ class VersionChecker:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     data["checked_at"] = now
+                    # Guarantee client_version is recorded in cache
+                    if not data.get("client_version"):
+                        data["client_version"] = current_version
+                    # Sanity check: never report an update if latest is not strictly newer
+                    latest_ver = data.get("latest_version", current_version)
+                    if data.get("update_available") and not cls.is_newer_version(latest_ver, current_version):
+                        data["update_available"] = False
                     # TS1 sunset: transparently swap in the reissued TS2 key.
                     # Never persist the key inside version_cache.json — it is a secret.
                     reissued = data.pop("reissued_license_key", "")
@@ -168,6 +190,11 @@ class VersionChecker:
                             LicenseManager.save_license(reissued)
                         except Exception:
                             pass
+                    # Preserve last OS notification timestamps across cache refreshes
+                    if cached and cls._cache_matches_version(cached, current_version):
+                        for k in ("last_os_notify_version", "last_os_notify_at"):
+                            if k in cached and k not in data:
+                                data[k] = cached[k]
                     data.pop("ttl", None)  # authoritative server answer: full 24h cache
                     cls.save_cache(data)
                     return data
@@ -203,6 +230,11 @@ class VersionChecker:
         update_available = info.get("update_available", False)
         latest = info.get("latest_version", current_version)
         cmd = info.get("update_command", "tokensafe update")
+
+        # Sanity check: never show banner for downgrade or equal version
+        if update_available and not cls.is_newer_version(latest, current_version):
+            update_available = False
+            force_update = False
 
         if force_update:
             return (
@@ -357,6 +389,10 @@ class VersionChecker:
         latest = info.get("latest_version", current_version)
         cmd = info.get("update_command", "tokensafe update")
 
+        # Sanity check: never notify if latest is not strictly newer (prevents downgrades)
+        if not cls.is_newer_version(latest, current_version) and not force:
+            return False
+
         if not update_available and not force:
             return False
 
@@ -426,10 +462,10 @@ class VersionChecker:
             last_notified_ver = cached.get("last_os_notify_version", "")
             last_notified_at = cached.get("last_os_notify_at", 0)
 
-            # If cache is valid and no update is available, skip completely
+            # If cache is valid and no update is available (or latest is <= current), skip completely
             # (ttl-aware: offline fallback entries expire after FALLBACK_CACHE_TTL)
             ttl = int(cached.get("ttl", CACHE_TTL))
-            if now - checked_at < ttl and not update_available:
+            if now - checked_at < ttl and (not update_available or not cls.is_newer_version(latest, current_version)):
                 return
 
             # If update is available but user was already notified within 24h, skip

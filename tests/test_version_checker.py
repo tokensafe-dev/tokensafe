@@ -235,6 +235,56 @@ class TestVersionChecker(unittest.TestCase):
             VersionChecker.notify_os_update_background(current_version="2.4.2", force=False)
             self.assertTrue(mock_popen.called)
 
+    def test_downgrade_rejected_and_sanity_check(self):
+        """Sanity check: older versions returned as latest must never trigger updates or OS dialogs."""
+        from unittest.mock import patch, MagicMock
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({
+            "ok": True,
+            "latest_version": "4.4.3",
+            "update_available": True
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            info = VersionChecker.check_version(current_version="4.4.8", force_fetch=True)
+            self.assertFalse(info["update_available"])
+            self.assertEqual(info["client_version"], "4.4.8")
+
+        # notify_os_update should not show dialog for older version
+        with patch.object(VersionChecker, "show_os_dialog") as mock_dialog:
+            notified = VersionChecker.notify_os_update(current_version="4.4.8", force=False)
+            self.assertFalse(notified)
+            self.assertFalse(mock_dialog.called)
+
+    def test_notification_metadata_preserved_across_cache_refresh(self):
+        """Ensures last_os_notify_at is not erased when check_version fetches fresh data."""
+        from unittest.mock import patch, MagicMock
+        now = int(time.time())
+        VersionChecker.save_cache({
+            "checked_at": now - 3600,
+            "client_version": "4.4.8",
+            "latest_version": "4.5.0",
+            "update_available": True,
+            "last_os_notify_version": "4.5.0",
+            "last_os_notify_at": now - 3600
+        })
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({
+            "ok": True,
+            "latest_version": "4.5.0",
+            "update_available": True
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            info = VersionChecker.check_version(current_version="4.4.8", force_fetch=True)
+            self.assertEqual(info.get("last_os_notify_version"), "4.5.0")
+            self.assertEqual(info.get("last_os_notify_at"), now - 3600)
+
 
 if __name__ == "__main__":
     unittest.main()
