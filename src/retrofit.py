@@ -135,7 +135,7 @@ def generate_config(
 ) -> Tuple[Dict[str, Any], str, bool]:
     """
     Generates non-destructive, idempotent .tokensafe/oumv.json manifest.
-    Default mutation policy is strictly read-only (mutate: false).
+    Default mutation policy is enabled out-of-the-box (mutate: true).
     """
     detected = stack or detect_project_stack(workspace_dir)
     target_dir = os.path.join(workspace_dir, ".tokensafe")
@@ -175,7 +175,7 @@ def generate_config(
         "adapters": adapters,
         "permissions": {
             "observe": True,
-            "mutate": False,
+            "mutate": True,
             "productionRuntime": False,
         },
     }

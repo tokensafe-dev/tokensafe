@@ -335,29 +335,63 @@ class OUMVGateway:
     # 4. Tool: oumv_mutate
     @classmethod
     def mutate(cls, path: str, symbol: Optional[str] = None, replacement: Optional[str] = None, expected_version: Optional[str] = None, runtime: str = "auto") -> Any:
-        # Check workspace permissions
+        # Check workspace permissions (enabled by default out-of-the-box unless explicitly opted out)
         ws = get_active_workspace()
         cfg_file = os.path.join(ws, ".tokensafe", "oumv.json")
         if os.path.isfile(cfg_file):
             try:
                 with open(cfg_file, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-                if not cfg.get("permissions", {}).get("mutate", False):
-                    raise RuntimeError("[OUMV PERMISSION_DENIED: -32007] Workspace policy prohibits mutations (.tokensafe/oumv.json: permissions.mutate=false). Set mutate: true to allow agent edits.")
+                perms = cfg.get("permissions", {})
+                if perms.get("mutate") is False:
+                    raise RuntimeError("[OUMV PERMISSION_DENIED: -32007] Workspace policy explicitly prohibits mutations (.tokensafe/oumv.json: permissions.mutate=false).")
             except RuntimeError:
                 raise
             except Exception:
                 pass
 
-        url = cls._resolve_client_url(runtime=runtime, target=path)
-        return cls._rpc_call(url, "oumv/applyEdit", {
-            "path": path,
-            "filePath": path,
-            "symbol": symbol,
-            "replacement": replacement,
-            "source": replacement,
-            "expectedVersion": expected_version,
-        })
+        try:
+            url = cls._resolve_client_url(runtime=runtime, target=path)
+            return cls._rpc_call(url, "oumv/applyEdit", {
+                "path": path,
+                "filePath": path,
+                "symbol": symbol,
+                "replacement": replacement,
+                "source": replacement,
+                "expectedVersion": expected_version,
+            })
+        except RuntimeError as e:
+            # Out-of-the-box direct fallback when live dev-servers are offline
+            if replacement is not None:
+                abs_path = os.path.normpath(os.path.join(ws, path))
+                # Validate workspace boundary
+                if not abs_path.startswith(os.path.abspath(ws)):
+                    raise RuntimeError(f"[OUMV SECURITY_VIOLATION: -32003] Path traversal blocked: {path}")
+
+                import hashlib
+                current_version = None
+                if os.path.isfile(abs_path):
+                    with open(abs_path, "rb") as f:
+                        content = f.read()
+                    current_version = "sha256:" + hashlib.sha256(content).hexdigest()
+
+                if expected_version and current_version and expected_version != current_version:
+                    raise RuntimeError(f"[OUMV CONFLICT: -32001] OCC version mismatch: expected {expected_version}, current is {current_version}")
+
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.write(replacement)
+
+                new_version = "sha256:" + hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+                return {
+                    "success": True,
+                    "path": path,
+                    "symbol": symbol,
+                    "newVersion": new_version,
+                    "mode": "OUT_OF_THE_BOX_DIRECT_EDIT",
+                    "message": "Surgical edit applied directly to workspace file (dev-server offline)",
+                }
+            raise
 
     # 5. Tool: oumv_verify
     @classmethod

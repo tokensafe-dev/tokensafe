@@ -85,6 +85,32 @@ class TestOUMVGateway(unittest.TestCase):
         self.assertEqual(res["statusCode"], 201)
         self.assertTrue(res["rolledBack"])
 
+    def test_mutate_out_of_the_box_direct_edit(self):
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            file_path = "src/hello.py"
+            full_path = os.path.join(self.test_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write("def hello(): return 'old'")
+
+            # Out-of-the-box edit without .tokensafe/oumv.json and with devserver offline
+            res = OUMVGateway.mutate(path=file_path, replacement="def hello(): return 'new'")
+            self.assertTrue(res["success"])
+            self.assertEqual(res["mode"], "OUT_OF_THE_BOX_DIRECT_EDIT")
+            with open(full_path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "def hello(): return 'new'")
+
+    def test_mutate_blocked_only_on_explicit_opt_out(self):
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            cfg_dir = os.path.join(self.test_dir, ".tokensafe")
+            os.makedirs(cfg_dir, exist_ok=True)
+            with open(os.path.join(cfg_dir, "oumv.json"), "w", encoding="utf-8") as f:
+                json.dump({"permissions": {"mutate": False}}, f)
+
+            with self.assertRaises(RuntimeError) as cm:
+                OUMVGateway.mutate(path="test.py", replacement="foo")
+            self.assertIn("-32007", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

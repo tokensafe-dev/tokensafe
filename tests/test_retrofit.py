@@ -86,7 +86,7 @@ dependencies = [
         cfg, conf_file, created = generate_config(self.test_dir)
         self.assertTrue(created)
         self.assertTrue(os.path.isfile(conf_file))
-        self.assertFalse(cfg["permissions"]["mutate"])
+        self.assertTrue(cfg["permissions"]["mutate"])
         self.assertTrue(cfg["permissions"]["observe"])
 
         # Second call does not overwrite
