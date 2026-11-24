@@ -895,15 +895,14 @@ def run_release(target: str, otp: Optional[str] = None, no_bump: bool = False, s
                 ok_c, msg_c, cloud_head_sha = sync_and_push_cloud_repo(cloud_root, next_v)
                 if ok_c:
                     print(f"  ✔ tokensafe-cloud {msg_c} ({(cloud_head_sha or '')[:7]})")
-                    # Trigger backend deploy workflow via GitHub Actions (packages: write)
-                    print("  🚀 Dispatching backend deploy workflow in tokensafe-cloud...")
-                    wf_code, wf_out = _sh(["gh", "workflow", "run", "deploy-backend.yml",
-                                           "--repo", "tokensafe-dev/tokensafe-cloud"], timeout=30)
+                    # Trigger API deploy workflow in tokensafe-api (Go backend on Bunny Magic Containers)
+                    print("  🚀 Dispatching Go backend deploy workflow in tokensafe-api...")
+                    wf_code, wf_out = _sh(["gh", "workflow", "run", "deploy.yml",
+                                           "--repo", "tokensafe-dev/tokensafe-api"], timeout=30)
                     if wf_code == 0:
-                        print("  ✔ backend deploy workflow dispatched (deploy-backend.yml)")
+                        print("  ✔ tokensafe-api deploy workflow dispatched (deploy.yml)")
                     else:
-                        print(f"  ⚠ could not dispatch deploy-backend.yml automatically: {wf_out.strip()[:100]}")
-                        print("    Run manually: gh workflow run deploy-backend.yml --repo tokensafe-dev/tokensafe-cloud")
+                        print(f"  ⚠ could not dispatch tokensafe-api deploy.yml: {wf_out.strip()[:100]}")
                     print("  ℹ Frontend deploy reminder: if frontend/ copy/landing changed, run: cd frontend && bun run deploy")
                 else:
                     print(f"  ⚠ tokensafe-cloud sync failed: {msg_c}")
