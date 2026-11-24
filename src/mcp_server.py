@@ -610,17 +610,17 @@ def _resolve_project_root(args: dict) -> Tuple[Optional[str], Optional[str]]:
             return None, f"Error: project_path not found or not a directory: '{target}'."
         return target_abs, None
 
+    # Check active workspace recorded by lifecycle hooks
+    if active_ws and not is_plugin_or_system_dir(active_ws) and os.path.isdir(active_ws):
+        return active_ws, None
+
     # Check environment variables
-    for env_var in ("AGY_PROJECT_PATH", "WORKSPACE_FOLDER", "PROJECT_DIR", "PWD"):
+    for env_var in ("AGY_PROJECT_PATH", "WORKSPACE_FOLDER", "PROJECT_DIR"):
         candidate = os.environ.get(env_var)
         if candidate:
             cand_abs = os.path.abspath(candidate)
             if not is_plugin_or_system_dir(cand_abs) and os.path.isdir(cand_abs):
                 return cand_abs, None
-
-    # Check active workspace recorded by lifecycle hooks
-    if active_ws and not is_plugin_or_system_dir(active_ws) and os.path.isdir(active_ws):
-        return active_ws, None
 
     # Check cwd (only if it is not inside an agent plugin or system root directory)
     cwd = os.getcwd()
