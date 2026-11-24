@@ -425,69 +425,57 @@ def npm_publish_with_auth(otp: Optional[str] = None) -> Tuple[int, str, str]:
     return code, out, "local"
 
 
-def resolve_cloud_repo() -> Optional[str]:
-    """Locates the sibling tokensafe-cloud checkout for automatic post-PyPI sync."""
+def resolve_api_repo() -> Optional[str]:
+    """Locates the sibling tokensafe-api checkout for automatic post-release sync."""
     candidates = [
-        os.environ.get("TOKENSAFE_CLOUD_DIR", "").strip(),
-        os.path.join(os.path.dirname(PROJECT_ROOT), "tokensafe-cloud"),
+        os.environ.get("TOKENSAFE_API_DIR", "").strip(),
+        os.path.join(os.path.dirname(PROJECT_ROOT), "tokensafe-api"),
     ]
     for path in candidates:
-        if path and os.path.isdir(os.path.join(path, ".git")) and os.path.exists(os.path.join(path, "src", "cloud", "config.py")):
+        if path and os.path.isdir(os.path.join(path, ".git")) and os.path.exists(os.path.join(path, "pkg", "config", "config.go")):
             return os.path.abspath(path)
     return None
 
 
-def wait_for_pypi_simple(version: str, attempts: int = 18, delay: int = 10) -> bool:
-    """Waits for PyPI's Simple Index CDN to serve `version` before triggering cloud CI/Docker builds."""
-    import urllib.request
-    found = False
-    for _ in range(attempts):
-        try:
-            req = urllib.request.Request("https://pypi.org/simple/tokensafe/", headers={"Cache-Control": "no-cache"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                body = r.read().decode("utf-8", errors="ignore")
-            if version in body:
-                found = True
-                break
-        except Exception:
-            pass
-        time.sleep(delay)
-    if found:
-        # Give global Fastly CDN edges across AWS/Azure data centers 30s to replicate before Docker builds run
-        time.sleep(30)
-        return True
-    return False
+def update_api_repo_version(api_root: str, next_v: str) -> None:
+    """Updates HardcodedVersion in tokensafe-api/pkg/config/config.go to `next_v`."""
+    replace_in_file(
+        "pkg/config/config.go",
+        r'(HardcodedVersion\s*=\s*)"[^"]+"',
+        rf'\g<1>"{next_v}"',
+        root_dir=api_root,
+    )
 
 
 def update_cloud_repo_version(cloud_root: str, next_v: str) -> None:
-    """Updates all version pins & manifests inside tokensafe-cloud to `next_v`."""
+    """Legacy helper: updates all version pins & manifests inside tokensafe-cloud to `next_v`."""
     replace_in_file(
         "src/cloud/config.py",
         r'(HARDCODED_VERSION\s*=\s*)"[^"]+"',
         rf'\g<1>"{next_v}"',
         root_dir=cloud_root,
+        optional=True,
     )
-    # Upper bound must track the NEW major (>=3.0.0,<4) — a hardcoded ",<3"
-    # would make the constraint empty after a major bump (3.0.0 excluded by
-    # its own cap; v3.0.0 cloud CI/deploy failure on 2026-11-14).
     _client_upper = int(next_v.split(".")[0]) + 1
     replace_in_file(
         "Dockerfile.cloud",
         r'tokensafe>=[0-9]+\.[0-9]+\.[0-9]+,<\d+',
         f"tokensafe>={next_v},<{_client_upper}",
         root_dir=cloud_root,
+        optional=True,
     )
     replace_in_file(
         ".github/workflows/test.yml",
         r'tokensafe>=[0-9]+\.[0-9]+\.[0-9]+,<\d+',
         f"tokensafe>={next_v},<{_client_upper}",
         root_dir=cloud_root,
+        optional=True,
     )
-    replace_in_file("package.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root)
-    replace_in_file("plugin.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root)
+    replace_in_file("package.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
+    replace_in_file("plugin.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
     replace_in_file(".codex-plugin/plugin.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
     replace_in_file("kimi.plugin.json", r'("version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
-    replace_in_file("pyproject.toml", r'(version\s*=\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root)
+    replace_in_file("pyproject.toml", r'(version\s*=\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
     replace_in_file("src/version_checker.py", r'(CURRENT_VERSION\s*=\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
     replace_in_file("src/mcp_server.py", r'("name"\s*:\s*"tokensafe-mcp",\s*"version"\s*:\s*)"[^"]+"', rf'\g<1>"{next_v}"', root_dir=cloud_root, optional=True)
     replace_in_file("src/telemetry_sync.py", r'TokenSafe-Sync/[0-9]+\.[0-9]+\.[0-9]+', f'TokenSafe-Sync/{next_v}', root_dir=cloud_root, optional=True)
@@ -507,67 +495,32 @@ def update_cloud_repo_version(cloud_root: str, next_v: str) -> None:
             with open(server_json_path, "w", encoding="utf-8") as f:
                 json.dump(server_data, f, indent=2)
                 f.write("\n")
-            print("  ✓ Updated server.json (tokensafe-cloud)")
 
 
-def sync_and_push_cloud_repo(cloud_root: str, next_v: str) -> Tuple[bool, str, Optional[str]]:
-    """Aligns tokensafe-cloud to `next_v`, runs cloud tests over fresh client overlay, commits, and pushes."""
-    update_cloud_repo_version(cloud_root, next_v)
-    code, status_out = _sh(["git", "status", "--porcelain"], cwd=cloud_root)
-    dirty = [line for line in status_out.splitlines() if line.strip() and not line.startswith("?? data/")]
+def sync_and_push_api_repo(api_root: str, next_v: str) -> Tuple[bool, str, Optional[str]]:
+    """Aligns tokensafe-api to `next_v`, runs Go tests, commits, and pushes."""
+    update_api_repo_version(api_root, next_v)
+    code, status_out = _sh(["git", "status", "--porcelain"], cwd=api_root)
+    dirty = [line for line in status_out.splitlines() if line.strip()]
     if not dirty:
-        sha = _sh(["git", "rev-parse", "HEAD"], cwd=cloud_root)[1].strip()
+        sha = _sh(["git", "rev-parse", "HEAD"], cwd=api_root)[1].strip()
         return True, "already synced", sha
 
-    # Mirror cloud CI (checkout src/ + fresh client src/*.py) in an isolated temp dir
-    # so stale untracked copies inside cloud_root cannot mask client/cloud compatibility issues.
-    with tempfile.TemporaryDirectory(prefix="ts_cloud_ci_") as overlay_dir:
-        overlay_src = os.path.join(overlay_dir, "src")
-        shutil.copytree(os.path.join(PROJECT_ROOT, "src"), overlay_src)
-        cloud_src = os.path.join(cloud_root, "src")
-        for item in os.listdir(cloud_src):
-            s_path = os.path.join(cloud_src, item)
-            d_path = os.path.join(overlay_src, item)
-            if item in ("cloud", "cloud_backend.py", "mailer.py", "weekly_digest.py"):
-                if os.path.isdir(s_path):
-                    shutil.copytree(s_path, d_path, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(s_path, d_path)
-        shutil.copytree(os.path.join(cloud_root, "tests"), os.path.join(overlay_dir, "tests"))
-        for dname in ("hooks", "rules", "skills"):
-            d_src = os.path.join(cloud_root, dname)
-            if os.path.isdir(d_src):
-                shutil.copytree(d_src, os.path.join(overlay_dir, dname))
-        for fname in ("package.json", "plugin.json", "kimi.plugin.json", "pyproject.toml", "server.json", "Dockerfile.cloud"):
-            fpath = os.path.join(cloud_root, fname)
-            if os.path.exists(fpath):
-                shutil.copy2(fpath, os.path.join(overlay_dir, fname))
-        code, out = _sh([sys.executable, "-m", "unittest", "discover", "tests"], timeout=300, cwd=overlay_dir)
-    if code != 0:
-        print(out[-1500:])
-        return False, "tokensafe-cloud tests failed", None
+    # Verify tests pass with new version constant
+    t_code, t_out = _sh(["go", "test", "./..."], timeout=120, cwd=api_root)
+    if t_code != 0:
+        print(t_out[-1500:])
+        return False, "tokensafe-api tests failed", None
 
-    _sh(["git", "add", "src/cloud/config.py", "Dockerfile.cloud", ".github/workflows/test.yml",
-         "package.json", "plugin.json", "kimi.plugin.json", ".codex-plugin/plugin.json", "pyproject.toml", "server.json", "hooks/kimi_hook.py"], cwd=cloud_root)
-    c_code, c_out = _sh(["git", "commit", "-m", f"chore(release): align cloud backend and manifests to v{next_v}"], cwd=cloud_root)
+    _sh(["git", "add", "pkg/config/config.go"], cwd=api_root)
+    c_code, c_out = _sh(["git", "commit", "-m", f"chore(release): bump API backend version to v{next_v}"], cwd=api_root)
     if c_code != 0:
         return False, f"commit failed: {c_out[-300:]}", None
-    p_code, p_out = _sh(["git", "push", "origin", "main"], cwd=cloud_root)
+    p_code, p_out = _sh(["git", "push", "origin", "main"], cwd=api_root)
     if p_code != 0:
         return False, f"push failed: {p_out[-300:]}", None
 
-    # Refresh the local gitignored dist copies (src/*.py) so the cloud working
-    # tree matches the freshly released client instead of drifting stale (the
-    # CI merge step does the same against a fresh checkout; locally the stale
-    # copies would otherwise shadow `import src` during manual test runs).
-    try:
-        import glob as _glob
-        for src_file in _glob.glob(os.path.join(PROJECT_ROOT, "src", "*.py")):
-            shutil.copy2(src_file, os.path.join(cloud_root, "src", os.path.basename(src_file)))
-    except Exception:
-        pass
-
-    sha = _sh(["git", "rev-parse", "HEAD"], cwd=cloud_root)[1].strip()
+    sha = _sh(["git", "rev-parse", "HEAD"], cwd=api_root)[1].strip()
     return True, "pushed", sha
 
 
@@ -717,20 +670,20 @@ def run_release(target: str, otp: Optional[str] = None, no_bump: bool = False, s
             print(f"   {p}")
         sys.exit(1)
 
-    cloud_root = None if skip_cloud else resolve_cloud_repo()
-    if cloud_root:
-        c_branch = _sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cloud_root)[1].strip()
-        if c_branch != "main":
-            print(f"❌ Sibling tokensafe-cloud must be on main (currently {c_branch}). Pass --skip-cloud to bypass.")
+    api_root = None if skip_cloud else resolve_api_repo()
+    if api_root:
+        a_branch = _sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=api_root)[1].strip()
+        if a_branch != "main":
+            print(f"❌ Sibling tokensafe-api must be on main (currently {a_branch}). Pass --skip-cloud to bypass.")
             sys.exit(1)
-        c_status = _sh(["git", "status", "--porcelain"], cwd=cloud_root)[1].strip()
-        c_blocking = [l for l in c_status.splitlines() if l.strip() and not l.startswith("?? data/")]
-        if c_blocking:
-            print("❌ Sibling tokensafe-cloud has uncommitted changes (commit/stash or pass --skip-cloud):")
-            for l in c_blocking[:10]:
+        a_status = _sh(["git", "status", "--porcelain"], cwd=api_root)[1].strip()
+        a_blocking = [l for l in a_status.splitlines() if l.strip()]
+        if a_blocking:
+            print("❌ Sibling tokensafe-api has uncommitted changes (commit/stash or pass --skip-cloud):")
+            for l in a_blocking[:10]:
                 print(f"   {l}")
             sys.exit(1)
-    print(f"  ✔ main, clean tree, v{v} consistent" + (" (cloud sync enabled)\n" if cloud_root else "\n"))
+    print(f"  ✔ main, clean tree, v{v} consistent" + (" (API backend sync enabled)\n" if api_root else "\n"))
 
     # Phase 1: tests + bump + tests + verify ------------------------------
     print("── Phase 1: tests, bump, tests")
@@ -882,40 +835,32 @@ def run_release(target: str, otp: Optional[str] = None, no_bump: bool = False, s
             if not published_now and not registry_version_published(next_v):
                 pending.append("mcp-publisher publish")
 
-    # Phase 8: tokensafe-cloud sync & auto-deploy ------------------------------
-    cloud_head_sha: Optional[str] = None
-    if cloud_root:
-        print("── Phase 8: tokensafe-cloud sync & deploy")
-        if pypi_version_published(next_v):
-            simple_ok = wait_for_pypi_simple(next_v, attempts=18, delay=10)
-            if not simple_ok:
-                print("  ⚠ PyPI simple index CDN did not show version yet — skipping cloud push to avoid CI failure")
-                pending.append(f"tokensafe-cloud sync (retry once PyPI simple serves {next_v})")
+    # Phase 8: tokensafe-api sync & auto-deploy ------------------------------
+    api_head_sha: Optional[str] = None
+    if api_root:
+        print("── Phase 8: tokensafe-api sync & deploy")
+        ok_a, msg_a, api_head_sha = sync_and_push_api_repo(api_root, next_v)
+        if ok_a:
+            print(f"  ✔ tokensafe-api {msg_a} ({(api_head_sha or '')[:7]})")
+            # Trigger API deploy workflow in tokensafe-api (Go backend on Bunny Magic Containers)
+            print("  🚀 Dispatching Go backend deploy workflow in tokensafe-api...")
+            wf_code, wf_out = _sh(["gh", "workflow", "run", "deploy.yml",
+                                   "--repo", "tokensafe-dev/tokensafe-api"], timeout=30)
+            if wf_code == 0:
+                print("  ✔ tokensafe-api deploy workflow dispatched (deploy.yml)")
             else:
-                ok_c, msg_c, cloud_head_sha = sync_and_push_cloud_repo(cloud_root, next_v)
-                if ok_c:
-                    print(f"  ✔ tokensafe-cloud {msg_c} ({(cloud_head_sha or '')[:7]})")
-                    # Trigger API deploy workflow in tokensafe-api (Go backend on Bunny Magic Containers)
-                    print("  🚀 Dispatching Go backend deploy workflow in tokensafe-api...")
-                    wf_code, wf_out = _sh(["gh", "workflow", "run", "deploy.yml",
-                                           "--repo", "tokensafe-dev/tokensafe-api"], timeout=30)
-                    if wf_code == 0:
-                        print("  ✔ tokensafe-api deploy workflow dispatched (deploy.yml)")
-                    else:
-                        print(f"  ⚠ could not dispatch tokensafe-api deploy.yml: {wf_out.strip()[:100]}")
-                    print("  ℹ Frontend deploy reminder: if frontend/ copy/landing changed, run: cd frontend && bun run deploy")
-                else:
-                    print(f"  ⚠ tokensafe-cloud sync failed: {msg_c}")
-                    pending.append("tokensafe-cloud sync & push")
+                print(f"  ⚠ could not dispatch tokensafe-api deploy.yml: {wf_out.strip()[:100]}")
+                print("    Run manually: gh workflow run deploy.yml --repo tokensafe-dev/tokensafe-api")
+            print("  ℹ Frontend deploy reminder: if tokensafe-site copy/landing changed, run: cd ../tokensafe-site && bun run deploy")
         else:
-            print("  ℹ PyPI not published yet — skipping cloud sync")
-            pending.append("tokensafe-cloud sync & push (after PyPI)")
+            print(f"  ⚠ tokensafe-api sync failed: {msg_a}")
+            pending.append("tokensafe-api sync & push")
 
     # Phase 9: rollout verification --------------------------------------------------
     print("── Phase 9: rollout verification")
-    health_attempts, health_delay = (8, 15) if cloud_head_sha else (2, 2)
+    health_attempts, health_delay = (8, 15) if api_head_sha else (2, 2)
     health_ok = wait_for_prod_version(next_v, attempts=health_attempts, delay=health_delay)
-    print(f"  {'✔' if health_ok else '⚠' if cloud_head_sha else 'ℹ'} prod /health: "
+    print(f"  {'✔' if health_ok else '⚠' if api_head_sha else 'ℹ'} prod /health: "
           f"{'v' + next_v if health_ok else 'still rolling — check https://api.tokensafe.dev/health'}")
     print(f"  {'✔' if pypi_version_published(next_v) else '⚠'} PyPI {next_v}")
     print(f"  {'✔' if npm_version_published(next_v) else '⚠'} npm {next_v}")
