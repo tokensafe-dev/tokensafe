@@ -837,6 +837,7 @@ def run_release(target: str, otp: Optional[str] = None, no_bump: bool = False, s
 
     # Phase 8: tokensafe-api sync & auto-deploy ------------------------------
     api_head_sha: Optional[str] = None
+    cloud_head_sha: Optional[str] = None
     if api_root:
         print("── Phase 8: tokensafe-api sync & deploy")
         ok_a, msg_a, api_head_sha = sync_and_push_api_repo(api_root, next_v)
