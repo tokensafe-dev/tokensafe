@@ -10,6 +10,17 @@ from src.mcp_server import handle_tool_call
 
 class TestScopedSearch(unittest.TestCase):
 
+    def setUp(self):
+        from src.paths import save_active_workspace, get_active_workspace
+        self._orig_ws = get_active_workspace()
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        save_active_workspace(project_root)
+
+    def tearDown(self):
+        from src.paths import save_active_workspace
+        if self._orig_ws:
+            save_active_workspace(self._orig_ws)
+
     def test_scoped_search_basic(self):
         res = ScopedSearch.search("USD_PER_TOKEN", scope="code")
         self.assertTrue(res["success"])
