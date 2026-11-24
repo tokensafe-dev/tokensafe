@@ -106,6 +106,8 @@ def _print_help():
     print("  status                         One-screen health check: hooks, weekly savings, tier, sync")
     print("  budget [--transcript=...]      Context Window Budget HUD & Context Quality Score (Grade S-F)")
     print("  compact <transcript.jsonl>     Fold conversation transcript into Consolidated State Ledger")
+    print("  transcripts [--recent N]       Analyze agent transcripts (Antigravity/Claude/Codex)")
+    print("              [--compare A B]    A/B comparison of two session transcripts")
     print("  benchmark                      Zero-context-loss benchmark suite (simulated SWE-bench harness)")
     print("  bench --real [--repo=key|--here]  Measured benchmark on real repos (zero-loss gates)")
     print("  graph / map / skeleton         Architecture graph / API surface / AST skeleton of a file")
@@ -727,6 +729,55 @@ def main(argv: Optional[List[str]] = None):
             print(f"  Frontend Runtime:  {status['frontend'].get('status', 'OK')} ({status['frontend'].get('name', 'N/A')})")
             print(f"  Backend Runtime:   {status['backend'].get('status', 'OK')} ({status['backend'].get('name', 'N/A')})")
             print(f"  Workspace:         {status.get('workspace')}\n")
+
+    elif command in ("transcripts", "transcript"):
+        from src.transcript_analyzer import (
+            discover_transcript_paths,
+            analyze_transcript,
+            compare_transcripts,
+            render_transcripts_report,
+            render_comparison_report
+        )
+        if "--compare" in args:
+            c_idx = args.index("--compare")
+            if len(args) < c_idx + 3:
+                print("Usage: tokensafe transcripts --compare <before.jsonl> <after.jsonl>")
+                sys.exit(1)
+            before_f = args[c_idx + 1]
+            after_f = args[c_idx + 2]
+            res = compare_transcripts(before_f, after_f)
+            print(render_comparison_report(res))
+            sys.exit(0)
+
+        agent_type = "auto"
+        explicit_path = None
+        limit = 10
+        for i, a in enumerate(args):
+            if a in ("--recent", "-n") and i + 1 < len(args):
+                try:
+                    limit = int(args[i + 1])
+                except ValueError:
+                    pass
+            elif a.startswith("--agent="):
+                agent_type = a.split("=", 1)[1]
+            elif a in ("--agent", "-a") and i + 1 < len(args):
+                agent_type = args[i + 1]
+            elif a.startswith("--path="):
+                explicit_path = a.split("=", 1)[1]
+            elif a in ("--path", "-p") and i + 1 < len(args):
+                explicit_path = args[i + 1]
+
+        found = discover_transcript_paths(agent=agent_type, explicit_path=explicit_path, limit=limit)
+        if not found:
+            print("No transcripts found. Specify path via --path <path_or_dir> or --agent <antigravity|claude|codex>.")
+            sys.exit(0)
+
+        analyzed = []
+        for ag_type, fp, _ in found:
+            analyzed.append(analyze_transcript(fp, agent_type=ag_type))
+
+        print(render_transcripts_report(analyzed))
+        sys.exit(0)
 
     elif command == "proxy":
         from src.proxy import run_proxy

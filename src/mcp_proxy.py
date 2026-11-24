@@ -21,33 +21,39 @@ from src.stash import stash_block
 
 MAX_UNFOLDED_CHARS = 1500
 MAX_UNFOLDED_LINES = 35
+MAX_UNFOLDED_BYTES = 8800
 HEAD_LINES = 15
 TAIL_LINES = 10
 
 
 def fold_tool_text(text: str, tool_name: str = "mcp_tool") -> Tuple[str, bool]:
-    """Folds oversized text and returns (folded_text, was_folded)."""
+    """Folds oversized text and returns (folded_text, was_folded).
+    Strictly enforces MAX_UNFOLDED_BYTES (8800 bytes) to prevent disk spills."""
     if not text:
         return text, False
     from src.format_parsers.ansi import strip_ansi
     text = strip_ansi(text)
-    if len(text) <= MAX_UNFOLDED_CHARS:
-        return text, False
-
+    raw_bytes = len(text.encode("utf-8"))
     lines = text.splitlines()
-    if len(lines) <= MAX_UNFOLDED_LINES:
+
+    if raw_bytes <= MAX_UNFOLDED_BYTES and len(text) <= MAX_UNFOLDED_CHARS and len(lines) <= MAX_UNFOLDED_LINES:
         return text, False
 
     hash8, marker = stash_block(text, source=f"mcp:{tool_name}")
     head = lines[:HEAD_LINES]
     tail = lines[-TAIL_LINES:]
-    omitted = len(lines) - (HEAD_LINES + TAIL_LINES)
+    omitted = max(0, len(lines) - (len(head) + len(tail)))
 
     folded_lines = head + [
         f"... [{omitted} lines folded by TokenSafe MCP Proxy] ...",
     ] + tail + [marker]
+    folded_res = "\n".join(folded_lines)
 
-    return "\n".join(folded_lines), True
+    if len(folded_res.encode("utf-8")) > MAX_UNFOLDED_BYTES:
+        allowed = MAX_UNFOLDED_BYTES - len(marker.encode("utf-8")) - 100
+        folded_res = text.encode("utf-8")[:allowed].decode("utf-8", errors="ignore") + f"\n... [folded]\n{marker}"
+
+    return folded_res, True
 
 
 def compact_mcp_response(resp: Dict[str, Any]) -> Dict[str, Any]:

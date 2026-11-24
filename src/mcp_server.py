@@ -13,7 +13,7 @@ import re
 import threading
 import traceback
 import fnmatch
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any, Dict
 
 # Ensure project root in sys.path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,7 +42,7 @@ from src.paths import get_active_workspace, is_plugin_or_system_dir
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
-    "version": "4.4.9"
+    "version": "4.5.0"
 }
 
 # MCP client attribution: the initialize handshake carries clientInfo, which
@@ -413,8 +413,10 @@ TOOLS = [   {   'annotations': {'readOnlyHint': True},
                            'type': 'object'},
         'name': 'oumv_observe'},
     {   'annotations': {'readOnlyHint': True},
-        'description': "Answers 'Why is state X / why is button disabled?' or performs impact analysis by querying "
-                       'runtime signal & causality graph for tokensafe-ui, React, Vue, and Backend services.',
+        'description': "Answers 'Why is state X / why is button disabled?' (causality/why_state) or performs impact "
+                       'analysis: causality merges both runtimes and adds static cross-stack edges (frontend action '
+                       '-> backend endpoint) with evidence; impact walks reverse dependencies plus cross-stack '
+                       'frontend callers of matching backend endpoints.',
         'inputSchema': {   'properties': {   'query': {   'default': 'causality',
                                                           'description': 'Query type (causality, impact, why_state)',
                                                           'enum': ['causality', 'impact', 'why_state'],
@@ -430,7 +432,9 @@ TOOLS = [   {   'annotations': {'readOnlyHint': True},
         'name': 'oumv_understand'},
     {   'annotations': {'destructiveHint': False, 'readOnlyHint': False},
         'description': 'Applies Optimistic Concurrency Control (OCC) source edit with Babel AST JSX/TSX syntax guards, '
-                       'TypeScript verification, and secret leak prevention.',
+                       'TypeScript verification, and secret leak prevention. Offline fallback performs an OCC-verified '
+                       'direct workspace edit with syntax pre-flight (.py via ast, .js via node --check) and an '
+                       'automatic backup of the previous content.',
         'inputSchema': {   'properties': {   'expectedVersion': {   'description': 'Expected version token for '
                                                                                    'optimistic concurrency',
                                                                     'type': 'string'},
@@ -466,7 +470,162 @@ TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                            'type': 'string'}},
                            'required': ['target'],
                            'type': 'object'},
-        'name': 'oumv_verify'}]
+        'name': 'oumv_verify'},
+    {   'annotations': {'readOnlyHint': False, 'destructiveHint': False},
+        'description': 'Atomic or best-effort multi-hunk and multi-file code editor (up to 50 files) with optional '
+                       'inline verification command (e.g. npm test, pytest). Replaces serial single-hunk edit turns. '
+                       'Validates hunks in-memory before disk write and preserves CRLF/permissions.',
+        'inputSchema': {   'properties': {   'best_effort': {   'description': 'If true, commits valid files while '
+                                                                               'returning drift hints for failed files',
+                                                                'type': 'boolean'},
+                                             'cwd': {'description': 'Optional working directory', 'type': 'string'},
+                                             'dry_run': {   'description': 'If true, validates all hunks without touching '
+                                                                           'disk',
+                                                            'type': 'boolean'},
+                                             'edits': {   'description': 'Array of up to 50 file edit objects',
+                                                          'items': {   'properties': {   'create': {   'description': 'Optional '
+                                                                                                                     'content '
+                                                                                                                     'for newly '
+                                                                                                                     'created '
+                                                                                                                     'file',
+                                                                                                       'type': 'string'},
+                                                                                         'hunks': {   'description': 'Array of '
+                                                                                                                     'replacement '
+                                                                                                                     'hunks',
+                                                                                                      'items': {   'properties': {   'end_line': {   'description': 'Optional '
+                                                                                                                                                                     '1-based '
+                                                                                                                                                                     'end '
+                                                                                                                                                                     'line '
+                                                                                                                                                                     'bound',
+                                                                                                                                                             'type': 'integer'},
+                                                                                                                                     'replace_all': {   'description': 'Replace '
+                                                                                                                                                                       'all '
+                                                                                                                                                                       'occurrences',
+                                                                                                                                                        'type': 'boolean'},
+                                                                                                                                     'replacement': {   'description': 'Replacement '
+                                                                                                                                                                       'string',
+                                                                                                                                                        'type': 'string'},
+                                                                                                                                     'start_line': {   'description': 'Optional '
+                                                                                                                                                                       '1-based '
+                                                                                                                                                                       'start '
+                                                                                                                                                                       'line '
+                                                                                                                                                                       'bound',
+                                                                                                                                                                       'type': 'integer'},
+                                                                                                                                     'target': {   'description': 'Exact '
+                                                                                                                                                                  'string '
+                                                                                                                                                                  'to '
+                                                                                                                                                                  'be '
+                                                                                                                                                                  'replaced',
+                                                                                                                                                   'type': 'string'}},
+                                                                                                                   'required': [   'target',
+                                                                                                                                   'replacement'],
+                                                                                                                   'type': 'object'},
+                                                                                                      'type': 'array'},
+                                                                                         'overwrite': {   'description': 'Allow '
+                                                                                                                         'overwriting '
+                                                                                                                         'existing '
+                                                                                                                         'file '
+                                                                                                                         'with '
+                                                                                                                         'create',
+                                                                                                          'type': 'boolean'},
+                                                                                         'path': {   'description': 'File '
+                                                                                                                    'path '
+                                                                                                                    '(relative '
+                                                                                                                    'or '
+                                                                                                                    'absolute)',
+                                                                                                     'type': 'string'}},
+                                                                       'required': ['path'],
+                                                                       'type': 'object'},
+                                                          'maxItems': 50,
+                                                          'type': 'array'},
+                                             'verify': {   'description': 'Optional shell command to execute immediately '
+                                                                          'after applying edits (e.g. npm test, pytest, '
+                                                                          'cargo test)',
+                                                           'type': 'string'},
+                                             'verify_timeout_sec': {   'description': 'Verification timeout in seconds '
+                                                                                      '(default 30)',
+                                                                       'type': 'integer'}},
+                           'required': ['edits'],
+                           'type': 'object'},
+        'name': 'apply_edits'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Concurrent multi-query search engine: executes up to 20 text, regex, glob, fuzzy, or '
+                       'read-only git queries in ONE call (<70ms local) without paying per-command remote check latency.',
+        'inputSchema': {   'properties': {   'cwd': {'description': 'Optional working directory', 'type': 'string'},
+                                             'queries': {   'description': 'Array of up to 20 search query objects',
+                                                            'items': {   'properties': {   'case_sensitive': {   'description': 'Case-sensitive '
+                                                                                                                                'search '
+                                                                                                                                '(default '
+                                                                                                                                'false)',
+                                                                                                                 'type': 'boolean'},
+                                                                                           'file_type': {   'description': 'Optional '
+                                                                                                                           'file '
+                                                                                                                           'type '
+                                                                                                                           'filter '
+                                                                                                                           "(e.g. "
+                                                                                                                           "'typescript', "
+                                                                                                                           "'python')",
+                                                                                                            'type': 'string'},
+                                                                                           'glob': {   'description': 'Optional '
+                                                                                                                      'glob '
+                                                                                                                      'filter '
+                                                                                                                      "(e.g. "
+                                                                                                                      "'*.ts')",
+                                                                                                       'type': 'string'},
+                                                                                           'max_results': {   'description': 'Max '
+                                                                                                                             'matches '
+                                                                                                                             'per '
+                                                                                                                             'query '
+                                                                                                                             '(default '
+                                                                                                                             '25)',
+                                                                                                              'type': 'integer'},
+                                                                                           'output_mode': {   'description': 'Output '
+                                                                                                                             'mode: '
+                                                                                                                             'content, '
+                                                                                                                             'files_with_matches, '
+                                                                                                                             'or '
+                                                                                                                             'count',
+                                                                                                              'enum': [   'content',
+                                                                                                                          'files_with_matches',
+                                                                                                                          'count'],
+                                                                                                              'type': 'string'},
+                                                                                           'path': {   'description': 'Optional '
+                                                                                                                      'subpath '
+                                                                                                                      'to '
+                                                                                                                      'scope '
+                                                                                                                      'query',
+                                                                                                       'type': 'string'},
+                                                                                           'pattern': {   'description': 'Search '
+                                                                                                                         'pattern, '
+                                                                                                                         'text, '
+                                                                                                                         'regex, '
+                                                                                                                         'glob, '
+                                                                                                                         'or '
+                                                                                                                         'read-only '
+                                                                                                                         'git '
+                                                                                                                         'command',
+                                                                                                          'type': 'string'},
+                                                                                           'type': {   'description': 'Query '
+                                                                                                                      'type: '
+                                                                                                                      'text, '
+                                                                                                                      'regex, '
+                                                                                                                      'glob, '
+                                                                                                                      'fuzzy, '
+                                                                                                                      'or '
+                                                                                                                      'git',
+                                                                                                       'enum': [   'text',
+                                                                                                                   'regex',
+                                                                                                                   'glob',
+                                                                                                                   'fuzzy',
+                                                                                                                   'git'],
+                                                                                                       'type': 'string'}},
+                                                                         'required': ['pattern'],
+                                                                         'type': 'object'},
+                                                            'maxItems': 20,
+                                                            'type': 'array'}},
+                           'required': ['queries'],
+                           'type': 'object'},
+        'name': 'batch_search'}]
 
 def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024:
@@ -1813,6 +1972,12 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         return {"content": [{"type": "text", "text": tree_output}]}
 
     elif name == "scoped_search":
+        if args.get("queries"):
+            from src.batch_search import execute_batch_search
+            cwd = args.get("cwd") or get_active_workspace()
+            res = execute_batch_search(queries=args.get("queries"), cwd=cwd)
+            return {"content": [{"type": "text", "text": res.get("summary_md", "")}]}
+
         query = args.get("query") or args.get("q") or args.get("pattern") or args.get("text") or ""
         if not query:
             return _fallback_error("scoped_search", "missing required 'query' argument")
@@ -2114,6 +2279,70 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         except Exception as e:
             return _fallback_error("oumv_verify", f"failed to execute OUMV verification: {e}")
 
+    elif name == "apply_edits":
+        try:
+            from src.batch_editor import execute_batch_edits
+            edits = args.get("edits")
+            if not edits:
+                return _fallback_error("apply_edits", "missing required 'edits' list")
+            best_effort = bool(args.get("best_effort", False))
+            dry_run = bool(args.get("dry_run", False))
+            verify = args.get("verify")
+            verify_timeout = int(args.get("verify_timeout_sec") or 30)
+            cwd = args.get("cwd") or get_active_workspace()
+
+            res = execute_batch_edits(
+                edits=edits,
+                best_effort=best_effort,
+                dry_run=dry_run,
+                verify=verify,
+                verify_timeout_sec=verify_timeout,
+                cwd=cwd
+            )
+            lines = []
+            if res.get("success"):
+                action_desc = "Validated" if dry_run else "Applied"
+                lines.append(f"✔ {action_desc} {res.get('applied_count', 0)} file(s) successfully.")
+                for f in res.get("applied_files", []):
+                    h_cnt = f.get("hunks", 0)
+                    is_cr = f.get("is_create", False)
+                    label = "created" if is_cr else f"{h_cnt} hunk(s)"
+                    lines.append(f"  - `{f.get('path')}` ({label})")
+            else:
+                lines.append(f"✖ Batch edits failed ({res.get('failed_count', 0)} error(s)).")
+                for f in res.get("failed_files", []):
+                    lines.append(f"  - `{f.get('path')}`: {f.get('error')}")
+
+            if "verify" in res:
+                v = res["verify"]
+                status_sym = "✔ PASS" if v.get("passed") else "✖ FAIL"
+                lines.append(f"\nInline Verify ({v.get('command')}): {status_sym} (exit {v.get('exit_code')}, {v.get('duration_seconds', 0)}s)")
+                if v.get("output"):
+                    lines.append("```text\n" + v["output"] + "\n```")
+                elif v.get("error"):
+                    lines.append(f"Error: {v['error']}")
+
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except Exception as e:
+            return _fallback_error("apply_edits", f"failed to execute batch edits: {e}")
+
+    elif name == "batch_search":
+        try:
+            from src.batch_search import execute_batch_search
+            queries = args.get("queries")
+            if isinstance(queries, dict):
+                queries = [queries]
+            elif not queries and (args.get("query") or args.get("pattern")):
+                queries = [{"pattern": args.get("query") or args.get("pattern"), "type": args.get("type", "text")}]
+            if not queries:
+                return _fallback_error("batch_search", "missing required 'queries' list")
+
+            cwd = args.get("cwd") or get_active_workspace()
+            res = execute_batch_search(queries=queries, cwd=cwd)
+            return {"content": [{"type": "text", "text": res.get("summary_md", "")}]}
+        except Exception as e:
+            return _fallback_error("batch_search", f"failed to execute batch search: {e}")
+
     return _fallback_error(name, f"unknown tool '{name}'")
 
 
@@ -2154,6 +2383,66 @@ def _redact_result_secrets(result):
         except Exception:
             pass
     return redacted
+
+
+def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 8800) -> Any:
+    """Zero-Spill Guard: guarantees no MCP tool response exceeds 8800 UTF-8 bytes.
+    Prevents Antigravity from spilling tool output to disk (output.txt) which forces
+    an extra LLM roundtrip turn to read the spill file. Full content is saved to
+    reversible stash and referenced with an 8-char hash anchor."""
+    if not isinstance(result, dict):
+        return result
+    content = result.get("content")
+    if not isinstance(content, list):
+        return result
+
+    modified = False
+    new_content = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text", "")
+            raw_bytes = text.encode("utf-8")
+            if len(raw_bytes) > max_bytes:
+                try:
+                    from src.stash import stash_block
+                    from src.format_parsers.ansi import strip_ansi
+                    clean_text = strip_ansi(text)
+                    hash8, marker = stash_block(clean_text, source=f"mcp:{tool_name}")
+                    lines = clean_text.splitlines()
+                    head = lines[:20]
+                    tail = lines[-15:]
+                    omitted = len(lines) - (len(head) + len(tail))
+                    folded_msg = f"\n... [{omitted} lines / {len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
+                    tail_str = "\n".join(tail)
+                    footer = f"\n{marker}"
+
+                    budget = max_bytes - len(folded_msg.encode("utf-8")) - len(footer.encode("utf-8")) - len(tail_str.encode("utf-8")) - 50
+                    head_str = ""
+                    for line in head:
+                        if len((head_str + line + "\n").encode("utf-8")) <= budget:
+                            head_str += line + "\n"
+                        else:
+                            break
+
+                    folded_text = f"{head_str.rstrip()}{folded_msg}{tail_str}{footer}"
+                    if len(folded_text.encode("utf-8")) > max_bytes:
+                        allowed_head = max_bytes - len(footer.encode("utf-8")) - 100
+                        folded_text = clean_text.encode("utf-8")[:allowed_head].decode("utf-8", errors="ignore") + f"\n... [folded]\n{footer}"
+
+                    new_block = dict(block)
+                    new_block["text"] = folded_text
+                    new_content.append(new_block)
+                    modified = True
+                    continue
+                except Exception:
+                    pass
+        new_content.append(block)
+
+    if modified:
+        new_res = dict(result)
+        new_res["content"] = new_content
+        return new_res
+    return result
 
 
 def _execute_with_timeout(tool_name: str, tool_args: dict, timeout: float = MCP_TOOL_TIMEOUT) -> dict:
@@ -2272,9 +2561,13 @@ def run_mcp_server():
                 from src.json_repair import parse_tool_arguments
                 tool_args = parse_tool_arguments(raw_tool_args) or {}
             try:
-                response["result"] = _redact_result_secrets(_execute_with_timeout(tool_name, tool_args))
+                raw_res = _execute_with_timeout(tool_name, tool_args)
+                redacted = _redact_result_secrets(raw_res)
+                response["result"] = _cap_mcp_output_size(redacted, tool_name=tool_name)
             except Exception as e:
-                response["result"] = _redact_result_secrets(_fallback_error(tool_name, f"{type(e).__name__}: {str(e)}"))
+                err_res = _fallback_error(tool_name, f"{type(e).__name__}: {str(e)}")
+                redacted = _redact_result_secrets(err_res)
+                response["result"] = _cap_mcp_output_size(redacted, tool_name=tool_name)
             finally:
                 try:
                     from src.telemetry_sync import TelemetrySync

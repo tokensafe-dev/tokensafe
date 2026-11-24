@@ -51,7 +51,7 @@ _SKIP_CALLS = {
     "true", "false", "null", "undefined", "None", "True", "False",
 }
 
-_CACHE_SCHEMA_VERSION = 3
+_CACHE_SCHEMA_VERSION = 4
 
 _STATIC_ASSET_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
@@ -62,31 +62,56 @@ _STATIC_ASSET_EXTS = {
 
 _BACKEND_ROUTE_PATTERNS = [
     # Python: @app.get("/users"), @router.post('/login'), @bp.route('/data')
-    re.compile(r'@(?:app|router|api|bp)\.(?:get|post|put|delete|patch|route)\(\s*["\']([^"\']+)["\']', re.IGNORECASE),
+    (re.compile(r'@(?:app|router|api|bp)\.(?:get|post|put|delete|patch|route)\(\s*["\']([^"\']+)["\']', re.IGNORECASE), None),
     # JS/TS: app.get("/users", ...), router.post('/login', ...)
-    re.compile(r'(?<!@)\b(?:app|router|server|fastify)\.(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']', re.IGNORECASE),
+    (re.compile(r'(?<!@)\b(?:app|router|server|fastify)\.(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']', re.IGNORECASE), None),
     # Java/Kotlin Spring: @GetMapping("/users"), @PostMapping(value = "/login"), @RequestMapping("/api")
-    re.compile(r'@(?:Get|Post|Put|Delete|Patch|Request)Mapping\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']', re.IGNORECASE),
+    (re.compile(r'@(?:Get|Post|Put|Delete|Patch|Request)Mapping\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']', re.IGNORECASE), None),
     # Go Gin/Echo/Fiber: r.GET("/users", ...), router.POST('/login', ...)
-    re.compile(r'\b(?:r|router|g|e|app)\.(?:GET|POST|PUT|DELETE|PATCH)\(\s*["\']([^"\']+)["\']'),
+    (re.compile(r'\b(?:r|router|g|e|app)\.(?:GET|POST|PUT|DELETE|PATCH)\(\s*["\']([^"\']+)["\']'), None),
     # Go net/http: http.HandleFunc("/users", ...)
-    re.compile(r'http\.HandleFunc\(\s*["\']([^"\']+)["\']'),
+    (re.compile(r'http\.HandleFunc\(\s*["\']([^"\']+)["\']'), None),
     # C# ASP.NET Core: [HttpGet("/users")], [Route("api/users")]
-    re.compile(r'\[(?:Http(?:Get|Post|Put|Delete|Patch)|Route)\(\s*["\']([^"\']+)["\']'),
+    (re.compile(r'\[(?:Http(?:Get|Post|Put|Delete|Patch)|Route)\(\s*["\']([^"\']+)["\']'), None),
     # PHP Laravel: Route::get('/users', ...), Route::post('/login', ...)
-    re.compile(r'Route::(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']'),
+    (re.compile(r'Route::(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']'), None),
 ]
 
 _FRONTEND_CALL_PATTERNS = [
-    # fetch("/api/users") or fetch(`/api/users/${id}`)
-    re.compile(r'\bfetch\(\s*[`"\']([^`"\'?#]+)'),
+    # fetch("/api/users") or fetch(`/api/users/${id}`)  (method unknown: depends on init options)
+    (re.compile(r'\bfetch\(\s*[`"\']([^`"\'?#]+)'), None),
     # axios.get("/api/users"), api.post(`/api/users/${id}`), client.get, etc.
-    re.compile(r'\b(?:axios|api|client|httpClient|ky)\.(?:get|post|put|delete|patch)\(\s*[`"\']([^`"\'?#]+)'),
-    # useSWR("/api/users")
-    re.compile(r'\buseSWR\(\s*[`"\']([^`"\'?#]+)'),
-    # axios("/api/users")
-    re.compile(r'\baxios\(\s*[`"\']([^`"\'?#]+)'),
+    (re.compile(r'\b(?:axios|api|client|httpClient|ky)\.(?:get|post|put|delete|patch)\(\s*[`"\']([^`"\'?#]+)'), None),
+    # useSWR("/api/users") — semantically always GET
+    (re.compile(r'\buseSWR\(\s*[`"\']([^`"\'?#]+)'), "GET"),
+    # axios("/api/users")  (method unknown: depends on config)
+    (re.compile(r'\baxios\(\s*[`"\']([^`"\'?#]+)'), None),
 ]
+
+# HTTP method extraction from route-declaration / API-call matched text.
+_HTTP_METHOD_ANNOTATION_RE = re.compile(r'(?i)@(get|post|put|delete|patch)mapping\b')
+_HTTP_METHOD_BRACKET_RE = re.compile(r'(?i)\[\s*http(get|post|put|delete|patch)\b')
+_HTTP_METHOD_CALL_RE = re.compile(r'(?i)(?:\.|::)\s*(get|post|put|delete|patch|head|options)\s*\(')
+
+
+def _match_http_method(matched_text: str) -> Optional[str]:
+    """Extracts the HTTP verb from a matched route-declaration or client-call fragment.
+
+    Searches only the matched fragment (method word always precedes the route string),
+    so route segments like `/get-started` never produce a false method.
+    """
+    if not matched_text:
+        return None
+    m = _HTTP_METHOD_ANNOTATION_RE.search(matched_text)
+    if m:
+        return m.group(1).upper()
+    m = _HTTP_METHOD_BRACKET_RE.search(matched_text)
+    if m:
+        return m.group(1).upper()
+    m = _HTTP_METHOD_CALL_RE.search(matched_text)
+    if m:
+        return m.group(1).upper()
+    return None
 
 _NEXT_APP_ROUTE_RE = re.compile(r'^(?:src/)?app/(api/.+?)/route\.[a-zA-Z0-9]+$')
 _NEXT_PAGES_ROUTE_RE = re.compile(r'^(?:src/)?pages/(api/.+?)\.[a-zA-Z0-9]+$')
@@ -211,8 +236,9 @@ class CodeGraph:
         self.file_mtimes: Dict[str, float] = {}            # file_rel_path -> mtime
         self.file_stats: Dict[str, Tuple[float, int]] = {} # file_rel_path -> (mtime, size)
         self.file_imports: Dict[str, Set[str]] = {}        # file_rel_path -> raw imported modules
-        self.file_endpoints: Dict[str, List[Tuple[str, Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key)]
-        self.file_api_calls: Dict[str, List[Tuple[str, Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key)]
+        self.file_endpoints: Dict[str, List[Tuple[str, Optional[str], Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key, http_method)]
+        self.file_api_calls: Dict[str, List[Tuple[str, Optional[str], Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key, http_method)]
+        self.api_links: List[Dict[str, Any]] = []  # cross-stack edges: frontend call -> backend endpoint
         self.last_scanned: float = 0.0
         self.backend: str = self._detect_backend()
 
@@ -249,6 +275,7 @@ class CodeGraph:
         self.file_imports.clear()
         self.file_endpoints.clear()
         self.file_api_calls.clear()
+        self.api_links.clear()
 
     def _load_disk_cache(self) -> bool:
         path = self._cache_path()
@@ -299,15 +326,17 @@ class CodeGraph:
 
                     self.file_endpoints = {}
                     try:
-                        for row in cur.execute("SELECT rel_path, route, sym_key FROM api_endpoints").fetchall():
-                            self.file_endpoints.setdefault(row[0], []).append((row[1], row[2]))
+                        for row in cur.execute("SELECT rel_path, route, sym_key, method FROM api_endpoints").fetchall():
+                            method = row[3] if len(row) > 3 else None
+                            self.file_endpoints.setdefault(row[0], []).append((row[1], row[2], method))
                     except sqlite3.OperationalError:
                         pass
 
                     self.file_api_calls = {}
                     try:
-                        for row in cur.execute("SELECT rel_path, route, sym_key FROM api_calls").fetchall():
-                            self.file_api_calls.setdefault(row[0], []).append((row[1], row[2]))
+                        for row in cur.execute("SELECT rel_path, route, sym_key, method FROM api_calls").fetchall():
+                            method = row[3] if len(row) > 3 else None
+                            self.file_api_calls.setdefault(row[0], []).append((row[1], row[2], method))
                     except sqlite3.OperationalError:
                         pass
 
@@ -375,8 +404,8 @@ class CodeGraph:
                     cur.execute("CREATE TABLE file_symbols (rel_path TEXT, sym_key TEXT, idx INTEGER, PRIMARY KEY (rel_path, sym_key))")
                     cur.execute("CREATE TABLE file_imports (rel_path TEXT, imported TEXT, PRIMARY KEY (rel_path, imported))")
                     cur.execute("CREATE TABLE edges (source TEXT, target TEXT, PRIMARY KEY (source, target))")
-                    cur.execute("CREATE TABLE api_endpoints (rel_path TEXT, route TEXT, sym_key TEXT)")
-                    cur.execute("CREATE TABLE api_calls (rel_path TEXT, route TEXT, sym_key TEXT)")
+                    cur.execute("CREATE TABLE api_endpoints (rel_path TEXT, route TEXT, sym_key TEXT, method TEXT)")
+                    cur.execute("CREATE TABLE api_calls (rel_path TEXT, route TEXT, sym_key TEXT, method TEXT)")
 
                     cur.executemany(
                         "INSERT INTO graph_meta VALUES (?, ?)",
@@ -413,12 +442,12 @@ class CodeGraph:
                         [(src, tgt) for src, tgts in self.edges.items() for tgt in tgts],
                     )
                     cur.executemany(
-                        "INSERT INTO api_endpoints VALUES (?, ?, ?)",
-                        [(rel, ep[0], ep[1]) for rel, eps in self.file_endpoints.items() for ep in eps],
+                        "INSERT INTO api_endpoints VALUES (?, ?, ?, ?)",
+                        [(rel, ep[0], ep[1], ep[2] if len(ep) > 2 else None) for rel, eps in self.file_endpoints.items() for ep in eps],
                     )
                     cur.executemany(
-                        "INSERT INTO api_calls VALUES (?, ?, ?)",
-                        [(rel, call[0], call[1]) for rel, calls in self.file_api_calls.items() for call in calls],
+                        "INSERT INTO api_calls VALUES (?, ?, ?, ?)",
+                        [(rel, call[0], call[1], call[2] if len(call) > 2 else None) for rel, calls in self.file_api_calls.items() for call in calls],
                     )
                     con.commit()
                 finally:
@@ -614,13 +643,14 @@ class CodeGraph:
                 for sk in sym_keys:
                     s = self.symbols.get(sk)
                     if s and s.name.upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "HANDLER", "DEFAULT"}:
-                        self.file_endpoints[rel_path].append((norm_route, sk))
+                        method = s.name.upper() if s.name.upper() in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"} else None
+                        self.file_endpoints[rel_path].append((norm_route, sk, method))
                         matched_any = True
                 if not matched_any:
-                    self.file_endpoints[rel_path].append((norm_route, None))
+                    self.file_endpoints[rel_path].append((norm_route, None, None))
 
         # 2. Backend route definitions
-        for rx in _BACKEND_ROUTE_PATTERNS:
+        for rx, _default_method in _BACKEND_ROUTE_PATTERNS:
             for match in rx.finditer(content):
                 route_raw = match.group(1)
                 if class_prefix and not route_raw.startswith(class_prefix):
@@ -632,10 +662,11 @@ class CodeGraph:
                     continue
                 line_no = content[:match.start()].count("\n") + 1
                 sym_key = self._find_enclosing_symbol(rel_path, line_no)
-                self.file_endpoints[rel_path].append((norm_route, sym_key))
+                method = _match_http_method(match.group(0))
+                self.file_endpoints[rel_path].append((norm_route, sym_key, method))
 
         # 3. Frontend API call sites
-        for rx in _FRONTEND_CALL_PATTERNS:
+        for rx, default_method in _FRONTEND_CALL_PATTERNS:
             for match in rx.finditer(content):
                 route_raw = match.group(1)
                 norm_route = _normalize_route_path(route_raw)
@@ -643,7 +674,8 @@ class CodeGraph:
                     continue
                 line_no = content[:match.start()].count("\n") + 1
                 sym_key = self._find_enclosing_symbol(rel_path, line_no)
-                self.file_api_calls[rel_path].append((norm_route, sym_key))
+                method = _match_http_method(match.group(0)) or default_method
+                self.file_api_calls[rel_path].append((norm_route, sym_key, method))
 
     @staticmethod
     def _route_matches(path: str, pattern_route: str) -> bool:
@@ -669,32 +701,35 @@ class CodeGraph:
         """
         Cross-boundary semantic linking between frontend client API calls
         and backend route endpoints across languages and frameworks.
+        Also records OUMV cross-stack relationships (with evidence) in `api_links`.
         """
+        self.api_links = []
         try:
-            endpoint_map: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+            endpoint_map: Dict[str, List[Tuple[str, Optional[str], Optional[str]]]] = {}
             for rel_path, endpoints in self.file_endpoints.items():
-                for norm_route, sym_key in endpoints:
+                for norm_route, sym_key, method in endpoints:
                     if norm_route:
-                        endpoint_map.setdefault(norm_route, []).append((rel_path, sym_key))
+                        endpoint_map.setdefault(norm_route, []).append((rel_path, sym_key, method))
 
             if not endpoint_map:
                 return
 
+            seen_links = set()
             for caller_rel, calls in self.file_api_calls.items():
                 caller_file_node = f"file:{caller_rel}"
-                for norm_route, caller_sym in calls:
+                for norm_route, caller_sym, caller_method in calls:
                     if not norm_route:
                         continue
-                    matched_endpoints: List[Tuple[str, Optional[str]]] = []
+                    matched_endpoints: List[Tuple[str, str, Optional[str], Optional[str]]] = []
                     if norm_route in endpoint_map:
-                        matched_endpoints.extend(endpoint_map[norm_route])
+                        matched_endpoints.extend((norm_route, rel, sym, m) for (rel, sym, m) in endpoint_map[norm_route])
 
                     for ep_route, eps in endpoint_map.items():
                         if ep_route != norm_route and ("*" in ep_route or "*" in norm_route):
                             if self._route_matches(norm_route, ep_route):
-                                matched_endpoints.extend(eps)
+                                matched_endpoints.extend((ep_route, rel, sym, m) for (rel, sym, m) in eps)
 
-                    for ep_rel, ep_sym in matched_endpoints:
+                    for ep_route, ep_rel, ep_sym, ep_method in matched_endpoints:
                         if ep_rel == caller_rel:
                             continue
                         ep_file_node = f"file:{ep_rel}"
@@ -704,6 +739,26 @@ class CodeGraph:
                         dst = ep_sym or ep_file_node
                         if src != dst:
                             self.add_edge(src, dst)
+
+                        link_key = (caller_rel, caller_sym or "", norm_route, ep_rel, ep_sym or "", ep_route)
+                        if link_key not in seen_links:
+                            seen_links.add(link_key)
+                            self.api_links.append({
+                                "source": {
+                                    "type": "frontend.action",
+                                    "route": norm_route,
+                                    "method": caller_method,
+                                    "file": caller_rel,
+                                    "symbol": caller_sym,
+                                },
+                                "target": {
+                                    "type": "backend.endpoint",
+                                    "route": ep_route,
+                                    "method": ep_method,
+                                    "file": ep_rel,
+                                    "symbol": ep_sym,
+                                },
+                            })
         except Exception:
             pass
 
@@ -1496,11 +1551,12 @@ class CodeGraph:
                 "level": "L0",
                 "mode": "STATIC_OFFLINE_PULSE",
                 "status": "OFFLINE_STATIC",
-                "summary": f"Indexed {len(self.file_symbols)} files, {len(self.symbols)} symbols, {endpoints_count} API endpoints, {calls_count} client calls",
+                "summary": f"Indexed {len(self.file_symbols)} files, {len(self.symbols)} symbols, {endpoints_count} API endpoints, {calls_count} client calls, {len(self.api_links)} cross-stack links",
                 "totalFiles": len(self.file_symbols),
                 "totalSymbols": len(self.symbols),
                 "totalEndpoints": endpoints_count,
                 "totalClientCalls": calls_count,
+                "totalRelationships": len(self.api_links),
                 "topGodNodes": [g["file"] for g in god_nodes],
                 "evidence": evidence,
             }
@@ -1508,10 +1564,11 @@ class CodeGraph:
         # L1: Discovered API surface & Routes
         endpoints = []
         for rel_path, eps in self.file_endpoints.items():
-            for norm_route, sym in eps:
+            for norm_route, sym, method in eps:
                 if not target or target.lower() in norm_route.lower() or target.lower() in rel_path.lower():
                     endpoints.append({
                         "route": norm_route,
+                        "method": method,
                         "file": rel_path,
                         "symbol": sym,
                         "type": "backend.endpoint",
@@ -1519,14 +1576,36 @@ class CodeGraph:
 
         client_calls = []
         for rel_path, calls in self.file_api_calls.items():
-            for norm_route, sym in calls:
+            for norm_route, sym, method in calls:
                 if not target or target.lower() in norm_route.lower() or target.lower() in rel_path.lower():
                     client_calls.append({
                         "route": norm_route,
+                        "method": method,
                         "file": rel_path,
                         "symbol": sym,
                         "type": "frontend.action",
                     })
+
+        # Cross-stack relationships (frontend call -> backend endpoint) with evidence
+        relationships = []
+        for link in self.api_links:
+            if target:
+                t = target.lower()
+                hay = " ".join([
+                    link["source"]["route"] or "", link["source"]["file"] or "",
+                    link["target"]["route"] or "", link["target"]["file"] or "",
+                ]).lower()
+                if t not in hay:
+                    continue
+            relationships.append({
+                "source": link["source"],
+                "target": link["target"],
+                "evidence": {
+                    "provenance": "static",
+                    "sourceAdapter": "tokensafe-graph-engine",
+                    "confidence": "probable",
+                },
+            })
 
         matching_symbols = []
         if target:
@@ -1545,8 +1624,87 @@ class CodeGraph:
             "mode": "STATIC_SURFACE",
             "endpoints": endpoints[:30],
             "clientCalls": client_calls[:30],
+            "relationships": relationships[:30],
             "matchingSymbols": matching_symbols[:20],
             "evidence": evidence,
+        }
+
+    def get_static_impact(self, target: str, max_depth: int = 3) -> Dict[str, Any]:
+        """
+        Static impact analysis over the AST graph: reverse-dependency walk
+        ("who depends on the target") plus cross-stack frontend callers of
+        matching backend endpoints. Honest about missing runtime evidence.
+        """
+        evidence = {
+            "provenance": "static",
+            "sourceAdapter": "tokensafe-graph-engine",
+            "confidence": "probable",
+        }
+        t = (target or "").strip()
+        if not t:
+            return {"target": t, "mode": "STATIC_IMPACT", "error": "target is required", "evidence": evidence}
+
+        start_nodes: Set[str] = set()
+        if t.startswith("file:"):
+            start_nodes.add(t)
+        for sk, sym in self.symbols.items():
+            if t.lower() in sym.name.lower() or t.lower() in sym.file_path.lower():
+                start_nodes.add(sk)
+        for rel_path in self.file_symbols:
+            if t.lower() in rel_path.lower():
+                start_nodes.add(f"file:{rel_path}")
+
+        visited: Dict[str, int] = {}
+        frontier = [(n, 0) for n in start_nodes]
+        while frontier:
+            node, depth = frontier.pop(0)
+            if node in visited:
+                continue
+            visited[node] = depth
+            if depth >= max_depth:
+                continue
+            for dep in self.rev_edges.get(node, ()):
+                if dep not in visited:
+                    frontier.append((dep, depth + 1))
+
+        def _node_info(node: str) -> Dict[str, Any]:
+            if node.startswith("file:"):
+                return {"type": "file", "file": node[5:]}
+            sym = self.symbols.get(node)
+            if sym:
+                return {"type": "symbol", "name": sym.name, "kind": sym.kind, "file": sym.file_path}
+            return {"type": "node", "id": node}
+
+        direct = [_node_info(n) for n, d in visited.items() if d == 1 and n not in start_nodes]
+        transitive = [_node_info(n) for n, d in visited.items() if d > 1]
+
+        frontend_callers = []
+        for link in self.api_links:
+            hay = " ".join([link["target"]["route"] or "", link["target"]["file"] or ""])
+            if t.lower() in hay.lower():
+                frontend_callers.append({
+                    "source": link["source"],
+                    "target": link["target"],
+                    "evidence": {
+                        "provenance": "static",
+                        "sourceAdapter": "tokensafe-graph-engine",
+                        "confidence": "probable",
+                    },
+                })
+
+        return {
+            "target": t,
+            "mode": "STATIC_IMPACT",
+            "directDependents": direct[:20],
+            "transitiveDependents": transitive[:20],
+            "crossStack": {
+                "frontendCallers": frontend_callers[:20],
+                "count": len(frontend_callers),
+            },
+            "evidence": evidence,
+            "missingEvidence": [
+                "Runtime-confirmed dependencies are not included while dev-servers are offline.",
+            ],
         }
 
 

@@ -5,7 +5,24 @@
       "args": [
         "-c",
         "exec \"${TOKENSAFE_PYTHON:-python3}\" \"$PLUGIN_ROOT/src/mcp_server.py\""
-      ]
+      ],
+      "tools": {
+        "apply_edits": {
+          "eager": true
+        },
+        "batch_search": {
+          "eager": true
+        },
+        "scoped_search": {
+          "eager": true
+        },
+        "smart_read_file": {
+          "eager": true
+        },
+        "get_architecture_graph": {
+          "eager": true
+        }
+      }
     }
   }
 }

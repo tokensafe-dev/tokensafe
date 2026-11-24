@@ -111,6 +111,100 @@ class TestOUMVGateway(unittest.TestCase):
                 OUMVGateway.mutate(path="test.py", replacement="foo")
             self.assertIn("-32007", str(cm.exception))
 
+    def test_mutate_syntax_guard_rejects_broken_python(self):
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            file_path = "src/broken.py"
+            full_path = os.path.join(self.test_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            original = "def broken(): return 'original'"
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(original)
+
+            with self.assertRaises(RuntimeError) as cm:
+                OUMVGateway.mutate(path=file_path, replacement="def broken(: return 'oops'")
+            self.assertIn("-32002", str(cm.exception))
+            # File must remain untouched when the syntax guard rejects the edit
+            with open(full_path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+
+    def test_mutate_direct_edit_reports_syntax_check_and_backup(self):
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            file_path = "src/guarded.py"
+            full_path = os.path.join(self.test_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write("def value(): return 1")
+
+            res = OUMVGateway.mutate(path=file_path, replacement="def value(): return 2")
+            self.assertTrue(res["success"])
+            self.assertEqual(res["syntaxCheck"]["status"], "passed")
+            self.assertEqual(res["syntaxCheck"]["tool"], "python-ast")
+            self.assertTrue(res["backupPath"])
+            self.assertIn(".tokensafe", res["backupPath"])
+            self.assertTrue(res["rollbackHint"])
+            # Backup contains the previous content
+            with open(res["backupPath"], "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "def value(): return 1")
+
+    def test_mutate_unknown_extension_reports_skipped_syntax_check(self):
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            file_path = "src/component.tsx"
+            full_path = os.path.join(self.test_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write("export const A = () => <div/>")
+
+            res = OUMVGateway.mutate(path=file_path, replacement="export const A = () => <span/>")
+            self.assertTrue(res["success"])
+            # Honest reporting: TSX has no checker, must not imply validation
+            self.assertEqual(res["syntaxCheck"]["status"], "skipped")
+
+    def _make_fullstack_fixture(self):
+        backend_dir = os.path.join(self.test_dir, "backend")
+        os.makedirs(backend_dir, exist_ok=True)
+        with open(os.path.join(backend_dir, "orders.py"), "w", encoding="utf-8") as f:
+            f.write("from fastapi import APIRouter\n\nrouter = APIRouter()\n\n"
+                    "@router.post('/api/orders')\ndef create_order(payload: dict):\n    return {'ok': True}\n")
+        frontend_dir = os.path.join(self.test_dir, "frontend")
+        os.makedirs(frontend_dir, exist_ok=True)
+        with open(os.path.join(frontend_dir, "api.ts"), "w", encoding="utf-8") as f:
+            f.write("export async function submitOrder(order: any) {\n"
+                    "    return axios.post('/api/orders', order);\n}\n")
+
+    def test_understand_causality_includes_cross_stack_edges(self):
+        self._make_fullstack_fixture()
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            OUMVGateway._last_scan_time = 9999999999.0  # skip live port probing
+            OUMVGateway._cached_fe = None
+            OUMVGateway._cached_be = None
+
+            res = OUMVGateway.understand(query="causality", target="/api/orders", runtime="auto")
+            self.assertEqual(res["query"], "causality")
+            self.assertIn("crossStack", res)
+            self.assertGreaterEqual(res["crossStack"]["count"], 1)
+            edge = res["crossStack"]["edges"][0]
+            self.assertEqual(edge["source"]["type"], "frontend.action")
+            self.assertEqual(edge["target"]["type"], "backend.endpoint")
+            self.assertEqual(edge["evidence"]["provenance"], "static")
+            # Static fallback present because both runtimes are offline
+            self.assertIn("staticAnalysis", res)
+
+    def test_understand_impact_returns_static_impact_and_callers(self):
+        self._make_fullstack_fixture()
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            OUMVGateway._last_scan_time = 9999999999.0
+            OUMVGateway._cached_fe = None
+            OUMVGateway._cached_be = None
+
+            res = OUMVGateway.understand(query="impact", target="/api/orders", runtime="auto")
+            self.assertEqual(res["query"], "impact")
+            self.assertEqual(res["mode"], "STATIC_IMPACT")
+            self.assertGreaterEqual(res["crossStack"]["count"], 1)
+            self.assertEqual(
+                res["crossStack"]["frontendCallers"][0]["source"]["file"], "frontend/api.ts"
+            )
+            self.assertTrue(res["missingEvidence"])
+
 
 if __name__ == "__main__":
     unittest.main()

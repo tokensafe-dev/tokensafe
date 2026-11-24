@@ -66,6 +66,14 @@ folds multi-turn conversation history, guards against secret leaks, and standard
     - Run unit tests with concise flags or via `tokensafe wrap '<cmd>'` or `tokensafe tests [cmd]`. Native support for `bun test`, `pytest`, `python -m unittest`, `vitest`, `jest`, `cargo test`, and `go test` collapses passing test suites into a single-line summary (`✓ PASS: ...`) rather than flooding `Messages` history with hundreds of verbose log lines. Full traceback is strictly preserved on failure.
     - Commands like `git push` automatically strip interactive object-counting progress spam (`--no-progress`), and `git commit` is wrapped when pre-commit/husky hooks exist.
 
+12. **MULTIMODAL ISOLATION (PROMPT CACHE PROTECTION)**:
+    - Loading screenshots or images into a long (>150k-token) coding conversation triggers full KV-cache invalidation and a 3-7x TTFT cliff (40-97s/turn).
+    - ALWAYS delegate visual inspection of screenshots/mockups to a subagent that returns a concise text-only summary of findings (selectors, coordinates, values, errors); NEVER load raw images into the main coding session.
+
+13. **BATCH EDITS & SEARCH ACCELERATION (`apply_edits` & `batch_search`)**:
+    - When editing >=2 hunks/files or running an edit + verify loop, call `tokensafe:apply_edits(edits=[...], verify="npm test")` to consolidate operations into 1 turn instead of serial turns.
+    - When running >=2 searches or combining code search with git inspection, call `tokensafe:batch_search(queries=[...])` for concurrent execution in <70ms.
+
 ---
 
 ## Core MCP Tools (`tokensafe`)
@@ -78,6 +86,8 @@ The full tool table with efficiency impact, JSON workflow examples, the Guard ch
 
 Quick pointers:
 
+- Batch Edits + Verify: `tokensafe:apply_edits(edits=[...], best_effort=true, verify="npm test")` — atomic/best-effort multi-file edits + inline test/typecheck in 1 turn.
+- Batch Search: `tokensafe:batch_search(queries=[{pattern, type}])` — up to 20 concurrent text, regex, glob, fuzzy, or read-only git queries in 1 call.
 - Search: `tokensafe:scoped_search(query, path=".", scope="code")` — safe keyword & symbol search, never raw grep.
 - Inspect: `tokensafe:smart_read_file(path, symbol)` — definition + 1-hop deps. Auto-slices lockfiles, CSV/TSV, SQL dumps.
 - External Types: `tokensafe:slice_external_type(package_name, type_name)` — extracts 3rd-party TypeScript definitions from `node_modules` without file crawling (-95% tokens, L1/L2/L3 synced).

@@ -126,6 +126,15 @@ def main():
     except Exception:
         pass
 
+    try:
+        if workspace_paths:
+            from src.snapshot import build_workspace_snapshot
+            snapshot = build_workspace_snapshot(workspace_root, max_bytes=1400)
+            if snapshot:
+                system_sections.append(snapshot)
+    except Exception:
+        pass
+
     inject_steps = [
         {"systemMessage": {"systemMessage": "\n\n".join(system_sections), "metadata": {}}}
     ]

@@ -295,6 +295,31 @@ class OUMVGateway:
     def understand(cls, query: str = "causality", target: Optional[str] = None, runtime: str = "auto") -> Any:
         fe, be = cls.get_endpoints()
 
+        from src.graph_engine import GraphEngine
+        ws = get_active_workspace()
+        graph = GraphEngine.get_instance(ws)
+
+        # Impact analysis: static cross-stack graph as the backbone, runtime answers attached when online
+        if query == "impact":
+            report: Dict[str, Any] = {
+                "query": "impact",
+                "target": target,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            report.update(graph.get_static_impact(target or ""))
+            if target:
+                if fe:
+                    try:
+                        report["frontendImpact"] = cls._rpc_call(fe["url"], "oumv/understand", {"query": "impact", "target": target, "componentId": target})
+                    except Exception as e:
+                        report["frontendError"] = str(e)
+                if be:
+                    try:
+                        report["backendImpact"] = cls._rpc_call(be["url"], "oumv/understand", {"query": "impact", "target": target})
+                    except Exception as e:
+                        report["backendError"] = str(e)
+            return report
+
         # Cross-layer causality query
         if query == "causality" and runtime in ("auto", ""):
             report = {
@@ -313,11 +338,13 @@ class OUMVGateway:
                 except Exception as e:
                     report["frontendError"] = str(e)
 
+            # Unified cross-stack relationships (frontend call -> backend endpoint), available online and offline
+            cross = cls._static_cross_stack(graph, target)
+            if cross["edges"]:
+                report["crossStack"] = cross
+
             # Out-of-the-box static fallback if neither is online
             if not be and not fe:
-                from src.graph_engine import GraphEngine
-                ws = get_active_workspace()
-                graph = GraphEngine.get_instance(ws)
                 report["staticAnalysis"] = graph.get_static_oumv_slice(level="L1", target=target)
                 report["evidence"] = {"provenance": "static", "confidence": "confirmed", "sourceAdapter": "tokensafe-graph-engine"}
 
@@ -327,10 +354,30 @@ class OUMVGateway:
             url = cls._resolve_client_url(runtime=runtime, target=target)
             return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target, "componentId": target})
         except RuntimeError:
-            from src.graph_engine import GraphEngine
-            ws = get_active_workspace()
-            graph = GraphEngine.get_instance(ws)
+            if query == "impact":
+                return graph.get_static_impact(target or "")
             return graph.get_static_oumv_slice(level="L1", target=target)
+
+    @staticmethod
+    def _static_cross_stack(graph: Any, target: Optional[str]) -> Dict[str, Any]:
+        """Cross-stack edges (frontend API call -> backend endpoint) from the static graph."""
+        evidence = {"provenance": "static", "sourceAdapter": "tokensafe-graph-engine", "confidence": "probable"}
+        edges: List[Dict[str, Any]] = []
+        for link in getattr(graph, "api_links", []):
+            if target:
+                t = target.lower()
+                hay = " ".join([
+                    link["source"].get("route") or "", link["source"].get("file") or "",
+                    link["target"].get("route") or "", link["target"].get("file") or "",
+                ]).lower()
+                if t not in hay:
+                    continue
+            edges.append({
+                "source": link["source"],
+                "target": link["target"],
+                "evidence": evidence,
+            })
+        return {"edges": edges[:30], "count": len(edges), "evidence": evidence}
 
     # 4. Tool: oumv_mutate
     @classmethod
@@ -378,19 +425,46 @@ class OUMVGateway:
                 if expected_version and current_version and expected_version != current_version:
                     raise RuntimeError(f"[OUMV CONFLICT: -32001] OCC version mismatch: expected {expected_version}, current is {current_version}")
 
+                # Syntax pre-flight: never persist syntactically broken code (OUMV spec §8 Mutation Policy)
+                from src.syntax_guard import check_syntax
+                syntax_check = check_syntax(abs_path, replacement)
+                if syntax_check.get("status") == "failed":
+                    raise RuntimeError(
+                        f"[OUMV SYNTAX_ERROR: -32002] Edit rejected by syntax guard "
+                        f"({syntax_check.get('tool')}): {syntax_check.get('error')}"
+                    )
+
+                # Automatic backup of previous content before overwriting
+                backup_path = None
+                if current_version is not None:
+                    try:
+                        backup_dir = os.path.join(ws, ".tokensafe", "backups")
+                        os.makedirs(backup_dir, exist_ok=True)
+                        digest = hashlib.sha256(content).hexdigest()[:8]
+                        backup_path = os.path.join(backup_dir, f"{digest}_{os.path.basename(abs_path)}.bak")
+                        with open(backup_path, "wb") as f:
+                            f.write(content)
+                    except Exception:
+                        backup_path = None
+
                 os.makedirs(os.path.dirname(abs_path), exist_ok=True)
                 with open(abs_path, "w", encoding="utf-8") as f:
                     f.write(replacement)
 
                 new_version = "sha256:" + hashlib.sha256(replacement.encode("utf-8")).hexdigest()
-                return {
+                result = {
                     "success": True,
                     "path": path,
                     "symbol": symbol,
                     "newVersion": new_version,
                     "mode": "OUT_OF_THE_BOX_DIRECT_EDIT",
+                    "syntaxCheck": syntax_check,
                     "message": "Surgical edit applied directly to workspace file (dev-server offline)",
                 }
+                if backup_path:
+                    result["backupPath"] = backup_path
+                    result["rollbackHint"] = f"Previous content backed up at {backup_path}"
+                return result
             raise
 
     # 5. Tool: oumv_verify
