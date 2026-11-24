@@ -10,7 +10,7 @@ slices bulky tool calls (such as full-file reads), guards secrets and unsafe com
 ## STRICT REPOSITORY PRIVACY BOUNDARY (CONFIDENTIALITY DIRECTIVE)
 - This repository (`tokensafe`) is **STRICTLY PUBLIC OPEN-SOURCE**.
 - **NEVER** save, commit, or create internal architectural plans, marketing strategies, repositioning docs, roadmaps, design documents (`docs/plans/`), or internal notes in this repository!
-- All internal documents, plans, strategy files, roadmaps, and business design docs MUST live exclusively in the private repository (`tokensafe-cloud`, specifically `tokensafe-cloud/docs/plans/`).
+- All internal documents, plans, strategy files, roadmaps, and business design docs MUST live exclusively in the private repository (`tokensafe-api`, specifically `tokensafe-api/docs/plans/` or `tokensafe-site/docs/`).
 - If you find any internal planning or strategy document here, delete it immediately and move it to the private repository.
 
 ## Architecture Guidelines
