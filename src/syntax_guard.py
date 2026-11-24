@@ -43,6 +43,8 @@ def check_syntax(abs_path: str, content: str) -> Dict[str, str]:
             return {"status": "passed", "tool": "python-ast"}
         except SyntaxError as e:
             return {"status": "failed", "tool": "python-ast", "error": f"line {e.lineno}: {e.msg}"}
+        except Exception as e:
+            return {"status": "failed", "tool": "python-ast", "error": str(e)}
 
     if strategy == "node-check":
         node_bin = shutil.which("node")
