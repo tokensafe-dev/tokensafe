@@ -116,8 +116,18 @@ def main():
     except Exception:
         pass
 
+    system_sections = [directives]
+
+    try:
+        from src.mistakes import MistakesLedger
+        mistake_guard = MistakesLedger.get_guard_prompt(project_root=workspace_root)
+        if mistake_guard:
+            system_sections.append(mistake_guard)
+    except Exception:
+        pass
+
     inject_steps = [
-        {"systemMessage": {"systemMessage": directives, "metadata": {}}}
+        {"systemMessage": {"systemMessage": "\n\n".join(system_sections), "metadata": {}}}
     ]
 
     try:
@@ -147,14 +157,6 @@ def main():
         bloat_warning = EnvironmentAuditor.get_bloat_warning(workspace_root=workspace_root)
         if bloat_warning:
             inject_steps.append(_user_markdown(bloat_warning))
-    except Exception:
-        pass
-
-    try:
-        from src.mistakes import MistakesLedger
-        mistake_guard = MistakesLedger.get_guard_prompt(project_root=workspace_root)
-        if mistake_guard:
-            inject_steps.append({"systemMessage": {"systemMessage": mistake_guard, "metadata": {}}})
     except Exception:
         pass
 

@@ -28,3 +28,4 @@ data/.sync.lock
 data/.mcp_reload
 docs/plans/
 .tokensafe/
+.zcode/

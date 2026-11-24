@@ -171,6 +171,24 @@ class TestSessionStartHook(unittest.TestCase):
             self.assertTrue(any("TokenSafe Architecture Map" in t for t in texts))
             self.assertTrue(any("Core God Nodes and dependency hubs mapped above" in t for t in texts))
 
+    def test_directives_and_mistake_guard_unified_into_single_system_message(self):
+        from hooks import session_start
+        with tempfile.TemporaryDirectory() as tmp:
+            _fresh_env(tmp)
+            payload = {"conversationId": "ss_mistake", "workspacePaths": [tmp]}
+            with patch("src.mistakes.MistakesLedger.get_guard_prompt", return_value="[TokenSafe Anti-Stuck Guard: Prior Dead-Ends]"), \
+                 patch("src.license_manager.LicenseManager.check_quota", return_value={"is_quota_exceeded": False}), \
+                 patch("src.version_checker.VersionChecker.notify_os_update_background"), \
+                 patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                session_start.main()
+            data = json.loads(out.getvalue())
+            steps = data["injectSteps"]
+            texts = [s["systemMessage"]["systemMessage"] for s in steps if "systemMessage" in s and s["systemMessage"]["systemMessage"]]
+            self.assertEqual(len(texts), 1, "Directives and mistake guard must be unified into exactly one systemMessage step")
+            self.assertIn("Mandatory Directives", texts[0])
+            self.assertIn("Anti-Stuck Guard", texts[0])
+
     def test_guest_pitch_fires_once_for_guest_quota(self):
         from hooks import session_start
         with tempfile.TemporaryDirectory() as tmp:
