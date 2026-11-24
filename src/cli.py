@@ -97,7 +97,10 @@ def summarize_unittest_output(raw: str, full_traceback: bool = False) -> str:
 def _print_help():
     print("TokenSafe CLI — usage: tokensafe <command> [args]\n")
     print("Commands:")
-    print("  create <name> [--template ...] Greenfield project scaffolder (tokensafe-ui + tokensafe-python)")
+    print("  integrate [--dry-run]          Retrofit OUMV into existing project (React, Vue, FastAPI, Go)")
+    print("  adapters [list]                Catalog of frontend/backend OUMV runtime adapters")
+    print("  oumv doctor / status           Diagnose OUMV configuration, ports, and permissions")
+    print("  create <name> [--template ...] Greenfield project scaffolder (tokensafe-ui + tokensafe-backend)")
     print("  init [--template ...]          Initialize TokenSafe stack in current directory")
     print("  stats / markdown / html        Savings analytics (terminal / .md report / dashboard)")
     print("  status                         One-screen health check: hooks, weekly savings, tier, sync")
@@ -662,6 +665,68 @@ def main(argv: Optional[List[str]] = None):
             print(f"  ✔ Files created:  {len(res['created_files'])}\n")
         except Exception as e:
             print(f"\n❌ Initialization failed: {e}\n")
+
+    elif command in ("integrate", "retrofit"):
+        import json
+        from src.retrofit import detect_project_stack, generate_config
+        dry_run = "--dry-run" in args
+        force = "--force" in args or "-f" in args
+        cwd = os.getcwd()
+
+        print(f"\n\033[1m\033[36m⚡ TOKENSAFE OUMV RETROFIT INTEGRATION ⚡\033[0m\n")
+        stack = detect_project_stack(cwd)
+        fe = stack.get("frontend")
+        be = stack.get("backend")
+
+        print(f"  Workspace:  {cwd}")
+        print(f"  Frontend:   \033[32m{fe['framework']} ({fe['provider']})\033[0m" if fe else "  Frontend:   \033[33mNone detected\033[0m")
+        print(f"  Backend:    \033[32m{be['framework']} ({be['provider']})\033[0m" if be else "  Backend:    \033[33mNone detected\033[0m")
+        print(f"  Manifests:  {', '.join(stack.get('detected_files', [])) or 'None'}\n")
+
+        cfg, conf_file, created = generate_config(cwd, stack, dry_run=dry_run, force=force)
+        if dry_run:
+            print(f"  \033[33m[DRY-RUN]\033[0m Proposed configuration (.tokensafe/oumv.json):")
+            print(json.dumps(cfg, indent=4))
+        elif created:
+            print(f"  ✔ Generated OUMV config: \033[1m{conf_file}\033[0m")
+            print(f"  ✔ Mutation policy:       \033[32mread-only (mutate: false)\033[0m")
+            print(f"  ✔ Profiles enabled:      {', '.join(cfg.get('oumv', {}).get('profiles', []))}")
+            print("\n  Project is now retrofitted for OUMV. AI coding agents can inspect components and endpoints.\n")
+        else:
+            print(f"  ✔ Existing configuration preserved: \033[1m{conf_file}\033[0m (use --force to overwrite)\n")
+
+    elif command in ("adapters", "adapter"):
+        from src.retrofit import get_adapters_catalog
+        catalog = get_adapters_catalog()
+        print(f"\n\033[1m\033[36m⚡ TOKENSAFE OUMV ADAPTERS CATALOG ⚡\033[0m\n")
+        print(f"  {'ADAPTER ID':<20} {'PROFILE':<10} {'REPO':<26} {'STATUS':<10}")
+        print("  " + "-" * 70)
+        for a in catalog:
+            color = "\033[32m" if a["status"] == "ready" else "\033[33m"
+            print(f"  {a['id']:<20} {a['profile']:<10} {a['repo']:<26} {color}{a['status']:<10}\033[0m")
+        print("\n  Run \033[1mtokensafe integrate\033[0m in any project to auto-detect and configure compatible adapters.\n")
+
+    elif command == "oumv":
+        sub = args[1] if len(args) > 1 else "status"
+        if sub in ("doctor", "audit"):
+            from src.retrofit import run_doctor
+            doc = run_doctor(os.getcwd())
+            print(f"\n\033[1m\033[36m⚡ TOKENSAFE OUMV DOCTOR ⚡\033[0m\n")
+            print(f"  Config (.tokensafe/oumv.json):     {'✔ Present' if doc['config_present'] else '○ Not found (run tokensafe integrate)'}")
+            print(f"  Runtime Beacon (.tokensafe/...):   {'✔ Active' if doc['runtime_beacon_present'] else '○ Offline (DevServer not running)'}")
+            fe = doc['detected_stack'].get('frontend')
+            be = doc['detected_stack'].get('backend')
+            print(f"  Detected Frontend:                 {fe['framework'] if fe else 'None'}")
+            print(f"  Detected Backend:                  {be['framework'] if be else 'None'}")
+            mut = doc['permissions'].get('mutate', False)
+            print(f"  Mutation Permission:              {'✔ Enabled' if mut else '○ Read-Only (Default safe)'}\n")
+        else:
+            from src.oumv_gateway import OUMVGateway
+            status = OUMVGateway.status()
+            print(f"\n\033[1m\033[36m⚡ TOKENSAFE OUMV RUNTIME STATUS ⚡\033[0m\n")
+            print(f"  Frontend Runtime:  {status['frontend'].get('status', 'OK')} ({status['frontend'].get('name', 'N/A')})")
+            print(f"  Backend Runtime:   {status['backend'].get('status', 'OK')} ({status['backend'].get('name', 'N/A')})")
+            print(f"  Workspace:         {status.get('workspace')}\n")
 
     elif command == "proxy":
         from src.proxy import run_proxy

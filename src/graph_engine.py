@@ -1475,6 +1475,80 @@ class CodeGraph:
         items = [f"{g['file']} ({g['dependents']} deps)" for g in nodes_to_show]
         return f"[TokenSafe Architecture Map | Core Hubs: {', '.join(items)}]"
 
+    def get_static_oumv_slice(self, level: str = "L0", target: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Level 1 Static OUMV Inspection:
+        Returns statically discoverable components, API endpoints, routes, and call sites
+        directly from the AST graph when runtime dev-servers are disconnected.
+        """
+        evidence = {
+            "provenance": "static",
+            "sourceAdapter": "tokensafe-graph-engine",
+            "confidence": "confirmed",
+        }
+
+        lvl = (level or "L0").upper()
+        if lvl == "L0":
+            god_nodes = self.get_god_nodes(top_n=5)
+            endpoints_count = sum(len(eps) for eps in self.file_endpoints.values())
+            calls_count = sum(len(c) for c in self.file_api_calls.values())
+            return {
+                "level": "L0",
+                "mode": "STATIC_OFFLINE_PULSE",
+                "status": "OFFLINE_STATIC",
+                "summary": f"Indexed {len(self.file_symbols)} files, {len(self.symbols)} symbols, {endpoints_count} API endpoints, {calls_count} client calls",
+                "totalFiles": len(self.file_symbols),
+                "totalSymbols": len(self.symbols),
+                "totalEndpoints": endpoints_count,
+                "totalClientCalls": calls_count,
+                "topGodNodes": [g["file"] for g in god_nodes],
+                "evidence": evidence,
+            }
+
+        # L1: Discovered API surface & Routes
+        endpoints = []
+        for rel_path, eps in self.file_endpoints.items():
+            for norm_route, sym in eps:
+                if not target or target.lower() in norm_route.lower() or target.lower() in rel_path.lower():
+                    endpoints.append({
+                        "route": norm_route,
+                        "file": rel_path,
+                        "symbol": sym,
+                        "type": "backend.endpoint",
+                    })
+
+        client_calls = []
+        for rel_path, calls in self.file_api_calls.items():
+            for norm_route, sym in calls:
+                if not target or target.lower() in norm_route.lower() or target.lower() in rel_path.lower():
+                    client_calls.append({
+                        "route": norm_route,
+                        "file": rel_path,
+                        "symbol": sym,
+                        "type": "frontend.action",
+                    })
+
+        matching_symbols = []
+        if target:
+            for sk, sym in self.symbols.items():
+                if target.lower() in sym.name.lower():
+                    matching_symbols.append({
+                        "name": sym.name,
+                        "kind": sym.kind,
+                        "file": sym.file_path,
+                        "lines": [sym.line_start, sym.line_end],
+                    })
+
+        return {
+            "level": "L1",
+            "target": target,
+            "mode": "STATIC_SURFACE",
+            "endpoints": endpoints[:30],
+            "clientCalls": client_calls[:30],
+            "matchingSymbols": matching_symbols[:20],
+            "evidence": evidence,
+        }
+
 
 class GraphEngine:
     """Multi-Project Manager for automatic background graph execution."""

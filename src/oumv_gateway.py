@@ -95,6 +95,7 @@ class OUMVGateway:
                             "name": fe_info.get("name", "tokensafe-ui"),
                             "version": fe_info.get("version", "1.0.0"),
                             "url": fe_info["url"],
+                            "sessionToken": fe_info.get("sessionToken"),
                             "healthy": True,
                             "capabilities": fe_info.get("capabilities", {}),
                         }
@@ -105,6 +106,7 @@ class OUMVGateway:
                             "name": be_info.get("name", "tokensafe-backend"),
                             "version": be_info.get("version", "1.0.0"),
                             "url": be_info["url"],
+                            "sessionToken": be_info.get("session_token") or be_info.get("sessionToken"),
                             "healthy": True,
                             "capabilities": be_info.get("capabilities", {}),
                         }
@@ -142,10 +144,20 @@ class OUMVGateway:
             "params": params or {},
         }).encode("utf-8")
 
+        headers = {"Content-Type": "application/json", "User-Agent": "TokenSafe-Gateway/1.0"}
+        token = None
+        if cls._cached_fe and cls._cached_fe.get("url") == endpoint_url:
+            token = cls._cached_fe.get("sessionToken")
+        elif cls._cached_be and cls._cached_be.get("url") == endpoint_url:
+            token = cls._cached_be.get("sessionToken")
+
+        if token:
+            headers["X-OUMV-Session-Token"] = token
+
         req = urllib.request.Request(
             endpoint_url,
             data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "TokenSafe-Gateway/1.0"},
+            headers=headers,
             method="POST",
         )
 
@@ -172,12 +184,23 @@ class OUMVGateway:
 
         # Auto detection based on target
         if target:
+            try:
+                from src.retrofit import OUMVProjectContext
+                ctx = OUMVProjectContext.get_for_workspace()
+                detected_rt = ctx.resolve_target_runtime(target)
+                if detected_rt == "backend" and be:
+                    return be["url"]
+                elif detected_rt == "frontend" and fe:
+                    return fe["url"]
+            except Exception:
+                pass
+
             # Backend hints: HTTP method prefixes, API paths, SQL, handlers
             if any(target.startswith(m) for m in ["GET ", "POST ", "PUT ", "DELETE ", "PATCH "]) or "/api/" in target or target.startswith("/"):
                 if be:
                     return be["url"]
             # Frontend hints: DOM selectors (#, .), components (<, JSX, Tab)
-            if any(target.startswith(c) for c in ["#", ".", "[", "button", "input"]) or target.startswith("<"):
+            if any(target.startswith(c) for c in ["#", ".", "[", "button", "input"]) or target.startswith("<") or target.endswith((".tsx", ".jsx", ".vue")):
                 if fe:
                     return fe["url"]
 
@@ -193,10 +216,31 @@ class OUMVGateway:
     def status(cls, workspace_dir: Optional[str] = None) -> Dict[str, Any]:
         cls.scan(workspace_dir=workspace_dir)
         fe, be = cls._cached_fe, cls._cached_be
+        ws = workspace_dir or get_active_workspace()
+
+        # Out-of-the-box stack detection
+        stack_info = {}
+        try:
+            from src.retrofit import detect_project_stack
+            stack_info = detect_project_stack(ws)
+        except Exception:
+            pass
+
         return {
-            "frontend": fe or {"status": "DISCONNECTED", "tip": "Start frontend dev-server (port 5173/3000)"},
-            "backend": be or {"status": "DISCONNECTED", "tip": "Start backend dev-server (port 8080/8000)"},
-            "workspace": workspace_dir or get_active_workspace(),
+            "mode": "OUT_OF_THE_BOX_HYBRID",
+            "frontend": fe or {
+                "status": "DISCONNECTED",
+                "framework": stack_info.get("frontend", {}).get("framework", "None") if stack_info.get("frontend") else "None",
+                "tip": "Static AST analysis active. When frontend DevServer starts (port 5173/3000), live OUMV auto-connects."
+            },
+            "backend": be or {
+                "status": "DISCONNECTED",
+                "framework": stack_info.get("backend", {}).get("framework", "None") if stack_info.get("backend") else "None",
+                "tip": "Static AST analysis active. When backend DevServer starts (port 8080/8000), live OUMV auto-connects."
+            },
+            "staticIntelligence": "ACTIVE (L0/L1/L2 AST observation & cross-stack linking ready)",
+            "detectedStack": stack_info,
+            "workspace": ws,
         }
 
     # 2. Tool: oumv_observe
@@ -212,21 +256,39 @@ class OUMVGateway:
                     results["frontend"] = cls._rpc_call(fe["url"], "oumv/observe", {"level": "L0"})
                 except Exception as e:
                     results["frontend"] = {"error": str(e)}
-            else:
-                results["frontend"] = {"status": "DISCONNECTED", "tip": "No active frontend dev-server (port 5173/3000)"}
-
             if be:
                 try:
                     results["backend"] = cls._rpc_call(be["url"], "oumv/observe", {"level": "L0"})
                 except Exception as e:
                     results["backend"] = {"error": str(e)}
+
+            # Out-of-the-box fallback when both are offline
+            if not fe and not be:
+                from src.graph_engine import GraphEngine
+                ws = get_active_workspace()
+                graph = GraphEngine.get_instance(ws)
+                results["staticAnalysis"] = graph.get_static_oumv_slice(level="L0")
+                results["tip"] = "DevServers offline — static AST intelligence active out-of-the-box."
             else:
-                results["backend"] = {"status": "DISCONNECTED", "tip": "No active backend dev-server (port 8080/8000)"}
+                if not fe:
+                    results["frontend"] = {"status": "OFFLINE_STATIC", "tip": "Frontend DevServer offline (using static AST)"}
+                if not be:
+                    results["backend"] = {"status": "OFFLINE_STATIC", "tip": "Backend DevServer offline (using static AST)"}
 
             return results
 
-        url = cls._resolve_client_url(runtime=runtime, target=target)
-        return cls._rpc_call(url, "oumv/observe", {"level": level, "target": target, "componentId": target})
+        try:
+            url = cls._resolve_client_url(runtime=runtime, target=target)
+            res = cls._rpc_call(url, "oumv/observe", {"level": level, "target": target, "componentId": target})
+            if isinstance(res, dict) and "evidence" not in res:
+                res["evidence"] = {"provenance": "runtime", "confidence": "confirmed", "sourceAdapter": "live-devserver"}
+            return res
+        except RuntimeError:
+            # Level 1 Static Fallback via GraphEngine
+            from src.graph_engine import GraphEngine
+            ws = get_active_workspace()
+            graph = GraphEngine.get_instance(ws)
+            return graph.get_static_oumv_slice(level=level, target=target)
 
     # 3. Tool: oumv_understand
     @classmethod
@@ -250,14 +312,43 @@ class OUMVGateway:
                     report["frontendCausality"] = cls._rpc_call(fe["url"], "oumv/understand", {"query": query, "target": target, "componentId": target})
                 except Exception as e:
                     report["frontendError"] = str(e)
+
+            # Out-of-the-box static fallback if neither is online
+            if not be and not fe:
+                from src.graph_engine import GraphEngine
+                ws = get_active_workspace()
+                graph = GraphEngine.get_instance(ws)
+                report["staticAnalysis"] = graph.get_static_oumv_slice(level="L1", target=target)
+                report["evidence"] = {"provenance": "static", "confidence": "confirmed", "sourceAdapter": "tokensafe-graph-engine"}
+
             return report
 
-        url = cls._resolve_client_url(runtime=runtime, target=target)
-        return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target, "componentId": target})
+        try:
+            url = cls._resolve_client_url(runtime=runtime, target=target)
+            return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target, "componentId": target})
+        except RuntimeError:
+            from src.graph_engine import GraphEngine
+            ws = get_active_workspace()
+            graph = GraphEngine.get_instance(ws)
+            return graph.get_static_oumv_slice(level="L1", target=target)
 
     # 4. Tool: oumv_mutate
     @classmethod
     def mutate(cls, path: str, symbol: Optional[str] = None, replacement: Optional[str] = None, expected_version: Optional[str] = None, runtime: str = "auto") -> Any:
+        # Check workspace permissions
+        ws = get_active_workspace()
+        cfg_file = os.path.join(ws, ".tokensafe", "oumv.json")
+        if os.path.isfile(cfg_file):
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if not cfg.get("permissions", {}).get("mutate", False):
+                    raise RuntimeError("[OUMV PERMISSION_DENIED: -32007] Workspace policy prohibits mutations (.tokensafe/oumv.json: permissions.mutate=false). Set mutate: true to allow agent edits.")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+
         url = cls._resolve_client_url(runtime=runtime, target=path)
         return cls._rpc_call(url, "oumv/applyEdit", {
             "path": path,
