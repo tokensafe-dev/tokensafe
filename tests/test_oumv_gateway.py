@@ -23,7 +23,8 @@ class TestOUMVGateway(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    def test_status_disconnected_default(self):
+    @patch.object(OUMVGateway, "_probe_candidates", return_value=None)
+    def test_status_disconnected_default(self, _mock_probe):
         status = OUMVGateway.status(workspace_dir=self.test_dir)
         self.assertIn("frontend", status)
         self.assertIn("backend", status)
