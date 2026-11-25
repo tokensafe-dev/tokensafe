@@ -747,19 +747,154 @@ class EnvironmentAuditor:
         }
 
     @classmethod
+    def list_skills(cls, workspace_root: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Lists active and disabled skills across all skill roots with source & token estimate."""
+        skills: List[Dict[str, Any]] = []
+        disabled_plugins = cls._get_disabled_plugin_names()
+        plugins_dir = os.path.abspath(cls.get_plugins_dir())
+        seen_real = set()
+
+        for sdir in cls.get_skills_dirs(workspace_root):
+            is_plugins_root = os.path.abspath(sdir) == plugins_dir
+            for root, dirs, files in os.walk(sdir, followlinks=True):
+                real_root = os.path.realpath(root)
+                if real_root in seen_real:
+                    dirs[:] = []
+                    continue
+                seen_real.add(real_root)
+                if is_plugins_root and os.path.abspath(root) == plugins_dir:
+                    dirs[:] = [d for d in dirs if d not in disabled_plugins and not d.endswith(".disabled")]
+                else:
+                    dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "__pycache__", ".venv", "venv")]
+
+                if "SKILL.md" in files:
+                    folder_name = os.path.basename(root)
+                    is_disabled = folder_name.endswith(".disabled") or ".disabled" + os.sep in root
+                    clean_name = folder_name[:-9] if folder_name.endswith(".disabled") else folder_name
+                    desc = ""
+                    try:
+                        with open(os.path.join(root, "SKILL.md"), "r", encoding="utf-8", errors="replace") as f:
+                            head = f.read(1200)
+                        m_name = re.search(r"(?m)^name:\s*(.+)$", head)
+                        if m_name and m_name.group(1).strip():
+                            clean_name = m_name.group(1).strip().strip("'\"")
+                        m_desc = re.search(r"(?m)^description:\s*(.+)$", head)
+                        if m_desc:
+                            raw_desc = m_desc.group(1).strip().strip("'\"")
+                            if raw_desc in (">", ">-", "|", "|-"):
+                                after = head[m_desc.end():]
+                                for next_l in after.splitlines():
+                                    stripped = next_l.strip()
+                                    if stripped and not re.match(r"^[A-Za-z0-9_-]+:\s*", stripped):
+                                        desc = stripped[:90]
+                                        break
+                            else:
+                                desc = raw_desc[:90]
+                    except Exception:
+                        pass
+                    skills.append({
+                        "name": clean_name,
+                        "dir_name": folder_name[:-9] if folder_name.endswith(".disabled") else folder_name,
+                        "path": root,
+                        "root": sdir,
+                        "disabled": is_disabled,
+                        "est_tokens": EST_TOKENS_PER_SKILL,
+                        "description": desc,
+                        "builtin": "builtin" in root.split(os.sep),
+                    })
+                    dirs[:] = []
+        return sorted(skills, key=lambda x: (x["disabled"], x["name"].lower()))
+
+    @classmethod
+    def disable_skill(cls, skill_name: str, workspace_root: Optional[str] = None) -> Dict[str, Any]:
+        """Disables a user/workspace skill by renaming its directory to `<name>.disabled`."""
+        target = skill_name.strip().lower()
+        for sk in cls.list_skills(workspace_root):
+            if sk["disabled"]:
+                continue
+            if sk["name"].lower() == target or sk["dir_name"].lower() == target:
+                if sk["builtin"]:
+                    return {"success": False, "error": f"Skill '{sk['name']}' is a builtin Antigravity skill and cannot be renamed safely."}
+                src_path = sk["path"]
+                dst_path = f"{src_path}.disabled"
+                if os.path.exists(dst_path):
+                    return {"success": False, "error": f"Target '{dst_path}' already exists."}
+                try:
+                    os.rename(src_path, dst_path)
+                    return {"success": True, "skill": sk["name"], "path": dst_path}
+                except Exception as exc:
+                    return {"success": False, "error": str(exc)}
+        return {"success": False, "error": f"Active skill '{skill_name}' not found."}
+
+    @classmethod
+    def enable_skill(cls, skill_name: str, workspace_root: Optional[str] = None) -> Dict[str, Any]:
+        """Re-enables a previously `.disabled` skill directory."""
+        target = skill_name.strip().lower()
+        for sk in cls.list_skills(workspace_root):
+            if not sk["disabled"]:
+                continue
+            if sk["name"].lower() == target or sk["dir_name"].lower() == target:
+                src_path = sk["path"]
+                if not src_path.endswith(".disabled"):
+                    continue
+                dst_path = src_path[:-9]
+                if os.path.exists(dst_path):
+                    return {"success": False, "error": f"Target '{dst_path}' already exists."}
+                try:
+                    os.rename(src_path, dst_path)
+                    return {"success": True, "skill": sk["name"], "path": dst_path}
+                except Exception as exc:
+                    return {"success": False, "error": str(exc)}
+        return {"success": False, "error": f"Disabled skill '{skill_name}' not found."}
+
+    @classmethod
+    def format_skills_report(cls, workspace_root: Optional[str] = None) -> str:
+        """Formats a clean CLI list of active & disabled skills grouped by token overhead."""
+        skills = cls.list_skills(workspace_root)
+        active = [s for s in skills if not s["disabled"]]
+        disabled = [s for s in skills if s["disabled"]]
+        lines = [
+            f"\n\033[1m\033[36m⚡ TOKENSAFE SKILLS INVENTORY ({len(active)} active, {len(disabled)} disabled) ⚡\033[0m\n",
+            f"  \033[1mActive Context Overhead:\033[0m ~{len(active) * EST_TOKENS_PER_SKILL:,} tokens/turn (~{EST_TOKENS_PER_SKILL} tok/skill)\n",
+        ]
+        for s in active:
+            tag = "\033[2m[builtin]\033[0m" if s["builtin"] else f"\033[2m[{os.path.basename(s['root'])}]\033[0m"
+            desc = f" — {s['description']}" if s["description"] else ""
+            lines.append(f"  \033[32m✔\033[0m \033[1m{s['name']:<28}\033[0m {tag}{desc}")
+        if disabled:
+            lines.append("\n  \033[2mDisabled Skills:\033[0m")
+            for s in disabled:
+                lines.append(f"  \033[2m○ {s['name']:<28} [{os.path.basename(s['root'])}]\033[0m")
+        lines.append("\n  💡 Tip: Run \033[36mtokensafe skills disable <name>\033[0m (or \033[36mtokensafe skills enable <name>\033[0m) to manage overhead.\n")
+        return "\n".join(lines)
+
+    @classmethod
     def format_cli_report(cls, workspace_root: Optional[str] = None) -> str:
-        """Formats visual CLI report for tokensafe doctor."""
+        """Formats visual CLI report for tokensafe doctor (pure static environment score)."""
         report = cls.audit(workspace_root)
         q_score: Dict[str, Any] = {}
         score_line = ""
         try:
             from src.quality_score import ContextQualityScore
             from src.governor import ContextBudget
-            from src.metrics import MetricsTracker
-            budget = ContextBudget.estimate(MetricsTracker(), session_id="mcp_session")
-            q_score = ContextQualityScore.calculate(budget=budget, audit=report)
+            window = ContextBudget.resolve_window()
+            static_overhead = (
+                int(report.get("total_static_tokens_per_turn", 0) or 0)
+                + int((report.get("ghost_tokens") or {}).get("ghost_tokens_per_turn", 0) or 0)
+                + int((report.get("rules") or {}).get("total_tokens", 0) or 0)
+            )
+            used_pct = round(min(100.0, (static_overhead / window) * 100.0), 1) if window > 0 else 0.0
+            static_budget = {
+                "used_estimated": static_overhead,
+                "window_tokens": window,
+                "used_pct": used_pct,
+            }
+            q_score = ContextQualityScore.calculate(budget=static_budget, audit=report)
             color = "\033[32m" if q_score["grade"] in ("S", "A") else ("\033[33m" if q_score["grade"] == "B" else "\033[31m")
-            score_line = f"  \033[1mContext Quality Score:\033[0m {color}\033[1mGrade {q_score['grade']} ({q_score['label']})\033[0m — {q_score['headroom_pct']:.0f}% headroom, {q_score['score']}/100 pts\n"
+            score_line = (
+                f"  \033[1mEnvironment Quality Score:\033[0m {color}\033[1mGrade {q_score['grade']} ({q_score['label']})\033[0m "
+                f"— {q_score['headroom_pct']:.1f}% fresh-turn headroom, {q_score['score']}/100 pts\n"
+            )
         except Exception:
             score_line = ""
 
@@ -787,6 +922,8 @@ class EnvironmentAuditor:
         if report["total_skills"] >= 15 and report.get("skills_breakdown"):
             for sdir, cnt in sorted(report["skills_breakdown"].items(), key=lambda kv: -kv[1])[:4]:
                 lines.append(f"    \033[2m• {sdir}: {cnt} skill(s)\033[0m")
+        if report["skills_tokens_per_turn"] >= 4000:
+            lines.append("    \033[36m💡 Tip: Run 'tokensafe skills list' and 'tokensafe skills disable <name>' to trim unused skills\033[0m")
 
         rules = report.get("rules") or {}
         if rules.get("files"):
@@ -827,9 +964,9 @@ class EnvironmentAuditor:
             if has_auto_fixable:
                 lines.append("    ➜ Run: \033[36mtokensafe doctor --fix\033[0m to repair configs & consolidate ghost rule duplicates (with backups)")
             if report["skills_tokens_per_turn"] >= 4000:
-                lines.append(f"    ➜ Disable unused skills/plugins (currently {report['total_skills']} skills ≈ ~{report['skills_tokens_per_turn']:,} tok/turn)")
+                lines.append(f"    ➜ Run: \033[36mtokensafe skills list\033[0m (currently {report['total_skills']} skills ≈ ~{report['skills_tokens_per_turn']:,} tok/turn; disable unused via \033[36mtokensafe skills disable <name>\033[0m)")
             if q_score.get("headroom_pct", 100.0) < 35.0:
-                lines.append("    ➜ Run: \033[36mtokensafe compact\033[0m or start a fresh session to restore context headroom")
+                lines.append("    ➜ Run: \033[36mtokensafe budget\033[0m to inspect live session context usage")
         else:
             lines.append("\n  \033[32m✔ Environment healthy: No critical context bloat detected.\033[0m")
 

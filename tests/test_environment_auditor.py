@@ -235,5 +235,33 @@ class TestAuditorWorkspaceAndRules(unittest.TestCase):
                 ghost_after = EnvironmentAuditor.audit_ghost_tokens(tmp)
                 self.assertFalse(ghost_after["has_ghost_tokens"])
 
+    def test_doctor_static_score_and_skills_disable_enable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_root = os.path.join(tmp, "skills")
+            sk_a = os.path.join(skills_root, "my-unused-skill")
+            os.makedirs(sk_a, exist_ok=True)
+            with open(os.path.join(sk_a, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("---\nname: my-unused-skill\ndescription: Unused helper skill\n---\nBody\n")
+
+            with patch.object(EnvironmentAuditor, "get_config_paths", return_value=[]), \
+                 patch.object(EnvironmentAuditor, "get_plugins_dir", return_value=os.path.join(tmp, "no_plugins")), \
+                 patch.object(EnvironmentAuditor, "get_mcp_schemas_dir", return_value=os.path.join(tmp, "no_schemas")), \
+                 patch.object(EnvironmentAuditor, "get_skills_dirs", return_value=[skills_root]):
+                rep_clean = EnvironmentAuditor.format_cli_report(workspace_root=tmp)
+                self.assertIn("Environment Quality Score:", rep_clean)
+                self.assertNotIn("12% headroom", rep_clean)
+
+                skills = EnvironmentAuditor.list_skills(workspace_root=tmp)
+                self.assertEqual(len(skills), 1)
+                self.assertFalse(skills[0]["disabled"])
+
+                dis = EnvironmentAuditor.disable_skill("my-unused-skill", workspace_root=tmp)
+                self.assertTrue(dis["success"])
+                self.assertEqual(EnvironmentAuditor.audit(workspace_root=tmp)["total_skills"], 0)
+
+                ena = EnvironmentAuditor.enable_skill("my-unused-skill", workspace_root=tmp)
+                self.assertTrue(ena["success"])
+                self.assertEqual(EnvironmentAuditor.audit(workspace_root=tmp)["total_skills"], 1)
+
 if __name__ == "__main__":
     unittest.main()

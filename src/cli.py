@@ -116,7 +116,8 @@ def _print_help():
     print("  expand-ref <hash>              Restore folded tool/command/file result by its 8-char hash")
     print("  wrap <command>                 Run command with compact output folding (e.g. tests/logs)")
     print("  web <url>                      Fetch web page/docs and print clean compact Markdown")
-    print("  doctor [--cleanup]             Audit MCP tool overhead and detect competitor conflicts")
+    print("  doctor [--fix | --cleanup]     Audit MCP/skill overhead, repair configs & consolidate ghost rules")
+    print("  skills [list|disable|enable]   Inspect and toggle active skills to cut turn context tax")
     print("  tests [pytest] [--traceback]   Run the unit test suite (compact failure report)")
     print("  prune [--days N | --max N]     Compact metrics database (roll old events)")
     print("  vacuum                         Reclaim SQLite disk space")
@@ -960,6 +961,34 @@ def main(argv: Optional[List[str]] = None):
                     res = CompetitorAuditor.cleanup(c["id"])
                     print(f"  \033[32m✔ Cleaned {c['name']}: {', '.join(res.get('removed', []))}\033[0m")
 
+    elif command in ("skills", "skill"):
+        from src.environment_auditor import EnvironmentAuditor
+        sub = args[1] if len(args) > 1 else "list"
+        if sub in ("disable", "off", "rm"):
+            if len(args) < 3:
+                print("Usage: tokensafe skills disable <skill_name>")
+                sys.exit(1)
+            target = args[2].strip()
+            res = EnvironmentAuditor.disable_skill(target)
+            if res.get("success"):
+                print(f"\n\033[32m✔ Skill '{res['skill']}' disabled ({res['path']}).\033[0m\n")
+            else:
+                print(f"\n\033[31m✖ {res.get('error', 'Failed to disable skill')}\033[0m\n")
+                sys.exit(1)
+        elif sub in ("enable", "on", "add"):
+            if len(args) < 3:
+                print("Usage: tokensafe skills enable <skill_name>")
+                sys.exit(1)
+            target = args[2].strip()
+            res = EnvironmentAuditor.enable_skill(target)
+            if res.get("success"):
+                print(f"\n\033[32m✔ Skill '{res['skill']}' re-enabled ({res['path']}).\033[0m\n")
+            else:
+                print(f"\n\033[31m✖ {res.get('error', 'Failed to enable skill')}\033[0m\n")
+                sys.exit(1)
+        else:
+            print(EnvironmentAuditor.format_skills_report())
+
     elif command in ("web", "fetch", "url"):
         if len(args) < 2:
             print("Usage: tokensafe web <url>")
@@ -1659,7 +1688,7 @@ def main(argv: Optional[List[str]] = None):
 
     else:
         print(f"Unknown command: {command}")
-        print("Available commands: init, login, logout, stats, status, sync, html, test, tests, expand-ref, wrap, web, doctor, providers, mcp, benchmark, proxy, graph, map, skeleton, guard, mistakes, vacuum, prune, digest, activate, license, markdown, install, uninstall, setup, update, check-update, reset. Run 'tokensafe help' for details.")
+        print("Available commands: init, login, logout, stats, status, sync, html, test, tests, expand-ref, wrap, web, doctor, skills, providers, mcp, benchmark, proxy, graph, map, skeleton, guard, mistakes, vacuum, prune, digest, activate, license, markdown, install, uninstall, setup, update, check-update, reset. Run 'tokensafe help' for details.")
         sys.exit(1)
 
 if __name__ == "__main__":
