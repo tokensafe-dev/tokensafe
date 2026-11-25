@@ -98,10 +98,9 @@ def discover_transcript_paths(
     if ag in ("auto", "zcode", "z.ai"):
         _add_glob("zcode", os.path.join(home, ".zcode", "cli", "rollout", "model-io-*.jsonl"))
 
-    # 3. Claude Code transcripts
+    # 3. Claude Code transcripts (subagent rollouts live in <uuid>/subagents/)
     if ag in ("auto", "claude", "claude_code"):
-        _add_glob("claude", os.path.join(home, ".claude", "projects", "*", "transcripts", "*.jsonl"))
-        _add_glob("claude", os.path.join(home, ".claude", "projects", "*", "*.jsonl"))
+        _add_glob("claude", os.path.join(home, ".claude", "projects", "**", "*.jsonl"), recursive=True)
         _add_glob("claude", os.path.join(home, ".claude", "sessions", "*.jsonl"))
 
     # 4. Codex transcripts
@@ -136,9 +135,9 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
         return {"error": f"File not found: {file_path}"}
 
     detected_agent = agent_type
-    if detected_agent in ("auto", "custom", ""):
+    if detected_agent in ("auto", ""):
         p_agent = _detect_agent_from_path(file_path)
-        detected_agent = p_agent if p_agent != "auto" else "antigravity"
+        detected_agent = p_agent if p_agent != "auto" else "unknown"
 
     total_lines = 0
     llm_turns = 0
@@ -146,6 +145,8 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
     tool_counts: Dict[str, int] = {}
     disk_spills = 0
     tokensafe_calls = 0
+    schema_matched = False
+    seen_claude_messages = set()
 
     timestamps: List[datetime.datetime] = []
     long_turn_gaps = 0
@@ -195,7 +196,8 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
 
                 # ZCode model-io schema
                 if step.get("type") == "model_io" or ("request" in step and "response" in step and "model" in step):
-                    if detected_agent == "antigravity":
+                    schema_matched = True
+                    if detected_agent in ("antigravity", "unknown"):
                         detected_agent = "zcode"
                     llm_turns += 1
                     _track_ts(_parse_iso_ts(step.get("startedAt") or step.get("completedAt")))
@@ -253,27 +255,36 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
                 # Claude Code / Kimi JSONL schema
                 msg = step.get("message") if isinstance(step.get("message"), dict) else None
                 if msg is not None:
-                    _track_ts(_parse_iso_ts(step.get("timestamp") or step.get("created_at")))
-                    m_id = str(msg.get("model") or step.get("model") or "")
-                    if m_id:
-                        if prev_model and m_id != prev_model:
-                            model_switches += 1
-                        prev_model = m_id
-                    if msg.get("role") == "assistant" or step.get("type") == "assistant":
-                        llm_turns += 1
-                    u = msg.get("usage")
-                    if isinstance(u, dict):
-                        raw_in = int(u.get("input_tokens") or 0)
-                        cr = int(u.get("cache_read_input_tokens") or 0)
-                        cw = int(u.get("cache_creation_input_tokens") or 0)
-                        out_t = int(u.get("output_tokens") or 0)
-                        tot_in = raw_in + cr + cw
-                        if tot_in > 0:
-                            last_in, last_cr, last_out = tot_in, cr, out_t
-                        total_input += tot_in
-                        total_cache_read += cr
-                        total_cache_write += cw
-                        total_output += out_t
+                    schema_matched = True
+                    # Claude Code writes one JSONL line per content block, all sharing
+                    # the same message.id and repeating the identical usage object.
+                    # Count the turn and its tokens once per message id.
+                    msg_key = str(msg.get("id") or step.get("uuid") or "")
+                    first_sighting = not msg_key or msg_key not in seen_claude_messages
+                    if msg_key:
+                        seen_claude_messages.add(msg_key)
+                    if first_sighting:
+                        _track_ts(_parse_iso_ts(step.get("timestamp") or step.get("created_at")))
+                        m_id = str(msg.get("model") or step.get("model") or "")
+                        if m_id:
+                            if prev_model and m_id != prev_model:
+                                model_switches += 1
+                            prev_model = m_id
+                        if msg.get("role") == "assistant" or step.get("type") == "assistant":
+                            llm_turns += 1
+                        u = msg.get("usage")
+                        if isinstance(u, dict):
+                            raw_in = int(u.get("input_tokens") or 0)
+                            cr = int(u.get("cache_read_input_tokens") or 0)
+                            cw = int(u.get("cache_creation_input_tokens") or 0)
+                            out_t = int(u.get("output_tokens") or 0)
+                            tot_in = raw_in + cr + cw
+                            if tot_in > 0:
+                                last_in, last_cr, last_out = tot_in, cr, out_t
+                            total_input += tot_in
+                            total_cache_read += cr
+                            total_cache_write += cw
+                            total_output += out_t
                     content = msg.get("content")
                     if isinstance(content, list):
                         for blk in content:
@@ -288,9 +299,10 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
                 # Codex event schema
                 payload = step.get("payload") if isinstance(step.get("payload"), dict) else {}
                 if step.get("type") == "event_msg" and payload.get("type") == "token_count":
-                    _track_ts(_parse_iso_ts(step.get("timestamp")))
+                    schema_matched = True
                     last_u = (payload.get("info") or {}).get("last_token_usage") or {}
-                    if isinstance(last_u, dict):
+                    if isinstance(last_u, dict) and last_u:
+                        _track_ts(_parse_iso_ts(step.get("timestamp")))
                         llm_turns += 1
                         in_t = int(last_u.get("input_tokens") or 0)
                         cr = int(last_u.get("cached_input_tokens") or 0)
@@ -304,15 +316,19 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
 
                 # Antigravity schema
                 s_type = step.get("type")
-                _track_ts(_parse_iso_ts(step.get("created_at") or step.get("timestamp")))
                 tool_calls = step.get("tool_calls") or []
-                if s_type == "PLANNER_RESPONSE" or tool_calls:
-                    llm_turns += 1
+                if s_type or tool_calls or "created_at" in step:
+                    schema_matched = True
+                    if s_type == "PLANNER_RESPONSE" or tool_calls:
+                        llm_turns += 1
+                        # Timestamps only on real turns: status/heartbeat steps would
+                        # otherwise fabricate "gaps" during long tool executions.
+                        _track_ts(_parse_iso_ts(step.get("created_at") or step.get("timestamp")))
 
-                if isinstance(tool_calls, list):
-                    for tc in tool_calls:
-                        if isinstance(tc, dict):
-                            _track_tool(str(tc.get("name") or tc.get("tool") or "unknown"))
+                    if isinstance(tool_calls, list):
+                        for tc in tool_calls:
+                            if isinstance(tc, dict):
+                                _track_tool(str(tc.get("name") or tc.get("tool") or "unknown"))
 
                 content = step.get("content") or ""
                 if isinstance(content, str) and "The output was large and was saved to:" in content:
@@ -344,9 +360,16 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
         "rate_limit_hits": {},
     })
 
+    schema_warning = None
+    if not schema_matched:
+        schema_warning = "no recognized transcript schema matched; all metrics are zero"
+        if detected_agent in ("auto", "", "antigravity"):
+            detected_agent = "unknown"
+
     return {
         "file_path": file_path,
         "agent": detected_agent,
+        "schema_warning": schema_warning,
         "model": prev_model,
         "total_steps": total_lines,
         "llm_turns": llm_turns,

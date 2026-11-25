@@ -572,6 +572,67 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertLessEqual(len(snap.encode("utf-8")), 60)
         self.assertIn("(truncated)", snap)
 
+    def test_transcript_claude_message_id_dedupe_and_unknown_schema(self):
+        """Regression: Claude repeats usage per content block; unknown schemas are honest."""
+        claude_file = os.path.join(self.tmp_dir, "claude.jsonl")
+        usage = {"input_tokens": 10, "cache_creation_input_tokens": 100,
+                 "cache_read_input_tokens": 50, "output_tokens": 7}
+        with open(claude_file, "w", encoding="utf-8") as f:
+            # Same message id across three content-block lines (real Claude layout)
+            for block in ({"type": "text", "text": "hi"},
+                          {"type": "tool_use", "name": "Bash"},
+                          {"type": "text", "text": "done"}):
+                f.write(json.dumps({
+                    "type": "assistant",
+                    "timestamp": "2026-11-24T12:00:00Z",
+                    "message": {"id": "msg_1", "role": "assistant", "model": "claude-x",
+                                "usage": usage, "content": [block]},
+                }) + "\n")
+
+        res = analyze_transcript(claude_file, agent_type="claude")
+        self.assertEqual(res["llm_turns"], 1)
+        self.assertEqual(res["input_tokens"], 160)   # counted once, not 3x
+        self.assertEqual(res["total_tool_calls"], 1)
+
+        unknown_file = os.path.join(self.tmp_dir, "weird.jsonl")
+        with open(unknown_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"totally": "different", "format": True}) + "\n")
+            f.write(json.dumps({"another": [1, 2, 3]}) + "\n")
+
+        unknown = analyze_transcript(unknown_file, agent_type="auto")
+        self.assertEqual(unknown["agent"], "unknown")
+        self.assertTrue(unknown.get("schema_warning"))
+        self.assertEqual(unknown["llm_turns"], 0)
+
+        # An explicitly requested label must not be silently rewritten
+        custom = analyze_transcript(claude_file, agent_type="custom")
+        self.assertEqual(custom["agent"], "custom")
+
+    def test_transcript_codex_null_info_and_antigravity_gaps(self):
+        """Regression: null token_count is not a turn; non-turn steps do not create gaps."""
+        codex_file = os.path.join(self.tmp_dir, "codex.jsonl")
+        with open(codex_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "event_msg", "timestamp": "2026-11-24T12:00:00Z",
+                                "payload": {"type": "token_count", "info": None}}) + "\n")
+            f.write(json.dumps({"type": "event_msg", "timestamp": "2026-11-24T12:00:05Z",
+                                "payload": {"type": "token_count",
+                                            "info": {"last_token_usage": {"input_tokens": 5,
+                                                                          "output_tokens": 2}}}}) + "\n")
+        codex = analyze_transcript(codex_file, agent_type="codex")
+        self.assertEqual(codex["llm_turns"], 1)
+
+        ag_file = os.path.join(self.tmp_dir, "agy.jsonl")
+        with open(ag_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "PLANNER_RESPONSE", "created_at": "2026-11-24T12:00:00Z",
+                                "tool_calls": [{"name": "read_file"}]}) + "\n")
+            f.write(json.dumps({"type": "PLANNER_RESPONSE", "created_at": "2026-11-24T12:00:10Z",
+                                "tool_calls": [{"name": "edit_file"}]}) + "\n")
+            # Long-running status step: must not be counted as a 5-minute turn gap
+            f.write(json.dumps({"type": "GENERIC", "created_at": "2026-11-24T12:05:10Z"}) + "\n")
+        agy = analyze_transcript(ag_file, agent_type="antigravity")
+        self.assertEqual(agy["llm_turns"], 2)
+        self.assertEqual(agy["long_turn_gaps_gt_60s"], 0)
+
     def test_zero_spill_guard_capping(self):
         """Tests that outputs > 8800 bytes are folded and tagged with stash anchor."""
         huge_text = "Line content item: " + ("x" * 80) + "\n"
