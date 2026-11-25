@@ -563,6 +563,8 @@ class TreeSitterBackend:
             if ntype in _CONTAINER_NODE_TYPES:
                 cname = cls._extract_symbol_name(node, code_bytes)
                 next_stack = container_stack + [cname] if cname else container_stack
+                if keep_symbols is not None and cname and cname in keep_symbols:
+                    return  # Requesting a class/struct/interface preserves all its methods
                 for child in node.children:
                     walk(child, next_stack, in_kept_scope)
                 return

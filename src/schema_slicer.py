@@ -195,8 +195,8 @@ class SchemaSlicer:
         if not kind:
             return "", {"kind": None}
 
-        # 1. Compute composite fingerprint and cache key
-        norm_target = target.strip().lower()
+        # 1. Compute composite fingerprint and case-preserving cache key
+        norm_target = target.strip()
         fp = cls.compute_schema_fingerprint(path, kind)
         cache_key = f"{kind}::{fp}::{norm_target}"
 
@@ -290,6 +290,9 @@ class SchemaSlicer:
         if not target.strip() and count_tokens(sliced) >= count_tokens(raw_text):
             return raw_text, info
 
+        if info.get("error") or info.get("mode") == "missing":
+            return sliced, info
+
         # 6. Save to L1, L2 SQLite, and broadcast to L3 Team Sync
         info["source"] = "parsed_live"
         cls._mem_put(cache_key, (sliced, info), max_items=80)
@@ -354,6 +357,23 @@ class SchemaSlicer:
                 for v in node:
                     resolve_refs(v, pool, acc, depth + 1)
 
+        # Check method-scoped path FIRST (e.g. "/users get" or "/users:get"), before plain target.startswith("/")
+        if target:
+            parts = re.split(r"[\s:]+", target, maxsplit=1)
+            if len(parts) == 2 and parts[0].startswith("/") and parts[1].lower() in ("get", "post", "put", "patch", "delete", "options", "head"):
+                item = (spec.get("paths") or {}).get(parts[0]) or {}
+                op = item.get(parts[1].lower())
+                if op is not None:
+                    pool = schema_pool()
+                    acc: Dict[str, Any] = {}
+                    resolve_refs(op, pool, acc)
+                    out = [f"# OpenAPI operation: {parts[1].upper()} {parts[0]}", json.dumps({parts[1].lower(): op}, indent=2, ensure_ascii=False)]
+                    if acc:
+                        out.append("\n# Referenced schemas ($ref closure)")
+                        out.append(json.dumps(acc, indent=2, ensure_ascii=False))
+                    return "\n".join(out), {"kind": "openapi", "mode": "operation", "refs": list(acc)}
+                return cls._openapi_overview(spec, missing=target)
+
         if target.startswith("/"):
             item = (spec.get("paths") or {}).get(target)
             if item is None:
@@ -378,20 +398,6 @@ class SchemaSlicer:
                     out.append("\n# Referenced schemas ($ref closure)")
                     out.append(json.dumps(others, indent=2, ensure_ascii=False))
                 return "\n".join(out), {"kind": "openapi", "mode": "schema", "refs": list(others)}
-            # Try a method-scoped path: "/users get" or "/users:get"
-            parts = re.split(r"[\s:]+", target, maxsplit=1)
-            if len(parts) == 2 and parts[0].startswith("/") and parts[1].lower() in ("get", "post", "put", "patch", "delete", "options", "head"):
-                item = (spec.get("paths") or {}).get(parts[0]) or {}
-                op = item.get(parts[1].lower())
-                if op is not None:
-                    pool = schema_pool()
-                    acc: Dict[str, Any] = {}
-                    resolve_refs(op, pool, acc)
-                    out = [f"# OpenAPI operation: {parts[1].upper()} {parts[0]}", json.dumps({parts[1].lower(): op}, indent=2, ensure_ascii=False)]
-                    if acc:
-                        out.append("\n# Referenced schemas ($ref closure)")
-                        out.append(json.dumps(acc, indent=2, ensure_ascii=False))
-                    return "\n".join(out), {"kind": "openapi", "mode": "operation", "refs": list(acc)}
             return cls._openapi_overview(spec, missing=target)
         return cls._openapi_overview(spec)
 
@@ -451,8 +457,24 @@ class SchemaSlicer:
 
     @classmethod
     def _slice_prisma(cls, path: str, target: str) -> Tuple[str, Dict[str, Any]]:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            src = f.read()
+        abs_p = os.path.abspath(path)
+        base_dir = os.path.dirname(abs_p)
+        if os.path.basename(base_dir).lower() == "schema":
+            try:
+                prisma_files = sorted(
+                    os.path.join(base_dir, f) for f in os.listdir(base_dir) if f.endswith(".prisma")
+                )
+            except OSError:
+                prisma_files = [abs_p]
+            if not prisma_files:
+                prisma_files = [abs_p]
+        else:
+            prisma_files = [abs_p]
+        src_parts = []
+        for pf in prisma_files:
+            with open(pf, "r", encoding="utf-8", errors="replace") as f:
+                src_parts.append(f.read())
+        src = "\n\n".join(src_parts)
         block_re = re.compile(r"^(model|enum|type)\s+(\w+)\s*\{(.*?)^\}", re.MULTILINE | re.DOTALL)
         blocks: Dict[str, Tuple[str, str]] = {}
         order: List[str] = []

@@ -208,8 +208,7 @@ def _scan_zcode_tail(home: str, session_id: str = "", explicit_path: str = "") -
             if session_id and session_id in os.path.basename(fp):
                 best_path = fp
                 best_mtime = mt
-                break
-            if mt > best_mtime:
+            elif not (session_id and best_path and session_id in os.path.basename(best_path)) and mt > best_mtime:
                 best_mtime = mt
                 best_path = fp
         except Exception:
@@ -242,9 +241,21 @@ def _scan_zcode_tail(home: str, session_id: str = "", explicit_path: str = "") -
             models_seen.append(m_id)
         resp = obj.get("response") or {}
         u = resp.get("usage") or {}
-        in_t = int(u.get("inputTokens") or u.get("input_tokens") or 0)
-        cr = int(u.get("cacheReadTokens") or u.get("cache_read_input_tokens") or 0)
-        out_t = int(u.get("outputTokens") or u.get("output_tokens") or 0)
+        if "inputTokens" in u:
+            raw_in = int(u.get("inputTokens") or 0)
+            cr = int(u.get("cacheReadTokens") or u.get("cacheReadInputTokens") or u.get("cache_read_input_tokens") or 0)
+            cw = int(u.get("cacheWriteTokens") or u.get("cacheCreationInputTokens") or u.get("cache_creation_input_tokens") or 0)
+            out_t = int(u.get("outputTokens") or u.get("output_tokens") or 0)
+            if ("cacheReadInputTokens" in u or "cache_read_input_tokens" in u) and "cacheReadTokens" not in u:
+                in_t = raw_in + cr + cw
+            else:
+                in_t = raw_in
+        else:
+            raw_in = int(u.get("input_tokens") or 0)
+            cr = int(u.get("cache_read_input_tokens") or 0)
+            cw = int(u.get("cache_creation_input_tokens") or 0)
+            in_t = raw_in + cr + cw
+            out_t = int(u.get("output_tokens") or 0)
         if in_t == 0:
             zero_usage += 1
         else:

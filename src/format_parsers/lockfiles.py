@@ -530,21 +530,26 @@ class LockfileReducer:
                 pass
 
         elif "cargo.lock" in fname or "poetry.lock" in fname:
-            pattern = re.compile(
-                rf'\[\[package\]\]\s+name\s*=\s*"{re.escape(norm_pkg)}"\s+version\s*=\s*"([^"]+)"'
-                r'(?:\s+source\s*=\s*"([^"]*)")?'
-                r'(?:\s+dependencies\s*=\s*(\[[^\]]*\]))?',
-                re.MULTILINE
-            )
-            m = pattern.search(content)
-            if m:
-                ver = m.group(1)
-                source_val = m.group(2)
-                deps_raw = m.group(3) or "[]"
-                try:
-                    deps = json.loads(deps_raw) if deps_raw.startswith("[") else []
-                except Exception:
-                    deps = []
+            # Parse TOML [[package]] sections resiliently (supports optional checksum & TOML dependency arrays)
+            sections = re.split(r'(?m)^\[\[package\]\]\s*$', content)
+            for sec in sections[1:]:
+                m_name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', sec)
+                if not m_name or m_name.group(1) != norm_pkg:
+                    continue
+                m_ver = re.search(r'(?m)^version\s*=\s*"([^"]+)"', sec)
+                ver = m_ver.group(1) if m_ver else "*"
+                m_src = re.search(r'(?m)^source\s*=\s*"([^"]*)"', sec)
+                source_val = m_src.group(1) if m_src else None
+                m_deps = re.search(r'(?ms)^dependencies\s*=\s*\[(.*?)\]', sec)
+                deps: List[str] = []
+                if m_deps:
+                    raw_arr = m_deps.group(1)
+                    try:
+                        parsed = json.loads(f"[{raw_arr}]")
+                        if isinstance(parsed, list):
+                            deps = [str(d) for d in parsed]
+                    except Exception:
+                        deps = re.findall(r'"([^"]+)"', raw_arr)
                 res_dict = {
                     "found": True,
                     "package": norm_pkg,
@@ -556,8 +561,8 @@ class LockfileReducer:
                 return res_dict
 
         elif "pnpm-lock" in fname:
-            # Pnpm regex lookup: /pkg@ver or 'pkg': ver
-            pnpm_re = re.compile(rf'["\']?/?{re.escape(norm_pkg)}[@/]([0-9a-zA-Z._-]+)["\']?:')
+            # Pnpm regex lookup with strict left boundary so 'react' never matches 'preact'
+            pnpm_re = re.compile(rf'(?:^|[\s"\'/]){re.escape(norm_pkg)}[@/]([0-9a-zA-Z._+-]+)["\']?:', re.MULTILINE)
             m = pnpm_re.search(content)
             if m:
                 return {

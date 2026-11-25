@@ -22,6 +22,7 @@ import re
 import sqlite3
 import stat
 import tempfile
+import threading
 import time
 from typing import Dict, Set, List, Optional, Tuple, Any
 
@@ -51,7 +52,7 @@ _SKIP_CALLS = {
     "true", "false", "null", "undefined", "None", "True", "False",
 }
 
-_CACHE_SCHEMA_VERSION = 4
+_CACHE_SCHEMA_VERSION = 5
 
 _STATIC_ASSET_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
@@ -340,6 +341,15 @@ class CodeGraph:
                     except sqlite3.OperationalError:
                         pass
 
+                    self.api_links = []
+                    try:
+                        for row in cur.execute("SELECT link_json FROM api_links").fetchall():
+                            link_obj = json.loads(row[0])
+                            if isinstance(link_obj, dict):
+                                self.api_links.append(link_obj)
+                    except Exception:
+                        pass
+
                     self.last_scanned = float(meta.get("last_scanned", 0.0))
                     return True
                 finally:
@@ -406,6 +416,7 @@ class CodeGraph:
                     cur.execute("CREATE TABLE edges (source TEXT, target TEXT, PRIMARY KEY (source, target))")
                     cur.execute("CREATE TABLE api_endpoints (rel_path TEXT, route TEXT, sym_key TEXT, method TEXT)")
                     cur.execute("CREATE TABLE api_calls (rel_path TEXT, route TEXT, sym_key TEXT, method TEXT)")
+                    cur.execute("CREATE TABLE api_links (link_json TEXT)")
 
                     cur.executemany(
                         "INSERT INTO graph_meta VALUES (?, ?)",
@@ -448,6 +459,10 @@ class CodeGraph:
                     cur.executemany(
                         "INSERT INTO api_calls VALUES (?, ?, ?, ?)",
                         [(rel, call[0], call[1], call[2] if len(call) > 2 else None) for rel, calls in self.file_api_calls.items() for call in calls],
+                    )
+                    cur.executemany(
+                        "INSERT INTO api_links VALUES (?)",
+                        [(json.dumps(lk, ensure_ascii=False),) for lk in self.api_links],
                     )
                     con.commit()
                 finally:
@@ -507,6 +522,11 @@ class CodeGraph:
                     try:
                         st = os.stat(full_path)
                         if not stat.S_ISREG(st.st_mode) or st.st_size > 2 * 1024 * 1024:
+                            if rel_path in self.file_symbols or rel_path in self.file_stats:
+                                self._purge_file(rel_path)
+                                self.file_stats.pop(rel_path, None)
+                                self.file_mtimes.pop(rel_path, None)
+                                reindexed += 1
                             continue
                         sig = (st.st_mtime, st.st_size)
                     except OSError:
@@ -1712,6 +1732,7 @@ class GraphEngine:
     """Multi-Project Manager for automatic background graph execution."""
 
     _instances: Dict[str, CodeGraph] = {}
+    _instances_lock = threading.RLock()
 
     @classmethod
     def find_project_root(cls, start_path: str) -> str:
@@ -1737,15 +1758,16 @@ class GraphEngine:
         # Rescans are full AST crawls; a 3s TTL caused near-constant rescans on every
         # smart_read_file(symbol=...) call. 60s keeps graphs fresh without the churn.
         rescan_ttl = float(os.environ.get("TOKENSAFE_GRAPH_TTL", "60.0"))
-        if root_abs not in cls._instances:
-            graph = CodeGraph(root_abs, use_disk_cache=True)
-            graph.scan()
-            cls._instances[root_abs] = graph
-        else:
-            graph = cls._instances[root_abs]
-            if time.time() - graph.last_scanned > rescan_ttl:
+        with cls._instances_lock:
+            if root_abs not in cls._instances:
+                graph = CodeGraph(root_abs, use_disk_cache=True)
                 graph.scan()
-        return graph
+                cls._instances[root_abs] = graph
+            else:
+                graph = cls._instances[root_abs]
+                if time.time() - graph.last_scanned > rescan_ttl:
+                    graph.scan()
+            return graph
 
     @classmethod
     def for_file(cls, file_path: str) -> Tuple[CodeGraph, str]:

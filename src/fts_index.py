@@ -178,15 +178,8 @@ class CodeFTSIndex:
                         if prev and abs(prev[0] - f_mtime) < 0.001 and prev[1] == f_size:
                             continue  # File unchanged
 
-                        files_to_index.append((rel_path, full_path, f_mtime, f_size))
-                        # Cap the INDEXING work per run, never the walk: files
-                        # beyond the cap must still enter found_paths, or the
-                        # prune step below would treat them as deleted on every
-                        # run (repos > max_files lost their tail permanently).
-                        if len(files_to_index) >= max_files:
-                            break
-                    if len(files_to_index) >= max_files:
-                        break
+                        if len(files_to_index) < max_files:
+                            files_to_index.append((rel_path, full_path, f_mtime, f_size))
 
                 # Index modified/new files in batches
                 for rel_path, full_path, f_mtime, f_size in files_to_index:
@@ -257,6 +250,9 @@ class CodeFTSIndex:
         escaped_q = clean_q.replace('"', '""')
         fts_query = f'"{escaped_q}"'
 
+        def _escape_like(val: str) -> str:
+            return val.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
         results = []
         try:
             con = self._get_connection()
@@ -265,11 +261,11 @@ class CodeFTSIndex:
                     sql = """
                         SELECT rel_path, line_no, content, bm25(code_lines) AS rank
                         FROM code_lines
-                        WHERE code_lines MATCH ? AND rel_path LIKE ?
+                        WHERE code_lines MATCH ? AND rel_path LIKE ? ESCAPE '\\'
                         ORDER BY rank
                         LIMIT ?;
                     """
-                    cur = con.execute(sql, (fts_query, f"%{path_filter}%", limit))
+                    cur = con.execute(sql, (fts_query, f"%{_escape_like(path_filter)}%", limit))
                 else:
                     sql = """
                         SELECT rel_path, line_no, content, bm25(code_lines) AS rank
@@ -295,7 +291,7 @@ class CodeFTSIndex:
                     and_query = " AND ".join(
                         f'"{term.replace(chr(34), chr(34) * 2)}"' for term in clean_q.split()
                     )
-                    params2 = ([f"%{path_filter}%"] if path_filter else []) + [limit]
+                    params2 = ([f"%{_escape_like(path_filter)}%"] if path_filter else []) + [limit]
                     cur = con.execute(sql, (and_query, *params2))
                     for row in cur.fetchall():
                         results.append({
@@ -305,14 +301,24 @@ class CodeFTSIndex:
                             "bm25_rank": row[3]
                         })
             except sqlite3.OperationalError:
-                # If trigram MATCH fails (e.g. query < 3 chars), fallback to LIKE
-                like_sql = """
-                    SELECT rel_path, line_no, content, 0.0 AS rank
-                    FROM code_lines
-                    WHERE content LIKE ?
-                    LIMIT ?;
-                """
-                cur = con.execute(like_sql, (f"%{clean_q}%", limit))
+                # If trigram MATCH fails (e.g. query < 3 chars), fallback to escaped LIKE
+                escaped_q_like = f"%{_escape_like(clean_q)}%"
+                if path_filter:
+                    like_sql = """
+                        SELECT rel_path, line_no, content, 0.0 AS rank
+                        FROM code_lines
+                        WHERE content LIKE ? ESCAPE '\\' AND rel_path LIKE ? ESCAPE '\\'
+                        LIMIT ?;
+                    """
+                    cur = con.execute(like_sql, (escaped_q_like, f"%{_escape_like(path_filter)}%", limit))
+                else:
+                    like_sql = """
+                        SELECT rel_path, line_no, content, 0.0 AS rank
+                        FROM code_lines
+                        WHERE content LIKE ? ESCAPE '\\'
+                        LIMIT ?;
+                    """
+                    cur = con.execute(like_sql, (escaped_q_like, limit))
                 for row in cur.fetchall():
                     results.append({
                         "file": row[0],

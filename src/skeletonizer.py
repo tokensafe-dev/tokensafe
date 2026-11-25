@@ -103,12 +103,13 @@ class BraceLexer:
                 self.in_block_comment = True
                 break
 
-        # Strip single-line comments
-        l = re.sub(r"//.*$", "", l)
-        # Strip string literals and template strings
-        l = re.sub(r'"(?:\\.|[^"\\])*"', '""', l)
-        l = re.sub(r"'(?:\\.|[^'\\])*'", "''", l)
-        l = re.sub(r"`(?:\\.|[^`\\])*`", "``", l)
+        # Strip string literals / template strings and single-line comments in one left-to-right pass
+        # so "https://..." URLs inside strings aren't truncated as // comments.
+        l = re.sub(
+            r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`|//.*$',
+            lambda m: '""' if m.group(0)[0] in ('"', "'", "`") else "",
+            l,
+        )
         return l
 
     def count_braces(self, line: str) -> Tuple[int, int]:
@@ -283,6 +284,8 @@ class Skeletonizer:
             def _fold_py_node(node: ast.AST, class_name: Optional[str] = None):
                 for child in ast.iter_child_nodes(node):
                     if isinstance(child, ast.ClassDef):
+                        if keep_symbols is not None and child.name in keep_symbols:
+                            continue  # Keep entire requested class and all its methods intact
                         _fold_py_node(child, class_name=child.name)
                     elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         qual_name = f"{class_name}.{child.name}" if class_name else child.name
@@ -750,7 +753,11 @@ class Skeletonizer:
         os.makedirs(cls.CACHE_DIR, exist_ok=True)
         path_hash = hashlib.md5(original_path.encode("utf-8")).hexdigest()[:8]
         base_name = os.path.basename(original_path)
-        sym_suffix = f"_{target_symbol}_{dep_mode}" if target_symbol else ""
+        if target_symbol:
+            safe_sym = re.sub(r"[^A-Za-z0-9_.-]+", "_", target_symbol).strip("_")[:48] or "sym"
+            sym_suffix = f"_{safe_sym}_{dep_mode}"
+        else:
+            sym_suffix = ""
         skeleton_filename = f"{path_hash}{sym_suffix}_{base_name}"
         skeleton_path = os.path.join(cls.CACHE_DIR, skeleton_filename)
         meta_path = os.path.join(cls.CACHE_DIR, f"{path_hash}{sym_suffix}_{base_name}.meta.json")
@@ -780,13 +787,17 @@ class Skeletonizer:
 
         ext = os.path.splitext(original_path)[1]
         
-        # If target symbol specified, use Graph-Guided skeletonization
+        # If target symbol specified, use Graph-Guided skeletonization only if symbol is present
         if target_symbol:
             try:
                 from src.graph_engine import GraphEngine
-                graph, rel_path = GraphEngine.for_file(original_path)
-                graph_content = graph.graph_guided_skeletonize(original_path, target_symbol=target_symbol, dep_mode=dep_mode)
-                skeleton_content = graph_content if graph_content else cls.skeletonize_code(code, ext)
+                graph, _rel_path = GraphEngine.for_file(original_path)
+                has_sym = bool(re.search(rf"\b{re.escape(target_symbol)}\b", code))
+                if has_sym:
+                    graph_content = graph.graph_guided_skeletonize(original_path, target_symbol=target_symbol, dep_mode=dep_mode)
+                    skeleton_content = graph_content if graph_content else cls.skeletonize_code(code, ext)
+                else:
+                    skeleton_content = cls.skeletonize_code(code, ext)
             except Exception:
                 skeleton_content = cls.skeletonize_code(code, ext)
         else:

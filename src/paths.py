@@ -134,11 +134,14 @@ def save_active_workspace(path: str) -> None:
     if is_plugin_or_system_dir(path):
         return
     try:
+        import threading
         data_dir = resolve_data_dir()
         os.makedirs(data_dir, exist_ok=True)
         marker = os.path.join(data_dir, ".active_workspace")
-        with open(marker, "w", encoding="utf-8") as f:
+        tmp_marker = f"{marker}.tmp.{os.getpid()}.{threading.get_ident()}"
+        with open(tmp_marker, "w", encoding="utf-8") as f:
             f.write(os.path.abspath(path))
+        os.replace(tmp_marker, marker)
     except Exception:
         pass
 

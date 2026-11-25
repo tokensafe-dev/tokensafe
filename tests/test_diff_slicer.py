@@ -81,3 +81,9 @@ class TestDiffSlicerPassThrough(unittest.TestCase):
         sliced, orig_t, compact_t = DiffSlicer.slice_diff(diff, max_context_lines=0)
         self.assertEqual(sliced, diff)
         self.assertEqual(compact_t, orig_t)
+
+    def test_git_c_path_containing_diff_word_not_corrupted(self):
+        cmd = "git -C /tmp/my-diff/repo diff main"
+        rewritten, _, _ = DiffSlicer.optimize_git_diff_command(cmd)
+        self.assertIsNotNone(rewritten)
+        self.assertIn("-C /tmp/my-diff/repo diff -U2", rewritten)

@@ -221,10 +221,24 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
                     total_visible_chars += len(ttxt)
 
                     u = resp.get("usage") or {}
-                    in_t = int(u.get("inputTokens") or u.get("input_tokens") or 0)
-                    cr = int(u.get("cacheReadTokens") or u.get("cache_read_input_tokens") or 0)
-                    cw = int(u.get("cacheWriteTokens") or u.get("cache_creation_input_tokens") or 0)
-                    out_t = int(u.get("outputTokens") or u.get("output_tokens") or 0)
+                    if "inputTokens" in u:
+                        raw_in = int(u.get("inputTokens") or 0)
+                        cr = int(u.get("cacheReadTokens") or u.get("cacheReadInputTokens") or u.get("cache_read_input_tokens") or 0)
+                        cw = int(u.get("cacheWriteTokens") or u.get("cacheCreationInputTokens") or u.get("cache_creation_input_tokens") or 0)
+                        out_t = int(u.get("outputTokens") or u.get("output_tokens") or 0)
+                        if ("cacheReadInputTokens" in u or "cache_read_input_tokens" in u) and "cacheReadTokens" not in u:
+                            in_t = raw_in + cr + cw
+                            uncached_turn = raw_in
+                        else:
+                            in_t = raw_in
+                            uncached_turn = max(0, in_t - cr)
+                    else:
+                        raw_in = int(u.get("input_tokens") or 0)
+                        cr = int(u.get("cache_read_input_tokens") or 0)
+                        cw = int(u.get("cache_creation_input_tokens") or 0)
+                        in_t = raw_in + cr + cw
+                        uncached_turn = raw_in
+                        out_t = int(u.get("output_tokens") or 0)
                     if in_t > 0:
                         last_in, last_cr, last_out = in_t, cr, out_t
                         last_reason_chars, last_vis_chars = len(rtxt), len(ttxt)
@@ -233,7 +247,7 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
                     total_cache_write += cw
                     total_output += out_t
                     if "glm" in m_id.lower():
-                        est_credits_total += estimate_zai_credits(max(0, in_t - cr), cr, out_t, model=m_id)
+                        est_credits_total += estimate_zai_credits(uncached_turn, cr, out_t, model=m_id)
                     continue
 
                 # Claude Code / Kimi JSONL schema

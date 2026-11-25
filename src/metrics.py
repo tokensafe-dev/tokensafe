@@ -150,6 +150,9 @@ class MetricsTracker:
                     user_ver = int(uv_row[0]) if uv_row else 0
                 except Exception:
                     user_ver = 0
+                if user_ver >= 3:
+                    _INITIALIZED_METRICS_DBS.add(self.db_path)
+                    return
                 if user_ver >= 2:
                     tbl = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events';").fetchone()
                     if tbl is not None:
@@ -161,6 +164,10 @@ class MetricsTracker:
                             "'GUARD_SECRET', 'GUARD_DESTRUCTIVE', 'GUARD_TLS_VERIFY_BYPASS', "
                             "'GUARD_JUNK_READ', 'GUARD_INFINITE', 'GUARD_RAW_CODE_SEARCH');"
                         )
+                        try:
+                            cursor.execute("PRAGMA user_version = 3;")
+                        except sqlite3.Error:
+                            pass
                         _INITIALIZED_METRICS_DBS.add(self.db_path)
                         return
                 try:
@@ -250,7 +257,7 @@ class MetricsTracker:
                         GROUP BY substr(timestamp, 1, 10)
                     """, (cutoff_30,))
                 try:
-                    cursor.execute("PRAGMA user_version = 2;")
+                    cursor.execute("PRAGMA user_version = 3;")
                 except sqlite3.Error:
                     pass
             _INITIALIZED_METRICS_DBS.add(self.db_path)
@@ -829,6 +836,8 @@ class MetricsTracker:
         combined_where = " OR ".join(where_clauses)
 
         with self._get_connection() as conn:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.cursor()
 
             # 1. Calculate aggregates for events to be pruned

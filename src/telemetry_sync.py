@@ -17,6 +17,7 @@ import json
 import time
 import secrets
 import sqlite3
+from contextlib import closing
 import threading
 import subprocess
 import urllib.request
@@ -31,6 +32,7 @@ if PROJECT_ROOT not in sys.path:
 
 from src.license_manager import LicenseManager
 from src.metrics import resolve_measurement
+from src.ssl_context import shared_ssl_context
 
 from src.paths import resolve_data_dir
 
@@ -141,13 +143,12 @@ class TelemetrySync:
         db_path = _metrics_db_path()
         if os.path.exists(db_path):
             try:
-                conn = sqlite3.connect(db_path)
-                c = conn.cursor()
-                row = c.execute("SELECT COUNT(*) FROM events").fetchone()
-                total_local = row[0] if row else 0
-                row_pending = c.execute("SELECT COUNT(*) FROM events WHERE id > ?", (last_id,)).fetchone()
-                pending = row_pending[0] if row_pending else 0
-                conn.close()
+                with closing(sqlite3.connect(db_path, timeout=5.0)) as conn:
+                    c = conn.cursor()
+                    row = c.execute("SELECT COUNT(*) FROM events").fetchone()
+                    total_local = row[0] if row else 0
+                    row_pending = c.execute("SELECT COUNT(*) FROM events WHERE id > ?", (last_id,)).fetchone()
+                    pending = row_pending[0] if row_pending else 0
             except Exception:
                 pass
 
@@ -211,7 +212,7 @@ class TelemetrySync:
                     target_email = str(payload.get("email", "")).strip().lower()
 
             # Community fallback: unauthenticated or expired users participate in global community sync
-            if not target_email:
+            if not target_email and not active_key.startswith("ts_live_"):
                 target_email = "community@tokensafe.dev"
             if not active_key:
                 active_key = "community"
@@ -265,47 +266,52 @@ class TelemetrySync:
 
             page_limit = 2000
             max_pages = 25
+            batch_size = min(max(1, int(batch_size or 50)), 200)
+            last_synced_rollup = int(state.get("last_synced_rollup_tokens", 0) or 0)
+            current_rollup_tokens = last_synced_rollup
             for page_idx in range(max_pages):
                 try:
-                    conn = sqlite3.connect(db_path)
-                    conn.row_factory = sqlite3.Row
-                    cur = conn.cursor()
+                    with closing(sqlite3.connect(db_path, timeout=5.0)) as conn:
+                        conn.row_factory = sqlite3.Row
+                        cur = conn.cursor()
 
-                    synthetic_events: List[Dict[str, Any]] = []
-                    if page_idx == 0 and not rollup_synced:
+                        synthetic_events: List[Dict[str, Any]] = []
+                        if page_idx == 0:
+                            try:
+                                life_row = cur.execute("SELECT * FROM lifetime_aggregates WHERE id = 1").fetchone()
+                                if life_row and int(life_row["total_saved_tokens"] or 0) > last_synced_rollup:
+                                    current_rollup_tokens = int(life_row["total_saved_tokens"])
+                                    delta_orig = max(0, int(life_row["total_original_tokens"]) - int(state.get("last_synced_rollup_orig", 0) or 0))
+                                    delta_saved = current_rollup_tokens - last_synced_rollup
+                                    synthetic_events.append({
+                                        "event_type": "ROLLUP_LIFETIME",
+                                        "original_tokens": delta_orig or int(life_row["total_original_tokens"]),
+                                        "saved_tokens": delta_saved,
+                                        "usd_saved": max(0.0, float(life_row["total_usd_saved"]) - float(state.get("last_synced_rollup_usd", 0.0) or 0.0)),
+                                        "model": "aggregate",
+                                        "timestamp": int(time.time()),
+                                        # Rolled-up historical mass of mixed provenance: conservatively estimated.
+                                        "measurement": "estimated"
+                                    })
+                            except Exception:
+                                pass
+
+                        # The measurement column may be absent on legacy databases that have
+                        # not yet been migrated by MetricsTracker._init_db; fall back to the
+                        # event-type map so sync never blocks on schema drift.
                         try:
-                            life_row = cur.execute("SELECT * FROM lifetime_aggregates WHERE id = 1").fetchone()
-                            if life_row and life_row["total_saved_tokens"] > 0:
-                                synthetic_events.append({
-                                    "event_type": "ROLLUP_LIFETIME",
-                                    "original_tokens": int(life_row["total_original_tokens"]),
-                                    "saved_tokens": int(life_row["total_saved_tokens"]),
-                                    "usd_saved": float(life_row["total_usd_saved"]),
-                                    "model": "aggregate",
-                                    "timestamp": int(time.time()),
-                                    # Rolled-up historical mass of mixed provenance: conservatively estimated.
-                                    "measurement": "estimated"
-                                })
-                        except Exception:
-                            pass
-
-                    # The measurement column may be absent on legacy databases that have
-                    # not yet been migrated by MetricsTracker._init_db; fall back to the
-                    # event-type map so sync never blocks on schema drift.
-                    try:
-                        rows = cur.execute(
-                            "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, session_id, details, measurement "
-                            "FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
-                            (current_last_id, page_limit)
-                        ).fetchall()
-                    except sqlite3.OperationalError:
-                        rows = cur.execute(
-                            "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, session_id, details, "
-                            "NULL as measurement "
-                            "FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
-                            (current_last_id, page_limit)
-                        ).fetchall()
-                    conn.close()
+                            rows = cur.execute(
+                                "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, session_id, details, measurement "
+                                "FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
+                                (current_last_id, page_limit)
+                            ).fetchall()
+                        except sqlite3.OperationalError:
+                            rows = cur.execute(
+                                "SELECT id, timestamp, event_type, original_tokens, saved_tokens, est_usd_saved, session_id, details, "
+                                "NULL as measurement "
+                                "FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
+                                (current_last_id, page_limit)
+                            ).fetchall()
                 except Exception as e:
                     if total_sent > 0:
                         return _record_failure(f"Failed to read local metrics database: {str(e)}")
@@ -401,6 +407,8 @@ class TelemetrySync:
                         "license_key": active_key,
                         "events": chunk,
                     }
+                    if machine_fp:
+                        body_dict["machine_fp"] = machine_fp
                     if machine_fp and active_key == "community":
                         body_dict["machine_id"] = machine_fp
                         body_dict["monthly_measured_saved"] = local_monthly_measured
@@ -410,25 +418,29 @@ class TelemetrySync:
                     try:
                         from src.egress_counter import increment as _egress_increment
                         _egress_increment("telemetry")
-                        with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        with urllib.request.urlopen(req, timeout=timeout, context=shared_ssl_context()) as resp:
                             if resp.status == 200:
+                                processed_n = len(chunk)
                                 try:
                                     resp_body = json.loads(resp.read().decode("utf-8") or "{}")
+                                    if "processed" in resp_body and resp_body["processed"] is not None:
+                                        processed_n = max(0, min(len(chunk), int(resp_body["processed"])))
                                     srv_measured = int(resp_body.get("server_monthly_measured_saved") or 0)
                                     if srv_measured > 0:
                                         from src.metrics import MetricsTracker
                                         MetricsTracker(db_path=db_path).record_server_quota_floor(srv_measured)
                                 except Exception:
                                     pass
-                                total_sent += len(chunk)
-                                cumulative_synced += len(chunk)
-                                for ev_id, ev_payload in batch_items:
+                                acked_count = processed_n if chunk else 0
+                                total_sent += acked_count
+                                cumulative_synced += acked_count
+                                committed_items = batch_items[:processed_n] if chunk else batch_items
+                                for ev_id, ev_payload in committed_items:
                                     if ev_id is not None and ev_id > current_last_id:
                                         current_last_id = ev_id
                                     if ev_payload and ev_payload.get("event_type") == "ROLLUP_LIFETIME":
                                         rollup_synced = True
-                                if not synthetic_events:
-                                    rollup_synced = True
+                                        last_synced_rollup = current_rollup_tokens
                                 cls.save_state({
                                     "last_synced_event_id": current_last_id,
                                     "last_synced_at": int(time.time()),
@@ -436,7 +448,8 @@ class TelemetrySync:
                                     "last_quota_sync_at": int(time.time()),
                                     "consecutive_failures": 0,
                                     "total_synced_events": cumulative_synced,
-                                    "lifetime_rollup_synced": rollup_synced
+                                    "lifetime_rollup_synced": rollup_synced,
+                                    "last_synced_rollup_tokens": last_synced_rollup,
                                 })
                             else:
                                 return _record_failure(f"Server returned HTTP {resp.status}")

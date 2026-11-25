@@ -85,12 +85,13 @@ def main():
     # hooks.md: hook CWD is the plugin directory, not the workspace — use the
     # workspacePaths from the payload for project-scoped audits.
     raw_ws = payload.get("workspacePaths")
-    workspace_paths = raw_ws if isinstance(raw_ws, list) else []
-    workspace_root = str(workspace_paths[0]) if workspace_paths else os.getcwd()
+    workspace_paths = [str(w) for w in raw_ws if str(w).strip()] if isinstance(raw_ws, list) else []
+    workspace_root = workspace_paths[0] if workspace_paths else os.getcwd()
     try:
         from src.paths import save_active_workspace, ensure_tokensafe_gitignore
-        save_active_workspace(workspace_root)
-        ensure_tokensafe_gitignore(workspace_root)
+        if workspace_paths:
+            save_active_workspace(workspace_root)
+            ensure_tokensafe_gitignore(workspace_root)
     except Exception:
         pass
 
@@ -164,11 +165,8 @@ def main():
     except Exception:
         pass
 
-    try:
-        import threading
-        threading.Thread(target=LicenseManager.ensure_community_license, daemon=True).start()
-    except Exception:
-        pass
+    # Variant A: Anonymous installs stay on 50k Guest mode until `tokensafe login`
+    # unlocks the 500k Community license (never auto-issue 500k in SessionStart).
 
     try:
         bloat_warning = EnvironmentAuditor.get_bloat_warning(workspace_root=workspace_root)

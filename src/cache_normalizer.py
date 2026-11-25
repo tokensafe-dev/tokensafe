@@ -55,6 +55,8 @@ def _inject_cache_control_on_msg(msg: Dict[str, Any]) -> bool:
                     continue
                 if btype == "text" and not str(block.get("text", "")).strip():
                     continue
+                if "cache_control" in block:
+                    return False
                 block["cache_control"] = {"type": "ephemeral"}
                 msg["content"] = copied
                 return True

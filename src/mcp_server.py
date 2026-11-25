@@ -663,6 +663,7 @@ TOOLS = [
                 'dep_mode': {'type': 'string', 'enum': ['signature', 'full'], 'description': '1-hop dep mode (default signature)'},
                 'include_deps': {'type': 'boolean', 'description': 'Include 1-hop deps (default true)'},
                 'force_full': {'type': 'boolean', 'description': 'Bypass pointer dedup'},
+                'project_root': {'type': 'string', 'description': 'Workspace root directory (for external types / lockfiles)'},
                 'targets': {
                     'type': 'array', 'maxItems': 8,
                     'description': 'Bundle mode: 2-8 {path, symbol} targets in one call',
@@ -1257,9 +1258,17 @@ def handle_tool_call(name: str, args: dict) -> dict:
             _, eff_dep_mode = _resolve_dep_mode(args)
             cache_sym = f"{symbol}@{eff_dep_mode}" if (symbol and eff_dep_mode != "signature") else symbol
             is_ranged = args.get("start_line") is not None or args.get("end_line") is not None
-            is_quota_truncated = "[TokenSafe Community 500k limit reached:" in text_out or "// Quota exceeded" in text_out
+            is_quota_truncated = (
+                "[TokenSafe Community 500k limit reached:" in text_out
+                or "// Quota exceeded" in text_out
+                or ("monthly limit (" in text_out and "optimizations paused" in text_out)
+            )
             if text_out and path and not is_ranged and not is_quota_truncated:
-                abs_path = os.path.abspath(path)
+                active_ws = get_active_workspace()
+                if not os.path.isabs(path) and active_ws and os.path.exists(os.path.join(active_ws, path)):
+                    abs_path = os.path.abspath(os.path.join(active_ws, path))
+                else:
+                    abs_path = os.path.abspath(path)
                 cur_hash = AgentFirewall._file_content_hash(abs_path)
                 if cur_hash:
                     _IN_PROCESS_DELIVERED[(abs_path, symbol, eff_dep_mode)] = (cur_hash, _EPOCH_GEN)
@@ -1268,7 +1277,7 @@ def handle_tool_call(name: str, args: dict) -> dict:
                     try:
                         AgentFirewall.record_cache(
                             session_id=_mcp_session_id(),
-                            file_path=path,
+                            file_path=abs_path,
                             content=text_out,
                             symbol=cache_sym,
                             tracker=_get_safe_tracker()
@@ -1344,12 +1353,24 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             name = "batch_search"
         elif mode in ("glob", "fuzzy", "git"):
             q = args.get("query") or args.get("pattern") or ""
+            q_spec = {
+                "pattern": q,
+                "type": mode,
+                "path": args.get("path") or args.get("project_path") or "",
+                "case_sensitive": bool(args.get("case_sensitive", False)),
+                "max_results": int(args.get("max_results") or 25),
+            }
+            raw_sc = str(args.get("scope") or "").strip()
+            if raw_sc.startswith("*.") or "*" in raw_sc:
+                q_spec["glob"] = raw_sc
+            elif raw_sc and raw_sc.lower() not in ("all", "code", "config"):
+                q_spec["file_type"] = raw_sc.lstrip(".")
             args = {
-                "queries": [{"pattern": q, "type": mode, "path": args.get("path") or args.get("project_path") or "", "case_sensitive": bool(args.get("case_sensitive", False)), "max_results": int(args.get("max_results") or 25)}],
+                "queries": [q_spec],
                 "cwd": args.get("cwd") or args.get("project_path") or args.get("path"),
             }
             name = "batch_search"
-        elif mode in ("text", "regex") and "use_regex" not in args:
+        elif mode in ("text", "regex") and args.get("use_regex") is None:
             args = dict(args, use_regex=(mode == "regex"))
     elif name == "repo_map":
         view = str(args.get("view") or "graph").strip().lower()
@@ -1581,12 +1602,14 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             allow_pointer = (not force_full) and _client_supports_pointers() and already_here
             is_hit, cached_text, saved_dedup = AgentFirewall.check_cache(
                 _mcp_session_id(),
-                path,
+                abs_path,
                 symbol=cache_sym,
                 tracker=tracker,
                 allow_pointer=allow_pointer,
             )
             if is_hit and cached_text:
+                if cur_hash and not already_here:
+                    _IN_PROCESS_DELIVERED[(abs_path, sym_clean, eff_dep_mode)] = (cur_hash, _EPOCH_GEN)
                 return {"content": [{"type": "text", "text": cached_text}]}
 
         # Check loop detector (skip when force_full explicitly recovers from a pointer)
@@ -1789,7 +1812,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                                     dep_sym = graph.symbols.get(dep_key)
                                     if not dep_sym:
                                         continue
-                                    line = f"  {qual} -> {dep_key[len(rel) + 2:]}: {dep_sym.signature.strip()[:160]}"
+                                    line = f"  {qual} -> {dep_key.split('::', 1)[-1]}: {dep_sym.signature.strip()[:160]}"
                                     if line not in seen_dep_lines:
                                         seen_dep_lines.add(line)
                                         dep_lines.append(line)
@@ -2281,12 +2304,6 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         return {"content": [{"type": "text", "text": tree_output}]}
 
     elif name == "scoped_search":
-        if args.get("queries"):
-            from src.batch_search import execute_batch_search
-            cwd = args.get("cwd") or get_active_workspace()
-            res = execute_batch_search(queries=args.get("queries"), cwd=cwd)
-            return {"content": [{"type": "text", "text": res.get("summary_md", "")}]}
-
         query = args.get("query") or args.get("q") or args.get("pattern") or args.get("text") or ""
         if not query:
             return _fallback_error("scoped_search", "missing required 'query' argument")
@@ -2318,12 +2335,21 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         # 2. Smart scope routing: handle agents passing subdirectories or extensions in `scope`
         scope = raw_scope
         if raw_scope and raw_scope.lower() not in ("code", "config", "all"):
-            candidate_subdir = os.path.normpath(os.path.join(target_path, raw_scope))
+            real_base = os.path.realpath(target_path)
+            candidate_subdir = os.path.realpath(os.path.normpath(os.path.join(target_path, raw_scope)))
+            try:
+                within_base = os.path.commonpath([real_base, candidate_subdir]) == real_base
+            except ValueError:
+                within_base = False
             if os.path.isdir(candidate_subdir):
+                if not within_base or is_plugin_or_system_dir(candidate_subdir):
+                    return _fallback_error("scoped_search", f"refusing to search outside target directory via scope '{raw_scope}'")
                 target_path = candidate_subdir
                 scope = "all"
             elif "/" in raw_scope or "\\" in raw_scope:
                 if os.path.exists(candidate_subdir):
+                    if not within_base or is_plugin_or_system_dir(candidate_subdir):
+                        return _fallback_error("scoped_search", f"refusing to search outside target directory via scope '{raw_scope}'")
                     target_path = candidate_subdir
                     scope = "all"
 
@@ -2419,10 +2445,28 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
     elif name == "query_dependency":
         pkg = str(args.get("package_name") or args.get("package") or "").strip()
         lock_p = str(args.get("lockfile_path") or args.get("path") or "").strip() or None
+        if lock_p and not os.path.isabs(lock_p):
+            active_ws = get_active_workspace()
+            if active_ws and os.path.exists(os.path.join(active_ws, lock_p)):
+                lock_p = os.path.abspath(os.path.join(active_ws, lock_p))
         if not pkg:
             return _fallback_error("query_dependency", "missing required 'package_name' argument")
         try:
             from src.format_parsers.lockfiles import LockfileReducer
+            if not lock_p:
+                active_ws = get_active_workspace()
+                if active_ws and hasattr(LockfileReducer, "find_lockfile"):
+                    orig_cwd = os.getcwd()
+                    try:
+                        os.chdir(active_ws)
+                        lock_p = LockfileReducer.find_lockfile()
+                    except Exception:
+                        lock_p = None
+                    finally:
+                        try:
+                            os.chdir(orig_cwd)
+                        except Exception:
+                            pass
             res = LockfileReducer.query_dependency(lock_p, pkg)
             lock_bytes = res.pop("_lockfile_bytes", 0)
             json_text = json.dumps(res, indent=2, ensure_ascii=False)
@@ -2445,7 +2489,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
     elif name == "slice_external_type":
         pkg = str(args.get("package_name") or args.get("package") or "").strip()
         sym = str(args.get("symbol") or args.get("type") or args.get("type_name") or "").strip()
-        proj_root = str(args.get("project_root") or "").strip() or None
+        proj_root = str(args.get("project_root") or "").strip() or get_active_workspace() or None
         if not pkg or not sym:
             return _fallback_error("slice_external_type", "missing required 'package_name' or 'symbol' argument")
         try:
@@ -2500,6 +2544,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             res = SupersededPruner.prune_transcript(t_path)
             if not res.get("success"):
                 return _fallback_error("prune_superseded", res.get("error", "pruning failed"))
+            _EPOCH_GEN += 1
             if res.get("saved_tokens", 0) > 0:
                 tracker.record_event(
                     session_id=_mcp_session_id(),
@@ -2622,15 +2667,19 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             if res.get("success"):
                 action_desc = "Validated" if dry_run else "Applied"
                 lines.append(f"✔ {action_desc} {res.get('applied_count', 0)} file(s) successfully.")
+            else:
+                lines.append(f"✖ Batch edits failed ({res.get('failed_count', 0)} error(s)).")
+                for f in res.get("failed_files", []):
+                    lines.append(f"  - `{f.get('path')}`: {f.get('error')}")
+
+            if res.get("applied_files"):
+                if not res.get("success"):
+                    lines.append(f"Applied {len(res['applied_files'])} file(s) before error/verify:")
                 for f in res.get("applied_files", []):
                     h_cnt = f.get("hunks", 0)
                     is_cr = f.get("is_create", False)
                     label = "created" if is_cr else f"{h_cnt} hunk(s)"
                     lines.append(f"  - `{f.get('path')}` ({label})")
-            else:
-                lines.append(f"✖ Batch edits failed ({res.get('failed_count', 0)} error(s)).")
-                for f in res.get("failed_files", []):
-                    lines.append(f"  - `{f.get('path')}`: {f.get('error')}")
 
             if "verify" in res:
                 v = res["verify"]
@@ -2641,7 +2690,10 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 elif v.get("error"):
                     lines.append(f"Error: {v['error']}")
 
-            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            out_msg = {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            if not res.get("success"):
+                out_msg["isError"] = True
+            return out_msg
         except Exception as e:
             return _fallback_error("apply_edits", f"failed to execute batch edits: {e}")
 
@@ -2656,9 +2708,67 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             if not queries:
                 return _fallback_error("batch_search", "missing required 'queries' list")
 
-            cwd = args.get("cwd") or get_active_workspace()
-            res = execute_batch_search(queries=queries, cwd=cwd)
-            return {"content": [{"type": "text", "text": res.get("summary_md", "")}]}
+            raw_cwd = args.get("cwd") or args.get("project_path") or args.get("path")
+            active_ws = get_active_workspace()
+            if raw_cwd:
+                if not os.path.isabs(raw_cwd) and active_ws and os.path.isdir(os.path.join(active_ws, raw_cwd)):
+                    cwd = os.path.abspath(os.path.join(active_ws, raw_cwd))
+                else:
+                    cwd = os.path.abspath(raw_cwd)
+            else:
+                cwd, err = _resolve_project_root(args)
+                if err or not cwd:
+                    return _fallback_error("batch_search", err or "unspecified project_path")
+            if is_plugin_or_system_dir(cwd):
+                return _fallback_error("batch_search", f"refusing to search system root or plugin dir '{cwd}'")
+
+            safe_queries: List[Dict[str, Any]] = []
+            real_cwd = os.path.realpath(cwd)
+            for q_item in queries:
+                if not isinstance(q_item, dict):
+                    safe_queries.append(q_item)
+                    continue
+                q_copy = dict(q_item)
+                sub_p = q_copy.get("path")
+                if sub_p:
+                    sub_abs = os.path.realpath(os.path.normpath(os.path.join(cwd, str(sub_p))))
+                    try:
+                        inside = os.path.commonpath([real_cwd, sub_abs]) == real_cwd
+                    except ValueError:
+                        inside = False
+                    if not inside or is_plugin_or_system_dir(sub_abs):
+                        return _fallback_error("batch_search", f"refusing subquery path outside project root '{sub_p}'")
+                if is_quota_exceeded:
+                    q_copy["max_results"] = min(_safe_int(q_copy.get("max_results"), 3, lo=1, hi=100), 3)
+                safe_queries.append(q_copy)
+
+            res = execute_batch_search(queries=safe_queries, cwd=cwd)
+            summary_md = res.get("summary_md", "")
+            if is_quota_exceeded:
+                banner = _quota_banner_if_due(quota, tracker, _mcp_session_id())
+                current_tier = str(quota.get("tier") or "guest").lower()
+                limit_val = int(quota.get("monthly_limit") or (50000 if current_tier == "guest" else 500000))
+                cta_note = (
+                    "Run 'tokensafe login' in your terminal to unlock 500,000 free tokens/month!"
+                    if current_tier == "guest"
+                    else "Upgrade to Solo for unlimited optimization: https://tokensafe.dev/pricing"
+                )
+                degraded_header = (
+                    f"// [TokenSafe Quota Notice: {current_tier.upper()} limit of {limit_val:,} tokens reached. "
+                    f"Showing up to 3 matches per query in degraded mode.]\n"
+                    f"// [{cta_note}]\n\n"
+                )
+                return {"content": [{"type": "text", "text": banner + degraded_header + summary_md}]}
+            res_tokens = count_tokens(summary_md)
+            est_orig = max(1500, res_tokens * 8)
+            tracker.record_event(
+                session_id=_mcp_session_id(),
+                event_type="SCOPED_SEARCH",
+                original_tokens=est_orig,
+                optimized_tokens=res_tokens,
+                details={"query_count": len(safe_queries), "mode": "batch_search"},
+            )
+            return {"content": [{"type": "text", "text": summary_md}]}
         except Exception as e:
             return _fallback_error("batch_search", f"failed to execute batch search: {e}")
 
@@ -2728,24 +2838,31 @@ def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 
                     clean_text = strip_ansi(text)
                     hash8, marker = stash_block(clean_text, source=f"mcp:{tool_name}")
                     lines = clean_text.splitlines()
-                    head = lines[:20]
-                    tail = lines[-15:]
-                    omitted = len(lines) - (len(head) + len(tail))
-                    folded_msg = f"\n... [{omitted} lines / {len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
-                    tail_str = "\n".join(tail)
                     footer = f"\n{marker}"
+                    footer_bytes = len(footer.encode("utf-8"))
+                    if len(lines) > 35:
+                        head = lines[:20]
+                        tail = lines[-15:]
+                        omitted = len(lines) - (len(head) + len(tail))
+                        folded_msg = f"\n... [{omitted} lines / {len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
+                        tail_str = "\n".join(tail)
+                        budget = max_bytes - len(folded_msg.encode("utf-8")) - footer_bytes - len(tail_str.encode("utf-8")) - 50
+                        head_str = ""
+                        for line in head:
+                            if len((head_str + line + "\n").encode("utf-8")) <= budget:
+                                head_str += line + "\n"
+                            else:
+                                break
+                        folded_text = f"{head_str.rstrip()}{folded_msg}{tail_str}{footer}"
+                    else:
+                        msg_mid = f"\n... [{len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
+                        avail = max(120, max_bytes - len(msg_mid.encode("utf-8")) - footer_bytes - 50)
+                        head_b = raw_bytes[: avail // 2].decode("utf-8", errors="ignore")
+                        tail_b = raw_bytes[-(avail - avail // 2):].decode("utf-8", errors="ignore")
+                        folded_text = f"{head_b.rstrip()}{msg_mid}{tail_b.lstrip()}{footer}"
 
-                    budget = max_bytes - len(folded_msg.encode("utf-8")) - len(footer.encode("utf-8")) - len(tail_str.encode("utf-8")) - 50
-                    head_str = ""
-                    for line in head:
-                        if len((head_str + line + "\n").encode("utf-8")) <= budget:
-                            head_str += line + "\n"
-                        else:
-                            break
-
-                    folded_text = f"{head_str.rstrip()}{folded_msg}{tail_str}{footer}"
                     if len(folded_text.encode("utf-8")) > max_bytes:
-                        allowed_head = max_bytes - len(footer.encode("utf-8")) - 100
+                        allowed_head = max(80, max_bytes - footer_bytes - 60)
                         folded_text = clean_text.encode("utf-8")[:allowed_head].decode("utf-8", errors="ignore") + f"\n... [folded]\n{footer}"
 
                     new_block = dict(block)
@@ -2871,16 +2988,18 @@ def run_mcp_server():
             _TOOLS_LISTED = True
             profile = os.environ.get("TOKENSAFE_MCP_PROFILE", "").strip().lower()
             response["result"] = {"tools": FULL_TOOLS if profile == "full" else TOOLS}
+        elif method == "ping":
+            response["result"] = {}
         elif method == "tools/call":
             tool_name = str(params.get("name") or "")
             raw_tool_args = params.get("arguments")
-            tool_args = raw_tool_args if isinstance(raw_tool_args, dict) else {}
-            if not tool_args and raw_tool_args:
-                # Self-healing: hosts on small/local models intermittently send
-                # arguments as a malformed JSON string — repair before failing.
-                from src.json_repair import parse_tool_arguments
-                tool_args = parse_tool_arguments(raw_tool_args) or {}
             try:
+                tool_args = raw_tool_args if isinstance(raw_tool_args, dict) else {}
+                if not tool_args and raw_tool_args:
+                    # Self-healing: hosts on small/local models intermittently send
+                    # arguments as a malformed JSON string — repair before failing.
+                    from src.json_repair import parse_tool_arguments
+                    tool_args = parse_tool_arguments(raw_tool_args) or {}
                 raw_res = _execute_with_timeout(tool_name, tool_args)
                 redacted = _redact_result_secrets(raw_res)
                 response["result"] = _cap_mcp_output_size(redacted, tool_name=tool_name)
@@ -2898,7 +3017,7 @@ def run_mcp_server():
             response["error"] = {"code": -32601, "message": f"Method not found: {method}"}
 
         try:
-            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
             sys.stdout.flush()
         except Exception:
             break

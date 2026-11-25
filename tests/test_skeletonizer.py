@@ -348,5 +348,19 @@ public class Repo
         skel_sass = Skeletonizer.skeletonize_code(sass_code, ".sass")
         self.assertIn("padding: 8px", skel_sass)
 
+    def test_keep_class_preserves_methods_and_urls_in_brace_lexer(self):
+        py_cls = "class Service:\n    def run(self):\n        return 42\nclass Other:\n    def nope(self):\n        return 0\n"
+        skel_py = Skeletonizer.skeletonize_code(py_cls, ".py", keep_symbols={"Service"})
+        self.assertIn("return 42", skel_py)
+        self.assertNotIn("return 0", skel_py)
+
+        ts_cls = "class Api {\n  get() { const u = 'https://example.com'; return u; }\n}\n"
+        skel_ts = Skeletonizer.skeletonize_code(ts_cls, ".ts", keep_symbols={"Api"})
+        self.assertIn("https://example.com", skel_ts)
+        from src.skeletonizer import BraceLexer
+        cleaned = BraceLexer().clean_line('const u = "https://a.com"; { // cmt {')
+        self.assertEqual(cleaned.count("{"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

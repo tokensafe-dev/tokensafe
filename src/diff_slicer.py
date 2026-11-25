@@ -131,7 +131,7 @@ class DiffSlicer:
                 continue
             if ":!" in stage or re.search(r"(?:^|\s)(?:--unified=\d+|-U\d*)\b", stage):
                 continue
-            new_stage = re.sub(r"\bdiff\b", "diff -U2", stage, count=1)
+            new_stage = re.sub(r"(\bgit(?:\s+-C\s+\S+)?\s+diff)\b", r"\1 -U2", stage, count=1)
             if "-- " not in stage and not stage.rstrip().endswith("--"):
                 toks = CommandSanitizer._split_tokens_safe(stage)
                 diff_pos = toks.index("diff") if "diff" in toks else 1

@@ -155,6 +155,15 @@ class TestEnsureCommunityLicense(unittest.TestCase):
 
 
 class TestQuotaOverride(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="tokensafe_quota_ovr_")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self._p_dir = mock.patch("src.license_manager.resolve_data_dir", return_value=self._tmp)
+        self._p_dir.start()
+        self.addCleanup(self._p_dir.stop)
+
     def test_server_quota_overrides_embedded_default(self):
         tracker = mock.Mock()
         tracker.get_monthly_saved_tokens.return_value = 150

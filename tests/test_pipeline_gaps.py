@@ -285,6 +285,7 @@ class TestHonestyFlipForGuessedOriginals(unittest.TestCase):
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.execute("UPDATE events SET measurement = 'measured'")
+        conn.execute("PRAGMA user_version = 2;")
         conn.commit()
         conn.close()
 

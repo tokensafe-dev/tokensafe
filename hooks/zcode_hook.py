@@ -36,9 +36,23 @@ def handle(event: str, payload: dict) -> dict:
     if not norm.get("transcript_path") and norm.get("transcriptPath"):
         norm["transcript_path"] = norm["transcriptPath"]
     if not norm.get("tool_name") and isinstance(norm.get("toolCall"), dict):
-        norm["tool_name"] = norm["toolCall"].get("name") or ""
-        if not norm.get("tool_input") and isinstance(norm["toolCall"].get("args"), dict):
-            norm["tool_input"] = norm["toolCall"]["args"]
+        tc = norm["toolCall"]
+        norm["tool_name"] = tc.get("name") or ""
+        if not norm.get("tool_input"):
+            raw_in = tc.get("args") if tc.get("args") is not None else (tc.get("input") if tc.get("input") is not None else tc.get("arguments"))
+            if isinstance(raw_in, dict):
+                norm["tool_input"] = raw_in
+            elif isinstance(raw_in, str) and raw_in.strip():
+                try:
+                    parsed_in = json.loads(raw_in)
+                    if isinstance(parsed_in, dict):
+                        norm["tool_input"] = parsed_in
+                except Exception:
+                    pass
+    if "tool_response" not in norm and "toolResponse" in norm:
+        norm["tool_response"] = norm["toolResponse"]
+    if not norm.get("cwd") and isinstance(norm.get("workspacePaths"), list) and norm["workspacePaths"]:
+        norm["cwd"] = str(norm["workspacePaths"][0])
     return _cc_handle(event, norm, agent=AGENT)
 
 

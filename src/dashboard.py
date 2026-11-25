@@ -321,16 +321,18 @@ class Dashboard:
             """
 
         tier, payload = LicenseManager.get_active_license()
-        if tier == "free":
+        if tier in ("guest", "free"):
             monthly_saved = self.tracker.get_monthly_saved_tokens()
-            limit = 500_000
+            limit = 50_000 if tier == "guest" else 500_000
             q_pct = min(100.0, round(monthly_saved / limit * 100.0, 1))
+            edition_label = "Guest Mode (50k):" if tier == "guest" else "Community Edition:"
+            cta_text = "Login / Upgrade" if tier == "guest" else "Upgrade to Solo (Unlimited)"
             banner_html = f"""
     <div style="background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.3); border-radius: 12px; padding: 14px 18px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
       <div>
-        <strong style="color: #eab308;">⚡ Community Edition:</strong> {monthly_saved:,} / {limit:,} free measured tokens saved this month ({q_pct}%).
+        <strong style="color: #eab308;">⚡ {edition_label}</strong> {monthly_saved:,} / {limit:,} free measured tokens saved this month ({q_pct}%).
       </div>
-      <a href="https://tokensafe.dev/signup" target="_blank" style="background: #10b981; color: #090a0f; font-weight: 700; padding: 6px 14px; border-radius: 8px; text-decoration: none; font-size: 12px;">Upgrade to Solo (Unlimited)</a>
+      <a href="https://tokensafe.dev/pricing" target="_blank" style="background: #10b981; color: #090a0f; font-weight: 700; padding: 6px 14px; border-radius: 8px; text-decoration: none; font-size: 12px;">{cta_text}</a>
     </div>
             """
         else:
@@ -454,13 +456,17 @@ class Dashboard:
     </div>
   </div>
   <script>
-    if (window.EventSource) {{
-      const source = new EventSource('/api/events');
+    (function() {{
       const pill = document.getElementById('live-pill');
+      if (location.protocol === 'file:' || !window.EventSource) {{
+        if (pill) pill.innerHTML = '<span style="color: #64748b;">●</span> Static Snapshot (local HTML)';
+        return;
+      }}
+      const source = new EventSource('/api/events');
       source.onopen = () => {{
         if (pill) pill.innerHTML = '<span style="color: #10b981;">●</span> LIVE SSE STREAMING';
       }};
-      source.addEventListener('stats_update', (e) => {{
+      const applyStats = (e) => {{
         try {{
           const data = JSON.parse(e.data);
           if (data.total_saved_tokens !== undefined) {{
@@ -480,11 +486,13 @@ class Dashboard:
             if (el) el.innerText = Number(data.total_original_tokens).toLocaleString() + ' ➔ ' + Number(data.total_optimized_tokens).toLocaleString();
           }}
         }} catch (err) {{}}
-      }});
+      }};
+      source.addEventListener('init', applyStats);
+      source.addEventListener('stats_update', applyStats);
       source.onerror = () => {{
         if (pill) pill.innerHTML = '<span style="color: #64748b;">○</span> Disconnected (Reconnecting)';
       }};
-    }}
+    }})();
   </script>
 </body>
 </html>

@@ -37,7 +37,12 @@ class EnvironmentAuditor:
         home = os.path.expanduser("~")
         return [
             os.path.join(home, ".gemini", "config", "mcp_config.json"),
-            os.path.join(home, ".gemini", "antigravity", "mcp_config.json")
+            os.path.join(home, ".gemini", "antigravity", "mcp_config.json"),
+            os.path.join(home, ".zcode", "cli", "config.json"),
+            os.path.join(home, ".claude.json"),
+            os.path.join(home, ".cursor", "mcp.json"),
+            os.path.join(home, ".kimi-code", "mcp.json"),
+            os.path.join(home, ".codex", "config.toml"),
         ]
 
     @classmethod
@@ -102,14 +107,33 @@ class EnvironmentAuditor:
         # antigravity dir can legitimately carry servers (they are merged by
         # Antigravity too), so breaking on the first one undercounts.
         for p in cls.get_config_paths():
-            if os.path.isfile(p):
+            if not os.path.isfile(p):
+                continue
+            if p.endswith(".toml"):
                 try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        loaded = json.load(f)
-                    if isinstance(loaded, dict) and isinstance(loaded.get("mcpServers"), dict):
-                        configured.update(loaded["mcpServers"])
+                    with open(p, "rb") as f:
+                        raw_bytes = f.read()
+                    try:
+                        import tomllib
+                        loaded_toml = tomllib.loads(raw_bytes.decode("utf-8", errors="replace"))
+                        if isinstance(loaded_toml.get("mcp_servers"), dict):
+                            configured.update(loaded_toml["mcp_servers"])
+                    except Exception:
+                        text = raw_bytes.decode("utf-8", errors="replace")
+                        for m in re.finditer(r"^\s*\[mcp_servers\.([^\]]+)\]", text, re.MULTILINE):
+                            s_name = m.group(1).strip().strip('"\'')
+                            if s_name:
+                                configured.setdefault(s_name, {})
                 except Exception:
                     continue
+                continue
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict) and isinstance(loaded.get("mcpServers"), dict):
+                    configured.update(loaded["mcpServers"])
+            except Exception:
+                continue
         # Plugin-declared servers (plugins/<name>/mcp_config.json) are loaded
         # by Antigravity together with the plugin — audit them too, unless the
         # plugin itself is disabled.

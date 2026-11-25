@@ -54,9 +54,25 @@
     },
     {
       "event": "PreToolUse",
+      "matcher": "Edit",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 10
+    },
+    {
+      "event": "PreToolUse",
       "matcher": "Read",
       "command": "python3 hooks/kimi_hook.py",
       "timeout": 10
+    },
+    {
+      "event": "PostToolUse",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 10
+    },
+    {
+      "event": "Stop",
+      "command": "python3 hooks/kimi_hook.py",
+      "timeout": 15
     }
   ]
 }

@@ -69,13 +69,13 @@ class ScopedSearch:
             return lower_base in CONFIG_FILENAMES or ext in CONFIG_EXTENSIONS
         elif scope == "all":
             return True
-        elif scope.startswith("*."):
-            return ext == scope[1:].lower()
+        elif "*" in scope or "?" in scope:
+            return fnmatch.fnmatch(lower_base, scope) or fnmatch.fnmatch(rel_path.lower(), scope)
         elif scope.startswith("."):
             return ext == scope.lower()
-        elif f".{scope}" in CODE_EXTENSIONS or scope in ("go", "py", "ts", "js", "tsx", "jsx", "rs", "java", "cpp", "c", "php", "rb", "swift", "kt", "sql", "html", "css", "json", "yaml", "yml", "toml"):
+        elif re.fullmatch(r"[a-z0-9]{1,10}", scope):
             return ext == f".{scope}"
-        return True
+        return False
 
     @classmethod
     def _looks_like_regex(cls, query: str) -> bool:
@@ -165,8 +165,8 @@ class ScopedSearch:
                     "markdown": f"Regex compilation error: {str(e)}"
                 }
 
-        # Fast-path: SQLite FTS5 trigram BM25 search for plain identifier queries
-        if not regex_mode and len(query) >= 3 and not any(c in query for c in "*?[]{}()^$+\\|"):
+        # Fast-path: SQLite FTS5 trigram BM25 search for plain case-insensitive queries
+        if not regex_mode and not case_sensitive and len(query) >= 3 and not any(c in query for c in "*?[]{}()^$+\\|"):
             try:
                 from src.fts_index import CodeFTSIndex
                 fts = CodeFTSIndex(root_dir)
@@ -177,10 +177,13 @@ class ScopedSearch:
                     for r in fts_results:
                         f_rel = r["file"]
                         if cls.is_match_file(os.path.basename(f_rel), f_rel, scope):
+                            clean_line = str(r.get("content") or "").strip()
+                            if len(clean_line) > 100:
+                                clean_line = clean_line[:97] + "..."
                             fts_matches.append({
                                 "file": f_rel,
                                 "line": r["line"],
-                                "content": r["content"]
+                                "text": clean_line
                             })
                             fts_hit_files.add(f_rel)
                     if fts_matches:
@@ -188,11 +191,15 @@ class ScopedSearch:
                             "success": True,
                             "query": query,
                             "scope": scope,
-                            "total_scanned_files": len(fts_hit_files),
+                            "files_matched": len(fts_hit_files),
+                            "scanned_files": len(fts_hit_files),
                             "total_matches": len(fts_matches),
                             "timed_out": False,
                             "matches": fts_matches,
-                            "markdown": cls._render_markdown(query, fts_matches, len(fts_hit_files), False, max_results)
+                            "markdown": cls._render_markdown(
+                                query, fts_matches, len(fts_hit_files), False, max_results,
+                                hit_files=fts_hit_files, scope=scope, root_dir=root_dir,
+                            ),
                         }
             except Exception:
                 pass  # Seamless fallback to disk scan
@@ -272,26 +279,20 @@ class ScopedSearch:
             if len(matches) >= max_results:
                 break
 
-        # Generate ultra-compact Markdown output (< 150 tokens)
-        display_root = os.path.basename(root_dir) or root_dir
-        mode_suffix = ", auto-regex" if auto_regex and regex_mode else ""
-        lines = [
-            f"### TokenSafe Scoped Search: '{query}' ({len(matches)} match{'es' if len(matches) != 1 else ''} in {len(hit_files)} file{'s' if len(hit_files) != 1 else ''}, dir: `{display_root}`, scope: {scope}{mode_suffix})"
-        ]
-        if not matches:
-            lines.append(f"_No matches found across {total_scanned_files} scanned files in `{root_dir}`._")
-            if auto_regex and regex_mode:
-                lines.append("_Auto-regex mode found nothing; pass use_regex=false to force a literal search._")
-        else:
-            for m in matches:
-                lines.append(f"- `{m['file']}:{m['line']}`: `{m['text']}`")
-
-        if len(matches) >= max_results:
-            lines.append(f"_Results capped at {max_results} matches._")
-        elif timed_out:
-            lines.append(f"_Search bounded at {timeout_seconds}s safety limit ({total_scanned_files} files scanned). Narrow 'project_path' for exhaustive scan._")
-        elif total_scanned_files >= max_scanned_files:
-            lines.append(f"_Scan bounded at {max_scanned_files} files limit. Narrow 'project_path' if needed._")
+        markdown = cls._render_markdown(
+            query,
+            matches,
+            total_scanned_files,
+            timed_out,
+            max_results,
+            hit_files=hit_files,
+            scope=scope,
+            root_dir=root_dir,
+            auto_regex=auto_regex,
+            regex_mode=regex_mode,
+            timeout_seconds=timeout_seconds,
+            max_scanned_files=max_scanned_files,
+        )
 
         return {
             "success": True,
@@ -302,5 +303,47 @@ class ScopedSearch:
             "scanned_files": total_scanned_files,
             "timed_out": timed_out,
             "matches": matches,
-            "markdown": "\n".join(lines)
+            "markdown": markdown,
         }
+
+    @classmethod
+    def _render_markdown(
+        cls,
+        query: str,
+        matches: List[Dict[str, Any]],
+        total_scanned_files: int,
+        timed_out: bool,
+        max_results: int,
+        hit_files: Optional[set] = None,
+        scope: str = "all",
+        root_dir: str = "",
+        auto_regex: bool = False,
+        regex_mode: bool = False,
+        timeout_seconds: float = 4.0,
+        max_scanned_files: int = 2500,
+    ) -> str:
+        """Generates compact bounded Markdown output for both FTS5 and disk search paths."""
+        if hit_files is None:
+            hit_files = {m["file"] for m in matches if "file" in m}
+        display_root = os.path.basename(root_dir) or root_dir or "."
+        mode_suffix = ", auto-regex" if auto_regex and regex_mode else ""
+        lines = [
+            f"### TokenSafe Scoped Search: '{query}' ({len(matches)} match{'es' if len(matches) != 1 else ''} in {len(hit_files)} file{'s' if len(hit_files) != 1 else ''}, dir: `{display_root}`, scope: {scope}{mode_suffix})"
+        ]
+        if not matches:
+            lines.append(f"_No matches found across {total_scanned_files} scanned files in `{root_dir}`._")
+            if auto_regex and regex_mode:
+                lines.append("_Auto-regex mode found nothing; pass use_regex=false to force a literal search._")
+        else:
+            for m in matches:
+                txt = m.get("text") if "text" in m else m.get("content", "")
+                lines.append(f"- `{m['file']}:{m['line']}`: `{txt}`")
+
+        if len(matches) >= max_results:
+            lines.append(f"_Results capped at {max_results} matches._")
+        elif timed_out:
+            lines.append(f"_Search bounded at {timeout_seconds}s safety limit ({total_scanned_files} files scanned). Narrow 'project_path' for exhaustive scan._")
+        elif total_scanned_files >= max_scanned_files:
+            lines.append(f"_Scan bounded at {max_scanned_files} files limit. Narrow 'project_path' if needed._")
+
+        return "\n".join(lines)

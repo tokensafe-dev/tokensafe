@@ -10,6 +10,7 @@ Fetches web pages (documentation, API references, articles) and strips clutter:
 
 import os
 import re
+import socket
 import ipaddress
 import urllib.request
 import urllib.parse
@@ -37,9 +38,14 @@ class _HTMLToMarkdownParser(HTMLParser):
     BLOCK_TAGS = {"p", "div", "section", "article", "blockquote", "tr"}
     HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 
+    VOID_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr"
+    }
+
     def __init__(self):
         super().__init__()
-        self._ignore_depth = 0
+        self._ignore_stack: List[str] = []
         self._pieces: List[str] = []
         self._in_pre = False
         self._in_code = False
@@ -48,10 +54,13 @@ class _HTMLToMarkdownParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
         tag_lower = tag.lower()
-        if tag_lower in self.IGNORE_TAGS:
-            self._ignore_depth += 1
+        if self._ignore_stack:
+            if tag_lower not in self.VOID_TAGS:
+                self._ignore_stack.append(tag_lower)
             return
-        if self._ignore_depth > 0:
+        if tag_lower in self.IGNORE_TAGS:
+            if tag_lower not in self.VOID_TAGS:
+                self._ignore_stack.append(tag_lower)
             return
 
         attr_dict = {k.lower(): (v or "") for k, v in attrs}
@@ -59,7 +68,8 @@ class _HTMLToMarkdownParser(HTMLParser):
         # Filter out common ad/nav/cookie banner classes/ids
         cls_and_id = (attr_dict.get("class", "") + " " + attr_dict.get("id", "")).lower()
         if any(w in cls_and_id for w in ("cookie", "banner", "advertisement", "sidebar", "nav-menu")):
-            self._ignore_depth += 1
+            if tag_lower not in self.VOID_TAGS:
+                self._ignore_stack.append(tag_lower)
             return
 
         if tag_lower in self.HEADING_TAGS:
@@ -88,10 +98,12 @@ class _HTMLToMarkdownParser(HTMLParser):
 
     def handle_endtag(self, tag: str):
         tag_lower = tag.lower()
-        if tag_lower in self.IGNORE_TAGS:
-            self._ignore_depth = max(0, self._ignore_depth - 1)
-            return
-        if self._ignore_depth > 0:
+        if self._ignore_stack:
+            if tag_lower in self._ignore_stack:
+                while self._ignore_stack:
+                    popped = self._ignore_stack.pop()
+                    if popped == tag_lower:
+                        break
             return
 
         if tag_lower in self.HEADING_TAGS:
@@ -114,7 +126,7 @@ class _HTMLToMarkdownParser(HTMLParser):
                 self._link_text = []
 
     def handle_data(self, data: str):
-        if self._ignore_depth > 0:
+        if self._ignore_stack:
             return
         if self._current_link is not None:
             self._link_text.append(data)
@@ -265,6 +277,9 @@ class WebReader:
         Queries L1 memory, L2 SQLite, and L3 Team Cache in sequence.
         Returns (content, tier) where tier in ("L1", "L2", "L3") or (None, "miss").
         """
+        if cls.has_auth_or_userinfo(url, custom_headers=custom_headers):
+            cls.last_tier = "live"
+            return None, "miss"
         clean_url = cls.sanitize_url(url)
         url_hash = hashlib.sha256(clean_url.encode("utf-8")).hexdigest()
 
@@ -321,6 +336,8 @@ class WebReader:
         """Stores clean Markdown into L1, L2 SQLite, and asynchronously broadcasts to L3 Team Cache."""
         if not url or not markdown:
             return
+        if cls.has_auth_or_userinfo(url, custom_headers=custom_headers):
+            return
         clean_url = cls.sanitize_url(url)
         url_hash = hashlib.sha256(clean_url.encode("utf-8")).hexdigest()
         now = int(time.time())
@@ -362,29 +379,45 @@ class WebReader:
             except Exception:
                 pass
 
+    @staticmethod
+    def _is_public_ip(ip: ipaddress._BaseAddress) -> bool:
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+            or ip.is_multicast
+        )
+
     @classmethod
     def is_safe_url(cls, url: str) -> bool:
         try:
             parsed = urllib.parse.urlparse(url)
             if parsed.scheme not in ("http", "https"):
                 return False
-            host = (parsed.hostname or "").lower().rstrip(".")
-            if host in cls._BLOCKED_HOSTS or host.endswith(".local"):
+            raw_host = (parsed.hostname or "").lower().rstrip(".")
+            if not raw_host or "%" in raw_host:
+                return False
+            if raw_host in cls._BLOCKED_HOSTS or raw_host.endswith(".local"):
                 return False
             # Literal IPs (v4/v6) — exact range checks instead of string prefixes
             try:
-                ip = ipaddress.ip_address(host)
-                if (
-                    ip.is_private
-                    or ip.is_loopback
-                    or ip.is_link_local
-                    or ip.is_reserved
-                    or ip.is_unspecified
-                    or ip.is_multicast
-                ):
-                    return False
+                ip = ipaddress.ip_address(raw_host)
+                return cls._is_public_ip(ip)
             except ValueError:
                 pass  # hostname, not a literal IP
+            # DNS SSRF protection: reject hostnames resolving to internal/private IPs
+            try:
+                infos = socket.getaddrinfo(raw_host, None, type=socket.SOCK_STREAM)
+                for info in infos:
+                    sockaddr = info[4]
+                    addr = str(sockaddr[0]).split("%", 1)[0]
+                    ip = ipaddress.ip_address(addr)
+                    if not cls._is_public_ip(ip):
+                        return False
+            except socket.gaierror:
+                pass  # Allow offline mocked unit tests where DNS isn't reachable
             return True
         except Exception:
             return False

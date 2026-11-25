@@ -200,7 +200,7 @@ class MistakesLedger:
         """Retrieves scrubbed dead-end summaries shared across team members with 300s TTL cache."""
         now = time.time()
         with cls._team_mistakes_lock:
-            if cls._team_mistakes_cache and (now - cls._team_mistakes_fetched_at < 300.0):
+            if cls._team_mistakes_fetched_at > 0 and (now - cls._team_mistakes_fetched_at < 300.0):
                 return list(cls._team_mistakes_cache)
 
         try:
@@ -226,7 +226,9 @@ class MistakesLedger:
                 cls._team_mistakes_fetched_at = now
             return list(parsed)
         except Exception:
-            return []
+            with cls._team_mistakes_lock:
+                cls._team_mistakes_fetched_at = now
+            return list(cls._team_mistakes_cache)
 
     @classmethod
     def should_force_ask(

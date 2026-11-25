@@ -590,7 +590,7 @@ class TestMetricsHonestySplit(unittest.TestCase):
         self.assertEqual(s["breakdown"]["HISTORY_FOLD"]["estimated_saved"], 900)
 
     def test_legacy_rows_relabelled_on_migration(self):
-        # Simulate a pre-split database row (labeled 'measured' by the old schema default).
+        # Simulate a pre-v3 database row (labeled 'measured' by the old schema default, PRAGMA user_version = 2).
         import sqlite3
         conn = sqlite3.connect(self.db_path)
         conn.execute(
@@ -598,9 +598,10 @@ class TestMetricsHonestySplit(unittest.TestCase):
             " optimized_tokens, saved_tokens, reduction_pct, est_usd_saved, details, measurement)"
             " VALUES ('s', '2026-01-01', 'GRAPH_TOPOLOGY', 100, 10, 90, 90, 0.0001, '{}', 'measured')"
         )
+        conn.execute("PRAGMA user_version = 2;")
         conn.commit()
         conn.close()
-        # Force the init path to run again so the retro-labelling UPDATE fires.
+        # Force the init path to run again so the retro-labelling UPDATE fires once and bumps user_version = 3.
         from src import metrics as metrics_mod
         metrics_mod._INITIALIZED_METRICS_DBS.clear()
         from src.metrics import MetricsTracker
@@ -1328,8 +1329,10 @@ class TestDialogClaim(unittest.TestCase):
     def test_fresh_claim_blocks_second_dialog(self):
         import time as _time
         from unittest.mock import patch
-        from src.version_checker import VersionChecker, DATA_DIR
-        claim = os.path.join(DATA_DIR, ".update_dialog.claim")
+        from src.version_checker import VersionChecker
+        data_dir = VersionChecker._effective_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        claim = os.path.join(data_dir, ".update_dialog.claim")
         with open(claim, "w") as f:
             f.write("999999")
         os.utime(claim, (_time.time(), _time.time()))
@@ -1345,8 +1348,10 @@ class TestDialogClaim(unittest.TestCase):
     def test_stale_claim_does_not_block(self):
         import time as _time
         from unittest.mock import patch
-        from src.version_checker import VersionChecker, DATA_DIR
-        claim = os.path.join(DATA_DIR, ".update_dialog.claim")
+        from src.version_checker import VersionChecker
+        data_dir = VersionChecker._effective_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        claim = os.path.join(data_dir, ".update_dialog.claim")
         with open(claim, "w") as f:
             f.write("999999")
         stale = _time.time() - 120

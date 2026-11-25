@@ -176,5 +176,19 @@ class TestAuditorWorkspaceAndRules(unittest.TestCase):
             self.assertIn("AGENTS.md", warning)
             self.assertIn("byte", warning)
 
+    def test_multi_agent_json_and_codex_toml_config_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            claude_json = os.path.join(tmp, ".claude.json")
+            codex_toml = os.path.join(tmp, "config.toml")
+            with open(claude_json, "w", encoding="utf-8") as f:
+                json.dump({"mcpServers": {"github": {"command": "npx"}}}, f)
+            with open(codex_toml, "w", encoding="utf-8") as f:
+                f.write('[mcp_servers.prisma]\ncommand = "npx"\n')
+            with patch.object(EnvironmentAuditor, "get_config_paths", return_value=[claude_json, codex_toml]), \
+                 patch.object(EnvironmentAuditor, "get_plugins_dir", return_value=os.path.join(tmp, "no_plugins")):
+                servers = EnvironmentAuditor.get_configured_mcp_servers()
+            self.assertIn("github", servers)
+            self.assertIn("prisma", servers)
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ import re
 # 1. CSI sequences: \x1b\[[0-9;]*[A-Za-z] (colors, cursor movements, erase line)
 # 2. OSC sequences: \x1b\][^\x07\x1b]*(\x07|\x1b\\) (hyperlinks, window titles)
 # 3. Simple escapes: \x1b[()][AB012], \x1b[=>]
-_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?=<>*!]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)")
 _ANSI_OTHER_RE = re.compile(r"\x1b[()][AB012]|\x1b[=>]")
 

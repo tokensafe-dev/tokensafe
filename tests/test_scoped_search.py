@@ -11,13 +11,29 @@ from src.mcp_server import handle_tool_call
 class TestScopedSearch(unittest.TestCase):
 
     def setUp(self):
+        import shutil
+        import tempfile
         from src.paths import save_active_workspace, get_active_workspace
         self._orig_ws = get_active_workspace()
+        self._orig_data_dir = os.environ.get("TOKENSAFE_DATA_DIR")
+        self._orig_db_path = os.environ.get("TOKENSAFE_DB_PATH")
+        self._tmp_data = tempfile.mkdtemp(prefix="tokensafe_ss_metrics_")
+        self.addCleanup(shutil.rmtree, self._tmp_data, ignore_errors=True)
+        os.environ["TOKENSAFE_DATA_DIR"] = self._tmp_data
+        os.environ["TOKENSAFE_DB_PATH"] = os.path.join(self._tmp_data, "metrics.db")
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         save_active_workspace(project_root)
 
     def tearDown(self):
         from src.paths import save_active_workspace
+        if self._orig_data_dir is None:
+            os.environ.pop("TOKENSAFE_DATA_DIR", None)
+        else:
+            os.environ["TOKENSAFE_DATA_DIR"] = self._orig_data_dir
+        if self._orig_db_path is None:
+            os.environ.pop("TOKENSAFE_DB_PATH", None)
+        else:
+            os.environ["TOKENSAFE_DB_PATH"] = self._orig_db_path
         if self._orig_ws:
             save_active_workspace(self._orig_ws)
 
@@ -129,6 +145,23 @@ class TestScopedSearch(unittest.TestCase):
         res = handle_tool_call("scoped_search", {"query": "USD_PER_TOKEN|reduction_pct", "scope": "code"})
         self.assertNotIn("isError", res)
         self.assertIn("auto-regex", res["content"][0]["text"])
+
+    def test_scoped_search_fts_fast_path_renders_markdown(self):
+        import shutil
+        import tempfile
+        from src.fts_index import CodeFTSIndex
+        root = tempfile.mkdtemp(prefix="tokensafe_fts_md_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        with open(os.path.join(root, "mod.py"), "w", encoding="utf-8") as f:
+            f.write("def uniqueFtsTargetSymbol():\n    return 'ok'\n")
+        CodeFTSIndex(root).index_files()
+        res = ScopedSearch.search("uniqueFtsTargetSymbol", project_path=root, scope="code")
+        self.assertTrue(res["success"])
+        self.assertGreater(res["total_matches"], 0)
+        self.assertIn("uniqueFtsTargetSymbol", res["markdown"])
+        self.assertIn("text", res["matches"][0])
+        self.assertIn("scanned_files", res)
+        self.assertFalse(ScopedSearch.is_match_file("a.py", "a.py", "unknown/scope"))
 
 
 if __name__ == "__main__":

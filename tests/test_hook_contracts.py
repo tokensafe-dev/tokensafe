@@ -28,6 +28,15 @@ def _fresh_env(tmp: str):
     metrics_mod._INITIALIZED_METRICS_DBS.clear()
 
 
+def _restore_env(prev: dict):
+    for k, v in prev.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    metrics_mod._INITIALIZED_METRICS_DBS.clear()
+
+
 def _event_details(raw) -> dict:
     if isinstance(raw, dict):
         return raw
@@ -378,6 +387,39 @@ class TestProtocolReminderFormat(unittest.TestCase):
                 for s in steps
             ))
             self.assertFalse(any("ephemeralMessage" in s for s in steps))
+
+    def test_zcode_tool_response_and_empty_model_fallback(self):
+        from hooks import zcode_hook
+        raw = "\n".join(f"ok line {i}" for i in range(40)) + "\n==== 40 passed in 0.10s ===="
+        out = zcode_hook.handle("PostToolUse", {
+            "toolCall": {"name": "Bash", "input": {"command": "pytest"}},
+            "toolResponse": {"stdout": raw, "exit_code": 0},
+            "conversationId": "zcode_camel_sess",
+        })
+        self.assertEqual(out.get("decision"), "block")
+        self.assertIn("auto-compacted", out.get("reason", ""))
+
+        from hooks import pre_invocation
+        prev = {k: os.environ.get(k) for k in ("TOKENSAFE_DATA_DIR", "TOKENSAFE_DB_PATH", "TOKENSAFE_TELEMETRY_DISABLED")}
+        with tempfile.TemporaryDirectory() as tmp:
+            _fresh_env(tmp)
+            try:
+                payload = {
+                    "lastUserInput": "please compress this long-winded prompt for me right now",
+                    "conversationId": "no_model_sess",
+                    "invocationNum": 5,
+                }
+                with patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                     patch("sys.stdout", new_callable=io.StringIO), \
+                     patch("src.adapter_core.resolve_event_model", return_value=""), \
+                     patch("hooks.pre_invocation.resolve_event_model", return_value=""):
+                    pre_invocation.main()
+                tracker = MetricsTracker(db_path=os.path.join(tmp, "metrics.db"))
+                prompt_evs = [e for e in tracker.get_recent_events(limit=10) if e.get("event_type") == "PROMPT"]
+                if prompt_evs:
+                    self.assertEqual(_event_details(prompt_evs[0].get("details")).get("model"), "")
+            finally:
+                _restore_env(prev)
 
 
 if __name__ == "__main__":

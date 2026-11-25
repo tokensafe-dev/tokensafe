@@ -264,6 +264,25 @@ description = "Data validation using Python type hints"
         self.assertEqual(res["source"], "L3_team_cache")
         self.assertEqual(res["version"], "0.110.0")
 
+    def test_pnpm_boundary_and_cargo_deps_array(self):
+        pnpm_path = os.path.join(self.tmp_dir.name, "pnpm-lock.yaml")
+        with open(pnpm_path, "w", encoding="utf-8") as f:
+            f.write("packages:\n  /preact@10.20.0:\n    resolution: {integrity: x}\n")
+        res_react = LockfileReducer.query_dependency(pnpm_path, "react")
+        self.assertFalse(res_react["found"])
+        res_preact = LockfileReducer.query_dependency(pnpm_path, "preact")
+        self.assertTrue(res_preact["found"])
+
+        cargo_path = os.path.join(self.tmp_dir.name, "Cargo.lock")
+        with open(cargo_path, "w", encoding="utf-8") as f:
+            f.write(
+                '[[package]]\nname = "hyper"\nversion = "1.3.1"\nchecksum = "abc"\n'
+                'dependencies = [\n "http",\n "tokio",\n]\n'
+            )
+        res_cargo = LockfileReducer.query_dependency(cargo_path, "hyper")
+        self.assertTrue(res_cargo["found"])
+        self.assertEqual(res_cargo["dependencies"], ["http", "tokio"])
+
 
 if __name__ == "__main__":
     unittest.main()

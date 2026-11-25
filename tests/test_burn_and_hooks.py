@@ -376,6 +376,10 @@ class TestMultiAgentBurnMonitor(unittest.TestCase):
 
         snap = collect_live_burn_snapshot(agent="zcode", session_id="sess_abc", home_dir=home)
         self.assertEqual(snap["active_parallel_sessions"], 2)
+        # Ensure active session count is independent of glob order (Linux CI regression guard)
+        with patch("glob.glob", return_value=[rp1, rp2]):
+            snap_ordered = collect_live_burn_snapshot(agent="zcode", session_id="sess_abc", home_dir=home)
+        self.assertEqual(snap_ordered["active_parallel_sessions"], 2)
         self.assertIn("1308", snap["rate_limit_hits"])
         # Peak hour (Tue 09:00 UTC = 17:00 SST)
         peak_dt = datetime.datetime(2026, 11, 24, 9, 0, tzinfo=datetime.timezone.utc)
@@ -408,6 +412,22 @@ class TestMultiAgentBurnMonitor(unittest.TestCase):
         self.assertEqual(res_cc["input_tokens"], 20000)
         self.assertEqual(res_cc["cache_hit_pct"], 90.0)
         self.assertEqual(res_cc["total_tool_calls"], 1)
+
+        # ZCode rollout using Anthropic key (inputTokens excludes cacheReadInputTokens)
+        z_ant_path = os.path.join(self._tmp, "z_ant.jsonl")
+        with open(z_ant_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "type": "model_io",
+                "startedAt": "2026-11-24T10:00:30Z",
+                "model": {"modelId": "claude-sonnet-4-5"},
+                "response": {
+                    "usage": {"inputTokens": 2000, "cacheReadInputTokens": 18000, "outputTokens": 200},
+                },
+            }) + "\n")
+        res_z_ant = analyze_transcript(z_ant_path, agent_type="zcode")
+        self.assertEqual(res_z_ant["input_tokens"], 20000)
+        self.assertEqual(res_z_ant["cache_hit_pct"], 90.0)
+        self.assertLessEqual(res_z_ant["cache_hit_pct"], 100.0)
 
         codex_path = os.path.join(self._tmp, "codex.jsonl")
         with open(codex_path, "w", encoding="utf-8") as f:

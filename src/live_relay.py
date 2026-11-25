@@ -52,8 +52,8 @@ class LiveRelay:
         try:
             ev = {
                 "type": str(event_type or "session")[:40],
-                "saved_tokens": min(10_000_000, max(0, int(data.get("saved_tokens") or data.get("tokens_saved") or 0))),
-                "usd_saved": min(10000.0, max(0.0, float(data.get("usd_saved") or data.get("usd") or 0.0))),
+                "saved_tokens": min(10_000_000, max(0, int(data.get("saved_tokens") or data.get("tokens_saved") or data.get("total_saved_tokens") or 0))),
+                "usd_saved": min(10000.0, max(0.0, float(data.get("usd_saved") or data.get("usd") or data.get("total_usd_saved") or 0.0))),
                 "model": str(data.get("model") or "")[:40],
                 "machine": str(data.get("machine") or _machine_hash())[:64],
                 "ts": time.time(),
@@ -67,16 +67,16 @@ class LiveRelay:
             self.flush_async()
 
     def flush_async(self) -> None:
-        if self._flushing:
-            return
-        self._flushing = True
+        with self._lock:
+            if self._flushing:
+                return
+            self._flushing = True
         threading.Thread(target=self._flush, daemon=True).start()
 
     def _flush(self) -> None:
         try:
             with self._lock:
-                batch = list(self._ring)
-                self._ring.clear()
+                batch = [self._ring.popleft() for _ in range(min(100, len(self._ring)))]
                 self._last_flush = time.time()
             if not batch:
                 return
@@ -100,7 +100,8 @@ class LiveRelay:
         except Exception:
             pass  # live telemetry is best-effort and must never block the proxy
         finally:
-            self._flushing = False
+            with self._lock:
+                self._flushing = False
 
 
 LIVE_RELAY = LiveRelay()

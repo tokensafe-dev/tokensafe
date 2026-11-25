@@ -7,19 +7,25 @@
         "exec \"${TOKENSAFE_PYTHON:-python3}\" \"$PLUGIN_ROOT/src/mcp_server.py\""
       ],
       "tools": {
-        "apply_edits": {
-          "eager": true
-        },
-        "batch_search": {
+        "smart_read_file": {
           "eager": true
         },
         "scoped_search": {
           "eager": true
         },
-        "smart_read_file": {
+        "apply_edits": {
           "eager": true
         },
-        "get_architecture_graph": {
+        "repo_map": {
+          "eager": true
+        },
+        "session_context": {
+          "eager": true
+        },
+        "oumv": {
+          "eager": true
+        },
+        "run_helper": {
           "eager": true
         }
       }

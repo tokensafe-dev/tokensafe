@@ -142,5 +142,22 @@ class TestSupersededPruner(unittest.TestCase):
         self.assertIn("superseded", pruned[1]["message"]["content"][1]["content"])
 
 
+    def test_apply_edits_nested_list_and_compactor_database_kept(self):
+        from src.superseded import SupersededPruner
+        from src.compactor import PromptCompactor
+        steps = [
+            {"tool_calls": [{"name": "read_file", "args": {"Path": "/repo/a.py"}}, {"name": "read_file", "args": {"Path": "/repo/b.py"}}],
+             "content": "def old(): pass\n" * 60},
+            {"tool_calls": [{"name": "apply_edits", "args": {"edits": [{"path": "/repo/b.py", "hunks": []}]}}],
+             "content": "applied"},
+            {"tool_calls": [], "content": "done"},
+        ]
+        pruned, _orig, _new, stats = SupersededPruner.prune_steps(steps)
+        self.assertGreaterEqual(stats["pruned_count"], 1)
+
+        res_c = PromptCompactor.compact("Исправь запрос к базе данных в src/repo.py", enable_distill=False)
+        self.assertIn("баз", res_c["compact_text"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

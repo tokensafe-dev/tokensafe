@@ -252,6 +252,7 @@ class TeamCache:
                 cls._trip_cooldown(cloud_url)
             return []
         except Exception:
+            cls._trip_cooldown(cloud_url)
             return []
         return []
 
@@ -271,6 +272,8 @@ class TeamCache:
             with urllib.request.urlopen(req, timeout=max(2.5, cls.DEFAULT_TIMEOUT), context=shared_ssl_context()) as resp:
                 if resp.status == 200:
                     res = json.loads(resp.read().decode("utf-8"))
+                    res.setdefault("total_entries", res.get("entries", 0))
+                    res.setdefault("total_hits", res.get("hits", 0))
                     res["active"] = True
                     return res
         except Exception as e:

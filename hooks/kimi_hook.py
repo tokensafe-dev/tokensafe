@@ -183,6 +183,10 @@ def handle(event: str, payload: dict) -> dict:
             pass
         return {}
 
+    if event == "Stop":
+        from hooks.claude_code_hook import handle as _cc_handle
+        return _cc_handle("Stop", payload, agent=AGENT)
+
     return {}
 
 

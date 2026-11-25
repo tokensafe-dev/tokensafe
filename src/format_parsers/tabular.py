@@ -154,9 +154,12 @@ class TabularReducer:
             resp = e.get("response", {})
             method = req.get("method", "GET")
             url = req.get("url", "")
-            status = resp.get("status", 0)
-            body_size = resp.get("bodySize", 0)
-            time_ms = int(e.get("time", 0))
+            status = resp.get("status", 0) or 0
+            body_size = resp.get("bodySize") or 0
+            try:
+                time_ms = int(float(e.get("time") or 0))
+            except (TypeError, ValueError):
+                time_ms = 0
 
             # Strip query params if too long
             clean_url = url.split("?")[0] if len(url) > 80 else url

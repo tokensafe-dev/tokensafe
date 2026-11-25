@@ -5,6 +5,7 @@ Compatible with Stripe webhook lifecycle and B2B on-premise proxy deployments.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -233,7 +234,7 @@ class LicenseManager:
             with urllib.request.urlopen(req, timeout=2.5, context=shared_ssl_context()) as resp:
                 data = json.loads(resp.read().decode("utf-8") or "{}")
             license_key = str(data.get("license_key", "") or "")
-            if resp.status != 200 or not data.get("success") or not license_key:
+            if resp.status != 200 or not (data.get("success") or data.get("ok")) or not license_key:
                 raise ValueError(str(data.get("error") or "empty community license response"))
 
             ok, msg = cls.save_license(license_key)
@@ -479,7 +480,7 @@ class LicenseManager:
 
         if best_valid is not None:
             return (best_valid[1], best_valid[2]), best_valid[1]
-        return None, (best_raw[1] if best_raw is not None else "")
+        return None, ""
 
     @classmethod
     def get_active_license(cls) -> Tuple[str, Dict[str, Any]]:
@@ -555,7 +556,7 @@ class LicenseManager:
             with urllib.request.urlopen(req, timeout=3.5, context=shared_ssl_context()) as resp:
                 data = json.loads(resp.read().decode("utf-8") or "{}")
             new_key = data.get("license_key", "")
-            if resp.status == 200 and data.get("success") and new_key:
+            if resp.status == 200 and (data.get("success") or data.get("ok")) and new_key:
                 ok, msg = cls.save_license(new_key, device_token=device_token)
                 return ok, msg
             return False, str(data.get("error") or "refresh_failed")
@@ -582,47 +583,77 @@ class LicenseManager:
             "saved_at": int(time.time())
         }
 
+        wrote_any = False
+        last_err = None
         for target_file in cls._candidate_license_files():
             target_dir = os.path.dirname(target_file)
+            tmp_path = f"{target_file}.tmp.{os.getpid()}.{threading.get_ident()}"
             try:
                 if target_dir:
                     os.makedirs(target_dir, exist_ok=True)
-                tmp_path = f"{target_file}.tmp.{os.getpid()}"
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(record, f, indent=2)
                 os.replace(tmp_path, target_file)
-            except Exception:
-                pass
+                wrote_any = True
+            except Exception as exc:
+                last_err = exc
+                try:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        if not wrote_any:
+            return False, f"Failed to write license file: {last_err}"
 
         tier_name = payload.get("tier", "").upper()
         trial_note = " (7-Day Trial)" if payload.get("trial") else ""
         return True, f"Successfully activated TokenSafe {tier_name}{trial_note}!"
+
+    @staticmethod
+    def _tracker_state_dir(tracker: Optional[Any] = None) -> Optional[str]:
+        if tracker is not None:
+            from pathlib import PurePath
+            db_p = getattr(tracker, "db_path", None)
+            if isinstance(db_p, (str, PurePath)) and str(db_p).strip():
+                try:
+                    return os.path.dirname(os.path.abspath(str(db_p)))
+                except Exception:
+                    return None
+        return None
 
     @classmethod
     def _get_server_quota_floor(cls, tracker: Optional[Any] = None) -> int:
         """Reads server-verified quota floor from mirror ledger (.qledger.json) within 30-day window."""
         if tracker and hasattr(tracker, "get_server_quota_floor"):
             try:
-                floor = int(tracker.get_server_quota_floor() or 0)
-                if floor > 0:
-                    return floor
+                raw_floor = tracker.get_server_quota_floor()
+                if isinstance(raw_floor, (int, float)):
+                    floor = int(raw_floor)
+                    if floor > 0:
+                        return floor
             except Exception:
                 pass
         try:
             mirror_paths = []
             if tracker and hasattr(tracker, "_quota_mirror_path"):
                 try:
-                    mirror_paths.append(tracker._quota_mirror_path())
+                    from pathlib import PurePath
+                    mp = tracker._quota_mirror_path()
+                    if isinstance(mp, (str, PurePath)):
+                        mirror_paths.append(str(mp))
                 except Exception:
                     pass
-            base_dir = os.environ.get("TOKENSAFE_DATA_DIR") or (
+            tracker_dir = cls._tracker_state_dir(tracker)
+            base_dir = tracker_dir or os.environ.get("TOKENSAFE_DATA_DIR") or (
                 os.path.dirname(os.environ["TOKENSAFE_DB_PATH"]) if os.environ.get("TOKENSAFE_DB_PATH") else None
             )
             if base_dir:
                 mirror_paths.append(os.path.join(base_dir, ".qledger.json"))
             else:
-                mirror_paths.append(os.path.join(os.path.dirname(DATA_DIR), ".qledger.json"))
-                mirror_paths.append(os.path.join(DATA_DIR, ".qledger.json"))
+                cur_data_dir = resolve_data_dir()
+                mirror_paths.append(os.path.join(os.path.dirname(cur_data_dir), ".qledger.json"))
+                mirror_paths.append(os.path.join(cur_data_dir, ".qledger.json"))
 
             for mirror_path in mirror_paths:
                 if os.path.exists(mirror_path):
@@ -695,11 +726,11 @@ class LicenseManager:
         local_saved = tracker.get_monthly_saved_tokens() if tracker else 0
         server_floor = cls._get_server_quota_floor(tracker)
 
-        # Guest state backup floor (prevents simple metrics.db deletion within same calendar month)
+        # Guest state backup floor (scoped to tracker dir when explicit db_path is provided)
         guest_floor = 0
         if tier == "guest":
             try:
-                data_dir = resolve_data_dir()
+                data_dir = cls._tracker_state_dir(tracker) or resolve_data_dir()
                 gstate_file = os.path.join(data_dir, "guest_state.json")
                 cur_month = time.strftime("%Y-%m")
                 if os.path.exists(gstate_file):
@@ -709,8 +740,10 @@ class LicenseManager:
                         guest_floor = int(gdata.get("saved_tokens", 0) or 0)
                 if local_saved > guest_floor:
                     os.makedirs(data_dir, exist_ok=True)
-                    with open(gstate_file, "w", encoding="utf-8") as gf:
+                    tmp_gf = f"{gstate_file}.tmp.{os.getpid()}.{threading.get_ident()}"
+                    with open(tmp_gf, "w", encoding="utf-8") as gf:
                         json.dump({"month": cur_month, "saved_tokens": local_saved}, gf)
+                    os.replace(tmp_gf, gstate_file)
             except Exception:
                 pass
 

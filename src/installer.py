@@ -256,7 +256,7 @@ class AgentInstaller:
                 return f'[[hooks]]\nevent = "{event}"\n{m}command = {toml_hook_cmd}\ntimeout = 10\n'
 
             if "kimi_hook.py" in content:
-                # Migration: older installs lack PostToolUse or PreToolUse Edit matcher.
+                # Migration: older installs lack PostToolUse, PreToolUse Edit matcher, or Stop.
                 migrated = False
                 if 'event = "PostToolUse"' not in content:
                     content = content.rstrip() + "\n\n# TokenSafe PostToolUse stdout compaction (migration)\n" + _kimi_section("PostToolUse")
@@ -264,11 +264,14 @@ class AgentInstaller:
                 if 'matcher = "Edit"' not in content:
                     content = content.rstrip() + "\n\n# TokenSafe PreToolUse Edit guard (migration)\n" + _kimi_section("PreToolUse", "Edit")
                     migrated = True
+                if 'event = "Stop"' not in content:
+                    content = content.rstrip() + "\n\n# TokenSafe Stop telemetry/fold (migration)\n" + _kimi_section("Stop")
+                    migrated = True
                 if not migrated:
                     return True, "TokenSafe Kimi Code hooks already registered in config.toml"
                 with open(config_file, "w", encoding="utf-8") as f:
                     f.write(content)
-                return True, "Kimi Code hooks migrated in ~/.kimi-code/config.toml (Edit/PostToolUse)"
+                return True, "Kimi Code hooks migrated in ~/.kimi-code/config.toml (Edit/PostToolUse/Stop)"
 
             hook_sections = (
                 '\n# TokenSafe Lifecycle Hooks\n'
@@ -278,7 +281,8 @@ class AgentInstaller:
                 + _kimi_section("PreToolUse", "Write") + "\n"
                 + _kimi_section("PreToolUse", "Edit") + "\n"
                 + _kimi_section("PreToolUse", "Read") + "\n"
-                + _kimi_section("PostToolUse")
+                + _kimi_section("PostToolUse") + "\n"
+                + _kimi_section("Stop")
             )
             content = (content.rstrip() + "\n" + hook_sections) if content.strip() else hook_sections.lstrip()
             with open(config_file, "w", encoding="utf-8") as f:
@@ -446,6 +450,8 @@ class AgentInstaller:
             _sync_cursor_event("beforeReadFile"),
             _sync_cursor_event("beforeEditFile"),
             _sync_cursor_event("beforeSubmitPrompt"),
+            _sync_cursor_event("afterFileEdit"),
+            _sync_cursor_event("stop"),
         ])
         if not changed:
             return True, "TokenSafe Cursor hooks already registered"

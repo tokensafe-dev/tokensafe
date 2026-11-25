@@ -145,6 +145,22 @@ input PostInput { title: String }
         self.assertIn("/users/{id}", text)
         self.assertNotIn("/resource7", text)
 
+    def test_openapi_method_scoped_operation_slice(self):
+        p = self._write("openapi.json", json.dumps(self._openapi_spec()))
+        for q in ("/users/{id} get", "/users/{id}:get"):
+            sliced, info = SchemaSlicer.slice_file(p, q)
+            self.assertEqual(info["mode"], "operation", q)
+            self.assertIn("GET /users/{id}", sliced)
+            self.assertIn("Address", sliced)
+
+    def test_schema_cache_preserves_case_sensitivity(self):
+        p = self._write("case.prisma", "model User {\n  id Int @id\n}\n")
+        _, info_miss = SchemaSlicer.slice_file(p, "user")
+        self.assertEqual(info_miss["mode"], "missing")
+        sliced, info_hit = SchemaSlicer.slice_file(p, "User")
+        self.assertEqual(info_hit["mode"], "model")
+        self.assertIn("model User", sliced)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,12 +61,19 @@ def _apply_hunk_to_text(
     end_line: Optional[int] = None,
     replace_all: bool = False
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Applies a single hunk to text in-memory. Returns (new_text, error_message)."""
+    """Applies a single hunk to text in-memory, preserving CRLF endings. Returns (new_text, error_message)."""
     if not target:
         return None, "Target string cannot be empty."
 
     lines = content.splitlines(keepends=True)
-    newline = "\r\n" if "\r\n" in content else "\n"
+    has_crlf = "\r\n" in content
+    if has_crlf:
+        if target not in content and "\r\n" not in target and "\n" in target:
+            crlf_target = target.replace("\n", "\r\n")
+            if crlf_target in content:
+                target = crlf_target
+        if "\n" in replacement:
+            replacement = replacement.replace("\r\n", "\n").replace("\n", "\r\n")
 
     # Line-bounded search if start_line or end_line is specified
     if start_line is not None or end_line is not None:
@@ -132,6 +139,7 @@ def execute_batch_edits(
         }
 
     base_dir = os.path.abspath(cwd or os.getcwd())
+    real_base = os.path.realpath(base_dir)
 
     # Pre-validation & secret check
     prepared_files: Dict[str, Dict[str, Any]] = {}
@@ -147,12 +155,22 @@ def execute_batch_edits(
             failed_files.append({"path": "", "error": "Missing 'path' parameter in edit entry."})
             continue
 
-        abs_path = os.path.normpath(os.path.join(base_dir, rel_path))
+        if os.path.isabs(rel_path):
+            failed_files.append({"path": rel_path, "error": "Absolute paths and traversal outside workspace root are disallowed."})
+            continue
 
-        # Check for directory traversal escapes
-        if not abs_path.startswith(base_dir) and not os.path.isabs(rel_path):
+        abs_path = os.path.normpath(os.path.join(base_dir, rel_path))
+        real_target = os.path.realpath(abs_path)
+
+        # Strict containment check (blocks ../sibling, symlinks, drive escapes)
+        try:
+            contained = os.path.commonpath([real_base, real_target]) == real_base
+        except ValueError:
+            contained = False
+        if not contained or real_target == real_base:
             failed_files.append({"path": rel_path, "error": "Path traversal outside workspace root is disallowed."})
             continue
+        abs_path = real_target
 
         # File creation vs hunk modification
         create_content = item.get("create")
@@ -171,7 +189,7 @@ def execute_batch_edits(
                 failed_files.append({"path": rel_path, "error": f"TokenSafe Security Guard blocked edit: {leak_reason}"})
                 continue
 
-            if os.path.exists(abs_path) and not overwrite:
+            if (os.path.exists(abs_path) or abs_path in prepared_files) and not overwrite:
                 failed_files.append({"path": rel_path, "error": f"File '{rel_path}' already exists. Set 'overwrite: true' to overwrite."})
                 continue
 
@@ -188,18 +206,25 @@ def execute_batch_edits(
             failed_files.append({"path": rel_path, "error": "Must specify either 'create' string or non-empty 'hunks' array."})
             continue
 
-        if not os.path.exists(abs_path):
-            failed_files.append({"path": rel_path, "error": f"File '{rel_path}' does not exist on disk."})
-            continue
+        prior_prepared = prepared_files.get(abs_path)
+        if prior_prepared is not None:
+            current_text = prior_prepared["new_content"]
+            prev_hunk_count = prior_prepared["hunk_count"]
+            is_create = prior_prepared["is_create"]
+        else:
+            if not os.path.exists(abs_path):
+                failed_files.append({"path": rel_path, "error": f"File '{rel_path}' does not exist on disk."})
+                continue
 
-        try:
-            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-        except Exception as e:
-            failed_files.append({"path": rel_path, "error": f"Failed to read file: {e}"})
-            continue
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace", newline="") as f:
+                    current_text = f.read()
+            except Exception as e:
+                failed_files.append({"path": rel_path, "error": f"Failed to read file: {e}"})
+                continue
+            prev_hunk_count = 0
+            is_create = False
 
-        current_text = content
         file_failed = False
         applied_hunk_count = 0
 
@@ -248,8 +273,8 @@ def execute_batch_edits(
             prepared_files[abs_path] = {
                 "rel_path": rel_path,
                 "new_content": current_text,
-                "is_create": False,
-                "hunk_count": applied_hunk_count,
+                "is_create": is_create,
+                "hunk_count": prev_hunk_count + applied_hunk_count,
             }
 
     # Atomic enforcement: if any file failed and not best_effort, reject all
@@ -266,13 +291,20 @@ def execute_batch_edits(
 
     applied_files_info: List[Dict[str, Any]] = []
 
-    # Write files to disk if not dry_run
+    # Write files to disk if not dry_run (with atomic rollback on write failure when best_effort=False)
     if not dry_run:
+        backups: List[Tuple[str, Optional[bytes]]] = []
+        write_aborted = False
         for abs_p, p_info in prepared_files.items():
             try:
+                orig_bytes: Optional[bytes] = None
+                if os.path.exists(abs_p):
+                    with open(abs_p, "rb") as bf:
+                        orig_bytes = bf.read()
                 os.makedirs(os.path.dirname(abs_p), exist_ok=True)
                 with open(abs_p, "w", encoding="utf-8", newline="") as f:
                     f.write(p_info["new_content"])
+                backups.append((abs_p, orig_bytes))
                 applied_files_info.append({
                     "path": p_info["rel_path"],
                     "hunks": p_info["hunk_count"],
@@ -280,6 +312,21 @@ def execute_batch_edits(
                 })
             except Exception as e:
                 failed_files.append({"path": p_info["rel_path"], "error": f"Disk write failed: {e}"})
+                if not best_effort:
+                    write_aborted = True
+                    break
+        if write_aborted:
+            for b_path, b_bytes in reversed(backups):
+                try:
+                    if b_bytes is None:
+                        if os.path.exists(b_path):
+                            os.remove(b_path)
+                    else:
+                        with open(b_path, "wb") as rf:
+                            rf.write(b_bytes)
+                except OSError:
+                    pass
+            applied_files_info = []
     else:
         for abs_p, p_info in prepared_files.items():
             applied_files_info.append({
@@ -316,10 +363,14 @@ def execute_batch_edits(
             raw_out = strip_ansi(proc.stdout or "")
             if len(raw_out) > MAX_VERIFY_OUTPUT_CHARS:
                 lines = raw_out.splitlines()
-                head = lines[:20]
-                tail = lines[-15:]
-                folded_lines = head + [f"... [{len(lines) - 35} lines folded] ..."] + tail
-                compact_out = "\n".join(folded_lines)
+                if len(lines) > 35:
+                    head = lines[:20]
+                    tail = lines[-15:]
+                    folded_lines = head + [f"... [{len(lines) - 35} lines folded] ..."] + tail
+                    compact_out = "\n".join(folded_lines)
+                else:
+                    half = MAX_VERIFY_OUTPUT_CHARS // 2
+                    compact_out = raw_out[:half] + "\n... [output truncated] ...\n" + raw_out[-half:]
             else:
                 compact_out = raw_out
 

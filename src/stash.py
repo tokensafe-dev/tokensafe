@@ -15,6 +15,7 @@ import re
 import json
 import time
 import hashlib
+import threading
 from typing import Tuple, Optional, Dict, Any
 
 from src.paths import resolve_data_dir
@@ -23,7 +24,7 @@ STASH_DIRNAME = "stash"
 MAX_STASH_CHARS = 5 * 1024 * 1024  # Cap single artifact at 5 MB
 DEFAULT_MAX_AGE_DAYS = 7
 DEFAULT_MAX_TOTAL_MB = 50
-_HASH_PATTERN = re.compile(r"#?([0-9a-fA-F]{8})\b")
+_HASH_PATTERN = re.compile(r"#?([0-9a-fA-F]{8,32})\b")
 _LAST_CLEANUP_TS = 0.0
 
 
@@ -69,10 +70,21 @@ def stash_block(content: str, source: str = "tool") -> Tuple[str, str]:
 
     try:
         stash_dir = get_stash_dir()
-        path = os.path.join(stash_dir, f"{hash8}.json")
+        hash_key = hash8
+        path = os.path.join(stash_dir, f"{hash_key}.json")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as ef:
+                    existing = json.load(ef)
+                if isinstance(existing, dict) and existing.get("sha256") and existing["sha256"] != full_sha:
+                    hash_key = full_sha[:16]
+                    path = os.path.join(stash_dir, f"{hash_key}.json")
+            except Exception:
+                pass
+
         if not os.path.exists(path):
             payload = {
-                "hash": hash8,
+                "hash": hash_key,
                 "sha256": full_sha,
                 "timestamp": int(time.time()),
                 "source": source,
@@ -80,20 +92,29 @@ def stash_block(content: str, source: str = "tool") -> Tuple[str, str]:
                 "chars": chars_count,
                 "content": content,
             }
-            tmp_path = f"{path}.tmp.{os.getpid()}"
+            tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
             os.replace(tmp_path, path)
+
+        if hash_key != hash8:
+            marker = (
+                f"[TokenSafe folded: #{hash_key} ({lines_count} lines / {chars_count} chars omitted) "
+                f"— call tokensafe:expand_ref('{hash_key}') to restore raw content]"
+            )
 
         # Trigger passive cleanup once per hour
         now = time.time()
         if now - _LAST_CLEANUP_TS > 3600.0:
             _LAST_CLEANUP_TS = now
             cleanup_old_stashes()
+        return hash_key, marker
     except Exception:
-        pass
-
-    return hash8, marker
+        err_marker = (
+            f"[TokenSafe folded: #{hash8} ({lines_count} lines / {chars_count} chars omitted) "
+            f"— stash write failed; raw content unavailable for restore]"
+        )
+        return hash8, err_marker
 
 
 def retrieve_block(hash_or_marker: str) -> Optional[str]:
@@ -162,6 +183,15 @@ def cleanup_old_stashes(
         total_size = 0
 
         for fname in os.listdir(stash_dir):
+            if ".tmp." in fname:
+                fpath = os.path.join(stash_dir, fname)
+                try:
+                    if (now - os.path.getmtime(fpath)) > 300:
+                        os.remove(fpath)
+                        pruned += 1
+                except OSError:
+                    pass
+                continue
             if not fname.endswith(".json"):
                 continue
             fpath = os.path.join(stash_dir, fname)

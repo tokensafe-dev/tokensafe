@@ -149,14 +149,16 @@ class ToolSlicer:
                         found_line = first_hit[candidate]
                         break
 
-        new_start = 1
+        new_start = max(1, min(int(start_line), total_lines)) if start_line is not None else 1
         new_end = total_lines
 
-        if found_line:
+        if found_line and (start_line is None or found_line >= int(start_line)):
             # Slice: 20-line lead-in before the declaration, then enough tail
             # to contain the WHOLE enclosing definition (short definitions keep
             # the legacy 80-line tail; long ones extend to their real end).
             new_start = max(1, found_line - 20)
+            if start_line is not None:
+                new_start = max(new_start, int(start_line))
             new_end = min(total_lines, found_line + 80)
             def_end = cls._find_definition_end(lines, found_line)
             if def_end:
@@ -165,8 +167,8 @@ class ToolSlicer:
                     max(new_end, min(def_end, found_line + cls.MAX_SYMBOL_WINDOW)),
                 )
 
-        # If no symbol found and file is large (> 400 lines), apply safety window
-        if not target_symbol and total_lines > 400 and (end_line is None or end_line > cls.DEFAULT_MAX_WINDOW):
+        # If no symbol found (or symbol wasn't after explicit start_line) and file is large (> 400 lines), apply safety window
+        elif (not target_symbol or start_line is not None) and total_lines > 400 and (end_line is None or end_line > cls.DEFAULT_MAX_WINDOW):
             new_start = max(1, min(int(start_line), total_lines)) if start_line is not None else 1
             new_end = min(total_lines, new_start + cls.DEFAULT_MAX_WINDOW)
             if new_end < new_start:

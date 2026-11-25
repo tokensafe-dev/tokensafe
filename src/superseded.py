@@ -17,19 +17,36 @@ _READ_TOOLS = {
     "read_file", "view_file", "Read", "smart_read_file",
 }
 _EDIT_TOOLS = {
-    "edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit", "replace_file_content"
+    "edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit",
+    "replace_file_content", "multi_replace_file_content", "write_to_file", "apply_edits",
 }
-_PATH_KEYS = ("Path", "path", "FilePath", "file_path", "notebook_path")
+_PATH_KEYS = ("Path", "path", "FilePath", "file_path", "TargetFile", "notebook_path")
 
 
-def _extract_path_from_args(args: Any) -> Optional[str]:
+def _extract_paths_from_args(args: Any) -> List[str]:
     if not isinstance(args, dict):
-        return None
+        return []
+    found: List[str] = []
     for k in _PATH_KEYS:
         val = args.get(k)
         if isinstance(val, str) and val.strip():
-            return os.path.abspath(val.strip())
-    return None
+            found.append(os.path.abspath(val.strip()))
+    for list_key in ("edits", "targets"):
+        items = args.get(list_key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    for k in _PATH_KEYS:
+                        val = item.get(k)
+                        if isinstance(val, str) and val.strip():
+                            found.append(os.path.abspath(val.strip()))
+                            break
+    return list(dict.fromkeys(found))
+
+
+def _extract_path_from_args(args: Any) -> Optional[str]:
+    paths = _extract_paths_from_args(args)
+    return paths[0] if paths else None
 
 
 class SupersededPruner:
@@ -65,14 +82,15 @@ class SupersededPruner:
                         continue
                     tname = tc.get("name", "")
                     args = tc.get("args")
-                    fpath = _extract_path_from_args(args)
-                    if not fpath:
+                    fpaths = _extract_paths_from_args(args)
+                    if not fpaths:
                         continue
-                    if tname in _READ_TOOLS:
-                        file_actions.setdefault(fpath, []).append((idx, "READ"))
-                        step_read_files[idx] = fpath
-                    elif tname in _EDIT_TOOLS:
-                        file_actions.setdefault(fpath, []).append((idx, "EDIT"))
+                    for fpath in fpaths:
+                        if tname in _READ_TOOLS:
+                            file_actions.setdefault(fpath, []).append((idx, "READ"))
+                            step_read_files[idx] = fpath
+                        elif tname in _EDIT_TOOLS:
+                            file_actions.setdefault(fpath, []).append((idx, "EDIT"))
 
             # Claude Code format: message.content blocks
             msg = step.get("message")
@@ -83,17 +101,18 @@ class SupersededPruner:
                         if isinstance(b, dict) and b.get("type") == "tool_use":
                             tname = b.get("name", "")
                             inp = b.get("input")
-                            fpath = _extract_path_from_args(inp)
-                            if not fpath:
+                            fpaths = _extract_paths_from_args(inp)
+                            if not fpaths:
                                 continue
-                            if tname in _READ_TOOLS:
-                                file_actions.setdefault(fpath, []).append((idx, "READ"))
-                                step_read_files[idx] = fpath
-                                tool_use_id = str(b.get("id") or "")
-                                if tool_use_id:
-                                    read_tool_ids[tool_use_id] = idx
-                            elif tname in _EDIT_TOOLS:
-                                file_actions.setdefault(fpath, []).append((idx, "EDIT"))
+                            for fpath in fpaths:
+                                if tname in _READ_TOOLS:
+                                    file_actions.setdefault(fpath, []).append((idx, "READ"))
+                                    step_read_files[idx] = fpath
+                                    tool_use_id = str(b.get("id") or "")
+                                    if tool_use_id:
+                                        read_tool_ids[tool_use_id] = idx
+                                elif tname in _EDIT_TOOLS:
+                                    file_actions.setdefault(fpath, []).append((idx, "EDIT"))
 
         # Identify superseded read step indices:
         # A read at step i is superseded if there is an EDIT at step j > i,

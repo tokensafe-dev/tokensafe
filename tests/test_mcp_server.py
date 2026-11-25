@@ -6,6 +6,35 @@ from unittest.mock import patch
 from src.mcp_server import handle_tool_call, _execute_with_timeout, run_mcp_server, TOOLS, FULL_TOOLS
 
 class TestMCPServer(unittest.TestCase):
+    def setUp(self):
+        import os
+        import shutil
+        import tempfile
+        from src.paths import get_active_workspace, save_active_workspace
+        self._orig_ws = get_active_workspace()
+        self._orig_data_dir = os.environ.get("TOKENSAFE_DATA_DIR")
+        self._orig_db_path = os.environ.get("TOKENSAFE_DB_PATH")
+        self._tmp_data = tempfile.mkdtemp(prefix="tokensafe_mcp_test_")
+        self.addCleanup(shutil.rmtree, self._tmp_data, ignore_errors=True)
+        os.environ["TOKENSAFE_DATA_DIR"] = self._tmp_data
+        os.environ["TOKENSAFE_DB_PATH"] = os.path.join(self._tmp_data, "metrics.db")
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        save_active_workspace(repo_root)
+
+    def tearDown(self):
+        import os
+        from src.paths import save_active_workspace
+        if self._orig_data_dir is None:
+            os.environ.pop("TOKENSAFE_DATA_DIR", None)
+        else:
+            os.environ["TOKENSAFE_DATA_DIR"] = self._orig_data_dir
+        if self._orig_db_path is None:
+            os.environ.pop("TOKENSAFE_DB_PATH", None)
+        else:
+            os.environ["TOKENSAFE_DB_PATH"] = self._orig_db_path
+        if self._orig_ws:
+            save_active_workspace(self._orig_ws)
+
     def test_tools_list_has_all_schemas(self):
         tool_names = [t["name"] for t in TOOLS]
         expected_tools = [
@@ -512,6 +541,29 @@ class TestMCPServer(unittest.TestCase):
         self.assertIn("team_entries", data)
         self.assertEqual(len(data["team_entries"]), 1)
         self.assertEqual(data["team_entries"][0]["summary"], "Team mistake from L3")
+
+    def test_mcp_ping_and_malformed_json_args(self):
+        stdin_data = (
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_dir", "arguments": "not-json{{"}}) + "\n"
+        )
+        fake_in = io.StringIO(stdin_data)
+        fake_out = io.StringIO()
+        with patch("sys.stdin", fake_in), patch("sys.stdout", fake_out):
+            run_mcp_server()
+        lines = [json.loads(l) for l in fake_out.getvalue().strip().splitlines() if l.strip()]
+        self.assertEqual(lines[0]["result"], {})
+        self.assertEqual(lines[1]["id"], 2)
+        self.assertTrue(lines[1]["result"].get("isError"))
+
+    def test_scoped_search_blocks_scope_traversal_and_unsafe_batch_git(self):
+        from src.batch_search import _is_git_command_safe
+        res_trav = handle_tool_call("scoped_search", {"query": "x", "path": ".", "scope": "../"})
+        self.assertTrue(res_trav.get("isError"))
+        ok_b, err_b, _ = _is_git_command_safe("branch evil_new_branch")
+        self.assertFalse(ok_b)
+        ok_ro, _, _ = _is_git_command_safe("branch --show-current")
+        self.assertTrue(ok_ro)
 
 
 if __name__ == "__main__":

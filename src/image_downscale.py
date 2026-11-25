@@ -72,6 +72,27 @@ def _read_dimensions_sips(path: str) -> Optional[Tuple[int, int]]:
     return None
 
 
+def _read_dimensions_imagemagick(path: str) -> Optional[Tuple[int, int]]:
+    cmd = shutil.which("magick") or shutil.which("identify")
+    if not cmd:
+        return None
+    try:
+        args = [cmd, "identify"] if os.path.basename(cmd).startswith("magick") else [cmd]
+        res = subprocess.run(
+            [*args, "-format", "%w %h", path],
+            capture_output=True, text=True, timeout=5
+        )
+        if res.returncode == 0:
+            parts = res.stdout.strip().split()
+            if len(parts) >= 2:
+                w, h = int(parts[0]), int(parts[1])
+                if w > 0 and h > 0:
+                    return (w, h)
+    except Exception:
+        pass
+    return None
+
+
 def get_image_dimensions(path: str) -> Optional[Tuple[int, int]]:
     dims = _read_dimensions_pillow(path)
     if dims:
@@ -80,6 +101,9 @@ def get_image_dimensions(path: str) -> Optional[Tuple[int, int]]:
         dims = _read_dimensions_sips(path)
         if dims:
             return dims
+    dims = _read_dimensions_imagemagick(path)
+    if dims:
+        return dims
     return None
 
 
@@ -163,6 +187,8 @@ class ImageDownscaler:
             with Image.open(image_path) as img:
                 resample_filter = getattr(Image.Resampling, "LANCZOS", Image.LANCZOS if hasattr(Image, "LANCZOS") else 1)
                 resized = img.resize((new_w, new_h), resample=resample_filter)
+                if ext in (".jpg", ".jpeg", ".bmp") and resized.mode in ("RGBA", "LA", "P"):
+                    resized = resized.convert("RGB")
                 resized.save(optimized_path)
                 engine_used = "pillow"
         except Exception:

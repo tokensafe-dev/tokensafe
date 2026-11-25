@@ -117,8 +117,9 @@ class TypeSlicer:
         Resolves symlinks for pnpm/bun and supports scoped packages (@scope/pkg).
         """
         curr = os.path.abspath(start_dir or os.getcwd())
-        parts = package_name.strip().split("/")
-        
+        parts = [p for p in package_name.strip().split("/") if p]
+        types_scope_name = package_name.strip().replace("@", "").replace("/", "__")
+
         for _ in range(8):
             node_modules = os.path.join(curr, "node_modules")
             if os.path.isdir(node_modules):
@@ -128,6 +129,13 @@ class TypeSlicer:
                         return os.path.realpath(cand)
                     except Exception:
                         return cand
+                # Also check standalone @types/<pkg> if main package isn't installed
+                types_cand = os.path.join(node_modules, "@types", types_scope_name)
+                if os.path.isdir(types_cand):
+                    try:
+                        return os.path.realpath(types_cand)
+                    except Exception:
+                        return types_cand
             parent = os.path.dirname(curr)
             if parent == curr:
                 break
@@ -148,6 +156,15 @@ class TypeSlicer:
                     root_export = meta["exports"].get(".")
                     if isinstance(root_export, dict):
                         types_rel = root_export.get("types")
+                        if not types_rel:
+                            for sub_key in ("import", "require", "default", "node"):
+                                sub = root_export.get(sub_key)
+                                if isinstance(sub, dict) and sub.get("types"):
+                                    types_rel = sub.get("types")
+                                    break
+                                if isinstance(sub, dict) and isinstance(sub.get("default"), dict) and sub["default"].get("types"):
+                                    types_rel = sub["default"].get("types")
+                                    break
             except Exception:
                 pass
 
@@ -163,17 +180,18 @@ class TypeSlicer:
         if os.path.isfile(standard_index):
             return standard_index
 
-        # Check @types/<pkg> fallback in node_modules
-        node_modules_parent = os.path.dirname(pkg_dir)
-        if os.path.basename(node_modules_parent) != "node_modules":
-            # Scoped package parent
-            node_modules_parent = os.path.dirname(node_modules_parent)
-
-        if os.path.basename(node_modules_parent) == "node_modules":
-            types_scope_name = pkg_name.replace("@", "").replace("/", "__")
-            types_cand = os.path.join(node_modules_parent, "@types", types_scope_name, "index.d.ts")
-            if os.path.isfile(types_cand):
-                return types_cand
+        # Check @types/<pkg> fallback in node_modules (including when resolved via .pnpm symlink)
+        types_scope_name = pkg_name.replace("@", "").replace("/", "__")
+        check_nm = os.path.dirname(pkg_dir)
+        for _ in range(5):
+            if os.path.basename(check_nm) == "node_modules":
+                types_cand = os.path.join(check_nm, "@types", types_scope_name, "index.d.ts")
+                if os.path.isfile(types_cand):
+                    return types_cand
+            parent_nm = os.path.dirname(check_nm)
+            if parent_nm == check_nm:
+                break
+            check_nm = parent_nm
 
         return None
 
@@ -200,18 +218,42 @@ class TypeSlicer:
         open_braces = 0
         brace_started = False
         truncated = False
+        overload_sig_re = re.compile(
+            rf'^\s*(?:export\s+)?(?:declare\s+)?function\s+{re.escape(symbol)}\b'
+        )
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             collected.append(line)
             open_braces += line.count("{") - line.count("}")
             if "{" in line:
                 brace_started = True
 
-            # For type alias (type X = ...;) or single-line declarations
-            if not brace_started and line.strip().endswith(";"):
+            if kind == "function" and not brace_started and line.strip().endswith(";"):
+                # Collect consecutive TS function overloads for the same symbol
+                next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+                if overload_sig_re.match(next_line):
+                    if len(collected) >= max_lines:
+                        truncated = True
+                        break
+                    continue
                 break
-            if brace_started and open_braces <= 0:
-                break
+
+            if open_braces <= 0:
+                stripped = line.strip()
+                if stripped.endswith(";"):
+                    # Wait if next non-empty line continues a union/intersection without semicolon yet
+                    break
+                if brace_started:
+                    # Wait for trailing union member on type X = { a: 1 } | { b: 2 };
+                    next_non_empty = ""
+                    for j in range(idx + 1, min(idx + 4, len(lines))):
+                        if lines[j].strip():
+                            next_non_empty = lines[j].strip()
+                            break
+                    if next_non_empty.startswith(("|", "&")) or stripped.endswith(("|", "&", "=")):
+                        continue
+                    break
+
             if len(collected) >= max_lines:
                 truncated = True
                 break

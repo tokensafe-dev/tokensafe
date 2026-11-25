@@ -26,7 +26,7 @@ from src.history_compactor import HistoryCompactor
 from src.metrics import MetricsTracker
 from src.governor import ContextBudget
 from src.license_manager import LicenseManager
-from src.adapter_core import TOKENSAFE_DIRECTIVES as PROTOCOL_DIRECTIVES
+from src.adapter_core import TOKENSAFE_DIRECTIVES as PROTOCOL_DIRECTIVES, resolve_event_model
 from src.paths import resolve_data_dir
 
 def _model_name(payload: dict) -> str:
@@ -119,7 +119,7 @@ def _handle(payload: dict) -> dict:
                     "symbol": compaction["symbol"],
                     "traits": compaction["traits"],
                     "tier": tier,
-                    "model": _model_name(payload) or "gemini-3.8-flash"
+                    "model": _model_name(payload) or resolve_event_model(transcript_path, conversation_id)
                 }
             )
 
@@ -184,7 +184,7 @@ def _handle(payload: dict) -> dict:
                         "total_accum_orig": orig_hist_tokens,
                         "read_files": stats.get("read_files_count", 0),
                         "edited_files": stats.get("edited_files_count", 0),
-                        "model": _model_name(payload) or "gemini-3.8-flash"
+                        "model": _model_name(payload) or resolve_event_model(transcript_path, conversation_id)
                     }
                 )
 

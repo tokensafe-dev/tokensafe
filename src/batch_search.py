@@ -57,10 +57,25 @@ def _is_git_command_safe(args_str: str) -> Tuple[bool, str, List[str]]:
     if subcmd not in ALLOWED_GIT_COMMANDS:
         return False, f"Git subcommand '{subcmd}' is not in the read-only allowlist ({', '.join(sorted(ALLOWED_GIT_COMMANDS))}).", []
 
-    # Block destructive or interactive flags
-    for tok in tokens:
+    # Block destructive, config-overriding, or mutating flags
+    _BLOCKED_GIT_PREFIXES = ("-c", "-C", "--git-dir", "--work-tree", "--exec-path", "--output", "--ext-diff", "--exec")
+    _READ_ONLY_BRANCH_TAG_FLAGS = {
+        "-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+        "--show-current", "--contains", "--no-contains", "--merged", "--no-merged",
+        "--sort", "--format", "--points-at", "--color", "--no-color", "--abbrev",
+    }
+    for idx, tok in enumerate(tokens[1:], start=1):
+        low_tok = tok.lower()
         if tok in ("--delete", "-d", "-D", "-m", "-M", "--hard", "--reset", "--force", "-f", "--interactive", "-i"):
             return False, f"Destructive flag '{tok}' is disallowed in batch_search.", []
+        if any(tok == p or tok.startswith(p + "=") for p in _BLOCKED_GIT_PREFIXES):
+            return False, f"Git flag '{tok}' is disallowed in batch_search.", []
+        if subcmd in ("branch", "tag") and not tok.startswith("-"):
+            prev = tokens[idx - 1]
+            if prev not in ("--contains", "--no-contains", "--merged", "--no-merged", "--sort", "--format", "--points-at", "-l", "--list"):
+                return False, f"Positional argument '{tok}' with git {subcmd} is disallowed (read-only flags only).", []
+        elif subcmd in ("branch", "tag") and tok.startswith("-") and tok.split("=", 1)[0] not in _READ_ONLY_BRANCH_TAG_FLAGS:
+            return False, f"Flag '{tok}' with git {subcmd} is not in read-only list.", []
 
     return True, "", tokens
 
@@ -135,9 +150,8 @@ def _run_rg_query(
     for d in ("node_modules", ".git", "dist", "build", ".venv", "__pycache__"):
         cmd.extend(["--glob", f"!{d}/**"])
 
-    cmd.append(pattern)
     target_path = os.path.normpath(os.path.join(cwd, path_filter)) if path_filter else cwd
-    cmd.append(target_path)
+    cmd.extend(["--", pattern, target_path])
 
     try:
         proc = subprocess.run(
@@ -149,17 +163,19 @@ def _run_rg_query(
             timeout=5
         )
         matches = []
+        _rg_line_re = re.compile(r"^(.*):(\d+):(.*)$")
         for line in proc.stdout.splitlines():
             if not line.strip():
                 continue
-            parts = line.split(":", 2)
-            if len(parts) >= 3:
-                f_path = os.path.relpath(parts[0], cwd)
+            m_line = _rg_line_re.match(line)
+            if m_line:
+                raw_file, raw_lnum, raw_txt = m_line.groups()
+                f_path = os.path.relpath(raw_file, cwd)
                 try:
-                    l_num = int(parts[1])
+                    l_num = int(raw_lnum)
                 except ValueError:
                     l_num = 0
-                snippet = parts[2].strip()
+                snippet = raw_txt.strip()[:180]
                 matches.append({"file": f_path, "line": l_num, "content": snippet})
             if len(matches) >= max_results:
                 break
@@ -174,7 +190,8 @@ def _run_python_text_search(
     path_filter: Optional[str] = None,
     is_regex: bool = False,
     case_sensitive: bool = False,
-    scope: str = "code",
+    scope: str = "all",
+    glob_filter: Optional[str] = None,
     max_results: int = 25
 ) -> List[Dict[str, Any]]:
     """Pure Python search fallback."""
@@ -201,9 +218,10 @@ def _run_python_text_search(
                 continue
             if scope == "code" and ext not in CODE_EXTENSIONS:
                 continue
-
             full_path = os.path.join(root, f)
             rel_p = os.path.relpath(full_path, cwd)
+            if glob_filter and not (fnmatch.fnmatch(f, glob_filter) or fnmatch.fnmatch(rel_p, glob_filter)):
+                continue
 
             try:
                 with open(full_path, "r", encoding="utf-8", errors="replace") as fp:
@@ -315,6 +333,8 @@ def _execute_single_query(query_dict: Dict[str, Any], cwd: str) -> Dict[str, Any
         path_filter=path_filter,
         is_regex=is_regex,
         case_sensitive=case_sensitive,
+        scope="all",
+        glob_filter=glob_filter,
         max_results=max_res
     )
 

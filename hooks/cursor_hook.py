@@ -104,6 +104,23 @@ def handle(event: str, payload: dict) -> dict:
         # record: the model still sees the full prompt. Always allow.
         return {"continue": True}
 
+    if event in ("afterFileEdit", "postToolUse"):
+        try:
+            fp = str(payload.get("file_path") or payload.get("path") or "")
+            if fp:
+                from src.file_state import FileState
+                FileState.record_seen(fp)
+            err_txt = str(payload.get("error") or payload.get("stderr") or "").strip()
+            if err_txt and fp:
+                from src.mistakes import MistakesLedger
+                MistakesLedger.record_failure(summary=err_txt[:140], file_path=fp, source="cursor_hook", project_root=cwd or os.getcwd())
+        except Exception:
+            pass
+        return _allow(event)
+
+    if event == "stop":
+        return {}
+
     return _allow(event)
 
 

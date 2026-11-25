@@ -202,6 +202,39 @@ export interface Response {
         # never be served from it — it can only be reached by its own legacy key.
         self.assertIn("ver-lib@2.0.0::VerSym", keys[0])
 
+    def test_exports_import_types_overloads_unions_and_standalone_at_types(self):
+        # 1. exports["."]["import"]["types"] + union object literal + overloads
+        pkg_dir = os.path.join(self.tmp_dir.name, "node_modules", "modern-lib")
+        os.makedirs(pkg_dir, exist_ok=True)
+        with open(os.path.join(pkg_dir, "package.json"), "w") as f:
+            json.dump({"name": "modern-lib", "version": "1.2.3", "exports": {".": {"import": {"types": "./dist/index.d.ts"}}}}, f)
+        os.makedirs(os.path.join(pkg_dir, "dist"), exist_ok=True)
+        with open(os.path.join(pkg_dir, "dist", "index.d.ts"), "w") as f:
+            f.write(
+                "export type Result =\n"
+                "  | { ok: true; data: string }\n"
+                "  | {\n      ok: false;\n      error: string;\n    };\n\n"
+                "export declare function parse(input: string): string;\n"
+                "export declare function parse(input: Buffer): string;\n"
+            )
+        r_union = TypeSlicer.slice_package_type("modern-lib", "Result", project_root=self.tmp_dir.name)
+        self.assertTrue(r_union["found"])
+        self.assertIn("ok: false", r_union["type_code"])
+        r_ov = TypeSlicer.slice_package_type("modern-lib", "parse", project_root=self.tmp_dir.name)
+        self.assertTrue(r_ov["found"])
+        self.assertIn("input: Buffer", r_ov["type_code"])
+
+        # 2. Standalone @types/<pkg> without runtime package directory
+        types_dir = os.path.join(self.tmp_dir.name, "node_modules", "@types", "onlytypes")
+        os.makedirs(types_dir, exist_ok=True)
+        with open(os.path.join(types_dir, "package.json"), "w") as f:
+            json.dump({"name": "@types/onlytypes", "version": "1.0.0"}, f)
+        with open(os.path.join(types_dir, "index.d.ts"), "w") as f:
+            f.write("export interface OnlyType { flag: boolean; }\n")
+        r_at = TypeSlicer.slice_package_type("onlytypes", "OnlyType", project_root=self.tmp_dir.name)
+        self.assertTrue(r_at["found"])
+        self.assertIn("flag: boolean", r_at["type_code"])
+
 
 if __name__ == "__main__":
     unittest.main()

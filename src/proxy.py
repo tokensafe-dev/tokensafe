@@ -133,9 +133,9 @@ def _apply_effort_clamp(
             return None
         out_cfg_dict = dict(out_cfg) if isinstance(out_cfg, dict) else {}
         cur_effort = str(out_cfg_dict.get("effort") or "").strip().lower()
-        if cur_effort and cur_effort not in ("max", "xhigh", "ultra", "auto", "adaptive") and not strict:
+        if cur_effort and cur_effort not in ("high", "max", "xhigh", "ultra", "auto", "adaptive") and not strict:
             return None
-        if cur_effort in ("high", "max", "xhigh", "ultra") and not strict and last_role != "tool" and cur_effort == "high":
+        if cur_effort == "high" and not strict and last_role != "tool":
             return None
         out_cfg_dict["effort"] = target_effort
         payload["_tokensafe_output_config"] = out_cfg_dict
@@ -151,7 +151,8 @@ def _apply_effort_clamp(
 
 def _record_cache_obs(tracker, provider: str, mutation_kinds: List[str],
                       input_tokens: int, cache_read: int, cache_write: int,
-                      model: str = "", output_tokens: int = 0) -> None:
+                      model: str = "", output_tokens: int = 0,
+                      input_is_uncached: Optional[bool] = None) -> None:
     """CACHE_OBS: per-response KV-cache observation (zero-savings telemetry).
 
     Lets the dashboard PROVE cache stability: average cache-hit ratio on
@@ -168,7 +169,9 @@ def _record_cache_obs(tracker, provider: str, mutation_kinds: List[str],
     if "glm" in (model or "").lower():
         try:
             from src.burn_monitor import estimate_zai_credits
-            uncached = max(0, int(input_tokens or 0) - int(cache_read or 0))
+            if input_is_uncached is None:
+                input_is_uncached = (provider == "anthropic")
+            uncached = int(input_tokens or 0) if input_is_uncached else max(0, int(input_tokens or 0) - int(cache_read or 0))
             est_credits = estimate_zai_credits(uncached, int(cache_read or 0), int(output_tokens or 0), model=model)
         except Exception:
             est_credits = None
@@ -553,15 +556,35 @@ def _translate_anthropic_payload_to_openai(payload: Dict[str, Any]) -> Dict[str,
         elif role == "user":
             blocks = content if isinstance(content, list) else ([{"type": "text", "text": content}] if isinstance(content, str) else [])
             pending_results: List[Dict[str, Any]] = []
+            user_parts: List[Dict[str, Any]] = []
+            def _flush_user_parts():
+                if not user_parts:
+                    return
+                if all(p.get("type") == "text" for p in user_parts):
+                    pending_results.append({"role": "user", "content": "\n".join(p.get("text", "") for p in user_parts)})
+                else:
+                    pending_results.append({"role": "user", "content": list(user_parts)})
+                user_parts.clear()
+
             for blk in blocks:
                 if not isinstance(blk, dict):
                     continue
-                if blk.get("type") == "tool_result":
+                btype = blk.get("type")
+                if btype == "tool_result":
+                    _flush_user_parts()
                     tc = blk.get("content")
                     text = tc if isinstance(tc, str) else _text_blocks(tc) if isinstance(tc, list) else json.dumps(tc, ensure_ascii=False)
                     pending_results.append({"role": "tool", "tool_call_id": blk.get("tool_use_id") or "toolu_call", "content": text})
-                elif blk.get("type") == "text" and isinstance(blk.get("text"), str):
-                    pending_results.append({"role": "user", "content": blk["text"]})
+                elif btype == "text" and isinstance(blk.get("text"), str):
+                    user_parts.append({"type": "text", "text": blk["text"]})
+                elif btype == "image" and isinstance(blk.get("source"), dict):
+                    src = blk["source"]
+                    if src.get("type") == "base64" and src.get("data"):
+                        media = src.get("media_type") or "image/png"
+                        user_parts.append({"type": "image_url", "image_url": {"url": f"data:{media};base64,{src['data']}"}})
+                    elif src.get("url"):
+                        user_parts.append({"type": "image_url", "image_url": {"url": src["url"]}})
+            _flush_user_parts()
             out_messages.extend(pending_results)
             if not pending_results:
                 out_messages.append({"role": "user", "content": ""})
@@ -604,7 +627,11 @@ def _translate_anthropic_payload_to_openai(payload: Dict[str, Any]) -> Dict[str,
         if oai_tools:
             out["tools"] = oai_tools
         tc = payload.get("tool_choice")
-        if tc == "required" or (isinstance(tc, dict) and tc.get("type") == "any"):
+        if tc == "auto" or (isinstance(tc, dict) and tc.get("type") == "auto"):
+            out["tool_choice"] = "auto"
+        elif tc == "none" or (isinstance(tc, dict) and tc.get("type") == "none"):
+            out["tool_choice"] = "none"
+        elif tc == "required" or (isinstance(tc, dict) and tc.get("type") == "any"):
             out["tool_choice"] = "required"
         elif isinstance(tc, dict) and tc.get("type") == "tool" and tc.get("name"):
             out["tool_choice"] = {"type": "function", "function": {"name": tc["name"]}}
@@ -659,8 +686,9 @@ class _OpenAISSEToAnthropicTranslator:
         self._buf = b""
         self._started = False
         self._text_open = False
-        self._tool_open: Dict[int, bool] = {}
-        self._block_index = 0
+        self._tool_open: Dict[int, int] = {}
+        self._active_tool_idx: Optional[int] = None
+        self._block_index = -1
         self._msg_id = f"msg_{int(time.time() * 1000)}"
         self._done = False
         self._finished = False
@@ -680,6 +708,16 @@ class _OpenAISSEToAnthropicTranslator:
             },
         })
 
+    def _close_open_blocks(self) -> bytes:
+        out = b""
+        if self._text_open:
+            out += self._event("content_block_stop", {"type": "content_block_stop", "index": self._text_block_idx})
+            self._text_open = False
+        if self._active_tool_idx is not None and self._active_tool_idx in self._tool_open:
+            out += self._event("content_block_stop", {"type": "content_block_stop", "index": self._tool_open[self._active_tool_idx]})
+            self._active_tool_idx = None
+        return out
+
     def _handle_chunk(self, chunk: Dict[str, Any]) -> bytes:
         out = b""
         if not self._started:
@@ -689,36 +727,40 @@ class _OpenAISSEToAnthropicTranslator:
         delta = choice.get("delta") or {}
         if isinstance(delta.get("content"), str) and delta["content"]:
             if not self._text_open:
-                out += self._event("content_block_start", {"type": "content_block_start", "index": self._block_index, "content_block": {"type": "text", "text": ""}})
+                if self._active_tool_idx is not None:
+                    out += self._close_open_blocks()
+                self._block_index += 1
+                self._text_block_idx = self._block_index
+                out += self._event("content_block_start", {"type": "content_block_start", "index": self._text_block_idx, "content_block": {"type": "text", "text": ""}})
                 self._text_open = True
-            out += self._event("content_block_delta", {"type": "content_block_delta", "index": self._block_index, "delta": {"type": "text_delta", "text": delta["content"]}})
+            out += self._event("content_block_delta", {"type": "content_block_delta", "index": self._text_block_idx, "delta": {"type": "text_delta", "text": delta["content"]}})
         for tc in delta.get("tool_calls") or []:
             if not isinstance(tc, dict):
                 continue
             idx = int(tc.get("index") or 0)
             if idx not in self._tool_open:
-                if self._text_open:
-                    out += self._event("content_block_stop", {"type": "content_block_stop", "index": self._block_index})
-                    self._text_open = False
+                out += self._close_open_blocks()
                 self._block_index += 1
-                self._tool_open[idx] = True
+                blk_idx = self._block_index
+                self._tool_open[idx] = blk_idx
+                self._active_tool_idx = idx
                 fn = tc.get("function") or {}
                 out += self._event("content_block_start", {
-                    "type": "content_block_start", "index": self._block_index,
+                    "type": "content_block_start", "index": blk_idx,
                     "content_block": {"type": "tool_use", "id": tc.get("id") or f"toolu_{idx}", "name": fn.get("name") or "unknown", "input": {}},
                 })
+            else:
+                blk_idx = self._tool_open[idx]
             fn = tc.get("function") or {}
             if fn.get("arguments"):
-                out += self._event("content_block_delta", {"type": "content_block_delta", "index": self._block_index, "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]}})
+                out += self._event("content_block_delta", {"type": "content_block_delta", "index": blk_idx, "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]}})
         finish = choice.get("finish_reason")
         usage = chunk.get("usage") or {}
         if usage.get("completion_tokens"):
             self._usage_out = int(usage["completion_tokens"])
         if finish and not self._finished:
             self._finished = True
-            if self._text_open:
-                out += self._event("content_block_stop", {"type": "content_block_stop", "index": self._block_index})
-                self._text_open = False
+            out += self._close_open_blocks()
             stop_reason = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}.get(finish, "end_turn")
             out += self._event("message_delta", {
                 "type": "message_delta",
@@ -746,13 +788,14 @@ class _OpenAISSEToAnthropicTranslator:
             if body == b"[DONE]":
                 if not self._done:
                     self._done = True
-                    if self._text_open:
-                        out += self._event("content_block_stop", {"type": "content_block_stop", "index": self._block_index})
-                    out += self._event("message_delta", {
-                        "type": "message_delta",
-                        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                        "usage": {"output_tokens": self._usage_out},
-                    })
+                    out += self._close_open_blocks()
+                    if not self._finished:
+                        self._finished = True
+                        out += self._event("message_delta", {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                            "usage": {"output_tokens": self._usage_out},
+                        })
                     out += self._event("message_stop", {"type": "message_stop"})
                 continue
             try:
@@ -770,8 +813,7 @@ class _OpenAISSEToAnthropicTranslator:
         out = b""
         if not self._started:
             out += self._start_message()
-        if self._text_open:
-            out += self._event("content_block_stop", {"type": "content_block_stop", "index": self._block_index})
+        out += self._close_open_blocks()
         if not self._done:
             out += self._event("message_delta", {
                 "type": "message_delta",
@@ -1212,48 +1254,51 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        # 2. Ingress Optimization: REPLACE the last user message with its TOCP form.
-        #    Paused when Community 500k monthly measured quota is exceeded.
+        # 2. Ingress Optimization: REPLACE the last message with its TOCP form
+        #    ONLY when the latest message is an actual user prompt (never mutate an
+        #    older cached user turn mid-tool-loop).
         target_symbol = None
-        if messages and not is_quota_exceeded:
-            for idx in reversed(range(len(messages))):
-                msg = messages[idx]
-                if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-                    raw_user = msg["content"]
-                    compaction = PromptCompactor.compact(raw_user, enable_distill=False)
-                    if compaction["saved_tokens"] > 5:
-                        msg["content"] = compaction["compact_text"]
-                        prompt_mutated = True
-                        try:
-                            proxy_tracker.record_event(
-                                session_id="proxy_session",
-                                event_type="PROMPT",
-                                original_tokens=compaction["original_tokens"],
-                                optimized_tokens=compaction["compact_tokens"],
-                                details={
-                                    "mode": "proxy_replace",
-                                    "action": compaction.get("action"),
-                                    "symbol": compaction.get("symbol"),
-                                    "tier": compaction.get("tier", "REGEX"),
-                                },
-                                measurement="measured",  # bytes literally swapped
-                            )
-                            from src.telemetry_sync import TelemetrySync
-                            TelemetrySync.sync_background(throttle_seconds=5.0)
-                        except Exception:
-                            pass
-                    target_symbol = compaction.get("symbol")
-                    break
+        if messages and not is_quota_exceeded and messages[-1].get("role") == "user":
+            msg = messages[-1]
+            if isinstance(msg.get("content"), str):
+                raw_user = msg["content"]
+                compaction = PromptCompactor.compact(raw_user, enable_distill=False)
+                if compaction["saved_tokens"] > 5:
+                    msg["content"] = compaction["compact_text"]
+                    prompt_mutated = True
+                    try:
+                        proxy_tracker.record_event(
+                            session_id="proxy_session",
+                            event_type="PROMPT",
+                            original_tokens=compaction["original_tokens"],
+                            optimized_tokens=compaction["compact_tokens"],
+                            details={
+                                "mode": "proxy_replace",
+                                "action": compaction.get("action"),
+                                "symbol": compaction.get("symbol"),
+                                "tier": compaction.get("tier", "REGEX"),
+                            },
+                            measurement="measured",
+                        )
+                        from src.telemetry_sync import TelemetrySync
+                        TelemetrySync.sync_background(throttle_seconds=5.0)
+                    except Exception:
+                        pass
+                target_symbol = compaction.get("symbol")
 
-        # 3. Automatic Architecture Awareness (God Nodes Injection)
+        # 3. Automatic Architecture Awareness (God Nodes Injection — deterministic
+        #    across turns for the active workspace so KV-cache prefixes stay identical).
         if messages and not is_quota_exceeded:
             try:
-                graph = GraphEngine.get_instance(os.getcwd())
-                banner = graph.format_topology_banner()
-                first_msg = messages[0]
-                if banner and isinstance(first_msg.get("content"), str) and "[TokenSafe Architecture" not in first_msg["content"]:
-                    if first_msg.get("role") == "system":
-                        first_msg["content"] = f"{banner}\n{first_msg['content']}"
+                from src.paths import get_active_workspace
+                ws_root = get_active_workspace()
+                if ws_root:
+                    graph = GraphEngine.get_instance(ws_root)
+                    banner = graph.format_topology_banner()
+                    first_msg = messages[0]
+                    if banner and isinstance(first_msg.get("content"), str) and "[TokenSafe Architecture" not in first_msg["content"]:
+                        if first_msg.get("role") == "system":
+                            first_msg["content"] = f"{banner}\n{first_msg['content']}"
             except Exception:
                 pass
 
@@ -1306,6 +1351,7 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                 messages, cache_meta = PromptCacheNormalizer.normalize_messages(
                     messages,
                     provider=provider,
+                    inject_cache_control=(provider == "anthropic"),
                     tools=payload.get("tools") if isinstance(payload.get("tools"), list) else None,
                 )
                 payload["messages"] = messages
@@ -1344,7 +1390,7 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                 if isinstance(_m, dict):
                     _m.pop("_tokensafe_thinking", None)
 
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}
         if provider == "anthropic":
             x_api_key = self.headers.get("x-api-key", "") if hasattr(self.headers, "get") else ""
             bearer_key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else auth_header.strip()
@@ -1369,7 +1415,7 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             with urllib.request.urlopen(req, timeout=req_timeout) as resp:
                 self.send_response(resp.status)
                 for k, v in resp.getheaders():
-                    if k.lower() in ("content-type", "content-encoding"):
+                    if k.lower() == "content-type":
                         self.send_header(k, v)
                 if is_quota_exceeded:
                     self.send_header("X-TokenSafe-Quota", "exceeded")
@@ -1451,6 +1497,7 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                                     int(m_cw.group(1)) if m_cw else 0,
                                     model=active_model,
                                     output_tokens=sse_out,
+                                    input_is_uncached=True,
                                 )
                     except Exception:
                         pass
@@ -1500,6 +1547,7 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                             int(usage.get("cache_creation_input_tokens") or 0),
                             model=active_model,
                             output_tokens=out_tok_obs,
+                            input_is_uncached=("input_tokens" in usage and "prompt_tokens" not in usage),
                         )
                         if cached:
                             BROADCASTER.publish("cache_stats", {"provider": provider, "cached_tokens": int(cached)})

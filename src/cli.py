@@ -1070,13 +1070,14 @@ def main(argv: Optional[List[str]] = None):
                     sys.exit(0)
 
         # 1. Request device code
+        from src.version_checker import CURRENT_VERSION
         machine_fp = LicenseManager.get_machine_fingerprint()
         payload = {
             "machine_fp": machine_fp,
             "platform": platform.system()[:32],
             "arch": platform.machine()[:32],
             "agent": str(LicenseManager.detect_agent())[:32],
-            "version": "",
+            "version": CURRENT_VERSION[:32],
             "hostname": platform.node()[:64]
         }
         try:
@@ -1093,7 +1094,7 @@ def main(argv: Optional[List[str]] = None):
             print("  Check your internet connection and try again.\n")
             sys.exit(1)
 
-        if not init_data.get("success"):
+        if not (init_data.get("success") or init_data.get("ok")):
             print(f"\033[31m✖ Authorization initiation failed: {init_data.get('error')}\033[0m\n")
             sys.exit(1)
 
@@ -1163,7 +1164,7 @@ def main(argv: Optional[List[str]] = None):
         # 3. Save license and device token
         lic_key = approved_data.get("license_key", "")
         dev_tok = approved_data.get("device_token", "")
-        auth_email = approved_data.get("email", "")
+        auth_email = approved_data.get("email") or approved_data.get("user_email") or ""
 
         ok, msg = LicenseManager.save_license(lic_key, device_token=dev_tok)
         if ok:
@@ -1643,7 +1644,7 @@ def main(argv: Optional[List[str]] = None):
 
     else:
         print(f"Unknown command: {command}")
-        print("Available commands: stats, status, sync, html, test, tests, doctor, providers, mcp, benchmark, proxy, graph, map, skeleton, guard, vacuum, prune, digest, activate, license, markdown, install, setup, update, check-update, reset. Run 'tokensafe help' for details.")
+        print("Available commands: init, login, logout, stats, status, sync, html, test, tests, expand-ref, wrap, web, doctor, providers, mcp, benchmark, proxy, graph, map, skeleton, guard, mistakes, vacuum, prune, digest, activate, license, markdown, install, uninstall, setup, update, check-update, reset. Run 'tokensafe help' for details.")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -112,9 +112,11 @@ class TestOpenAISSEToAnthropic(unittest.TestCase):
         out = t.feed(chunks).decode("utf-8")
         self.assertIn("event: message_start", out)
         self.assertIn("event: content_block_start", out)
+        self.assertIn("event: content_block_stop", out)
         self.assertIn('"text_delta"', out)
         self.assertIn("input_json_delta", out)
         self.assertIn('"stop_reason": "tool_use"', out)
+        self.assertEqual(out.count("event: message_delta"), 1)
         self.assertIn("event: message_stop", out)
         self.assertEqual(t.flush(), b"", "stream already closed by [DONE]")
 
@@ -270,6 +272,30 @@ class TestThinkingPreservation(unittest.TestCase):
         out = _translate_openai_payload_to_anthropic(openai_form)
         assistant = out["messages"][1]
         self.assertEqual(assistant["content"][0]["type"], "thinking")
+
+    def test_anthropic_user_image_block_preserved(self):
+        payload = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "inspect"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+                    ],
+                }
+            ],
+        }
+        openai_form = _translate_anthropic_payload_to_openai(payload)
+        user_msg = next(m for m in openai_form["messages"] if m["role"] == "user")
+        self.assertIsInstance(user_msg["content"], list)
+        self.assertEqual(user_msg["content"][1]["type"], "image_url")
+        roundtrip = _translate_openai_payload_to_anthropic(openai_form)
+        rt_user = roundtrip["messages"][0]["content"]
+        self.assertEqual(rt_user[0], {"type": "text", "text": "inspect"})
+        self.assertEqual(rt_user[1]["type"], "image")
+        self.assertEqual(rt_user[1]["source"]["data"], "QUJD")
 
 
 if __name__ == "__main__":

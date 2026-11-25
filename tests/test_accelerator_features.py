@@ -168,6 +168,36 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertFalse(res["success"])
         self.assertTrue(any("Security Guard" in err.get("error", "") for err in res["failed_files"]))
 
+    def test_batch_editor_traversal_symlinks_crlf_and_dedup(self):
+        # Reject absolute paths, ../sibling escapes, and symlinks outside workspace
+        res_abs = execute_batch_edits([{"path": "/etc/passwd", "create": "x"}], cwd=self.tmp_dir)
+        self.assertFalse(res_abs["success"])
+        res_rel = execute_batch_edits([{"path": "../outside_evil.py", "create": "x"}], cwd=self.tmp_dir)
+        self.assertFalse(res_rel["success"])
+        outside_dir = tempfile.mkdtemp(prefix="tokensafe_outside_")
+        self.addCleanup(__import__("shutil").rmtree, outside_dir, ignore_errors=True)
+        sym_path = os.path.join(self.tmp_dir, "escape_link")
+        try:
+            os.symlink(outside_dir, sym_path)
+            res_sym = execute_batch_edits([{"path": "escape_link/pwn.py", "create": "x"}], cwd=self.tmp_dir)
+            self.assertFalse(res_sym["success"])
+            self.assertFalse(os.path.exists(os.path.join(outside_dir, "pwn.py")))
+        except OSError:
+            pass
+
+        # Preserve CRLF line endings & apply sequential edits on same file without losing first edit
+        crlf_file = os.path.join(self.tmp_dir, "win.txt")
+        with open(crlf_file, "wb") as f:
+            f.write(b"line1 = 1\r\nline2 = 2\r\n")
+        res_crlf = execute_batch_edits([
+            {"path": "win.txt", "hunks": [{"target": "line1 = 1", "replacement": "line1 = 10\nline1b = 15"}]},
+            {"path": "win.txt", "hunks": [{"target": "line2 = 2", "replacement": "line2 = 20"}]},
+        ], cwd=self.tmp_dir)
+        self.assertTrue(res_crlf["success"], res_crlf)
+        with open(crlf_file, "rb") as f:
+            raw = f.read()
+        self.assertEqual(raw, b"line1 = 10\r\nline1b = 15\r\nline2 = 20\r\n")
+
     def test_batch_search_queries(self):
         """Tests concurrent batch search across files."""
         sub = os.path.join(self.tmp_dir, "src")

@@ -61,14 +61,18 @@ def _handle(payload: dict) -> dict:
     last_user_input = str(payload.get("lastUserInput") or "")
     # Working directory of the tool call: lets CommandSanitizer peek at
     # package.json and Guard audit git staging in the user's repo (never plugin CWD).
-    workspace_paths = payload.get("workspacePaths") if isinstance(payload.get("workspacePaths"), list) else []
-    hook_cwd = str(payload.get("cwd") or (workspace_paths[0] if workspace_paths else "") or os.getcwd())
+    workspace_paths = [str(w) for w in payload["workspacePaths"] if str(w).strip()] if isinstance(payload.get("workspacePaths"), list) else []
+    explicit_cwd = str(payload.get("cwd") or "").strip()
+    hook_cwd = explicit_cwd or (workspace_paths[0] if workspace_paths else "") or os.getcwd()
     try:
         from src.paths import save_active_workspace
-        if workspace_paths and workspace_paths[0]:
-            save_active_workspace(str(workspace_paths[0]))
-        elif hook_cwd:
-            save_active_workspace(hook_cwd)
+        if workspace_paths:
+            save_active_workspace(workspace_paths[0])
+        elif explicit_cwd and any(
+            os.path.exists(os.path.join(explicit_cwd, m))
+            for m in (".git", "package.json", "pyproject.toml", "go.mod", "Cargo.toml", "requirements.txt")
+        ):
+            save_active_workspace(explicit_cwd)
     except Exception:
         pass
 

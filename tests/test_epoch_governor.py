@@ -197,6 +197,8 @@ class TestEpochGovernor(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertIsInstance(captured[0]["messages"][0]["content"], str)
         self.assertTrue(captured[0].get("prompt_cache_key"))
+        # Generic OpenAI upstream must NOT receive Anthropic cache_control fields
+        self.assertNotIn("cache_control", captured[0]["messages"][0])
 
 
 if __name__ == "__main__":

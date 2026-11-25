@@ -33,6 +33,10 @@ class TestSmartBundle(unittest.TestCase):
                 "\n"
                 "    def _load(self):\n"
                 "        return json.dumps({})\n"
+                "\n"
+                "\n"
+                "def _unrelated_helper():\n"
+                "    return 123\n"
             )
         self.b_py = os.path.join(self.dir, "service.py")
         with open(self.b_py, "w", encoding="utf-8") as f:
@@ -72,8 +76,9 @@ class TestSmartBundle(unittest.TestCase):
         self.assertIn("class Service", text)
         self.assertEqual(text.count("import os"), 1, "shared import emitted once")
         self.assertEqual(text.count("import json"), 1, "shared import emitted once")
-        # Non-target code folds away
-        self.assertIn("...", text)
+        # Requested class methods stay intact AND non-target code folds away
+        self.assertIn("return self._load()", text)
+        self.assertIn("def _unrelated_helper():\n    ...", text)
 
     def test_bundle_merges_dep_signatures(self):
         res = self._bundle([{"path": self.a_py, "symbol": "Repo"}])

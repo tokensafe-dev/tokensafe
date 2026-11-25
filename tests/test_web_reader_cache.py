@@ -150,6 +150,14 @@ class TestWebReaderCache(unittest.TestCase):
         # Should NOT push docs with userinfo to L3 TeamCache
         mock_team_put.assert_not_called()
 
+        # Authenticated requests must NOT be read from or written into shared L1/L2 caches
+        headers = {"Authorization": "Bearer secret-a"}
+        content_auth, ok_auth, _ = WebReader.fetch_url("https://private.example.com/data", custom_headers=headers)
+        self.assertTrue(ok_auth)
+        cached_other, tier_other = WebReader.get_cached("https://private.example.com/data")
+        self.assertIsNone(cached_other)
+        self.assertEqual(tier_other, "miss")
+
 
 if __name__ == "__main__":
     unittest.main()

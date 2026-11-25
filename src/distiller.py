@@ -182,8 +182,18 @@ Rules:
             }
         )
         try:
+            from src.ssl_context import shared_ssl_context
             _egress_increment("booster")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ssl_ctx = shared_ssl_context()
+            try:
+                resp_ctx = (
+                    urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
+                    if ssl_ctx is not None
+                    else urllib.request.urlopen(req, timeout=timeout)
+                )
+            except TypeError:
+                resp_ctx = urllib.request.urlopen(req, timeout=timeout)
+            with resp_ctx as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     if data.get("success") and data.get("distilled"):

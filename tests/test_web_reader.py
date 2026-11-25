@@ -68,6 +68,26 @@ class TestWebReader(unittest.TestCase):
         # by checking is_safe_url agrees).
         self.assertTrue(WebReader.is_safe_url("https://example.com/docs"))
 
+    def test_cookie_banner_nested_div_does_not_truncate_article(self):
+        html = """
+        <html><body>
+            <div class="cookie-banner"><div>Notice <span>cookies</span></div><button>Accept</button></div>
+            <main><h1>Real Title</h1><p>Keep this important documentation text.</p></main>
+        </body></html>
+        """
+        md, _ = WebReader.html_to_markdown(html)
+        self.assertNotIn("Notice cookies", md)
+        self.assertIn("Real Title", md)
+        self.assertIn("Keep this important documentation text.", md)
+
+    def test_ssrf_dns_and_ipv6_zone_id_blocked(self):
+        import socket
+        from unittest.mock import patch
+        self.assertFalse(WebReader.is_safe_url("http://[fe80::1%25eth0]/x"))
+        self.assertFalse(WebReader.is_safe_url("http://[fe80::1%eth0]/x"))
+        with patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]):
+            self.assertFalse(WebReader.is_safe_url("https://rebind.example.com/admin"))
+
 
 if __name__ == "__main__":
     unittest.main()
