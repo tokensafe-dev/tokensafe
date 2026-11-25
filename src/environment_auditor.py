@@ -656,8 +656,11 @@ class EnvironmentAuditor:
                     shutil.copy2(p, f"{p}.backup")
                     cleaned = AgentInstaller._clean_codex_orphans(orig_text)
                     try:
-                        import tomllib
-                        tomllib.loads(cleaned)
+                        try:
+                            import tomllib
+                            tomllib.loads(cleaned)
+                        except ImportError:
+                            pass
                         with open(p, "w", encoding="utf-8") as f:
                             f.write(cleaned)
                         fixed.append(f"Repaired TOML syntax/orphans in {p} (backup: {p}.backup)")
