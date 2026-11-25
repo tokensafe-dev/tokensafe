@@ -285,6 +285,25 @@ def _handle(payload: dict) -> dict:
     except Exception:
         pass
 
+    # 6. Multi-Agent Live Burn Monitor (rate-limited, only fires on real burn spikes)
+    if invocation_num >= 2 or transcript_path:
+        try:
+            from src.burn_monitor import get_burn_warnings
+            burn_warn = get_burn_warnings(
+                agent="antigravity",
+                session_id=conversation_id,
+                transcript_path=transcript_path,
+            )
+            if burn_warn:
+                inject_steps.append({
+                    "systemMessage": {
+                        "systemMessage": "",
+                        "metadata": {"user_markdown": burn_warn},
+                    }
+                })
+        except Exception:
+            pass
+
     return {"injectSteps": inject_steps} if inject_steps else {}
 
 

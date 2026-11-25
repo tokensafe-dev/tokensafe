@@ -290,6 +290,11 @@ def fold_tool_results(
     keep_recent: int = 6,
     min_tokens: int = 800,
     record_metrics: bool = True,
+    model: str = "",
+    provider: str = "",
+    cache_warm: Optional[bool] = None,
+    remaining_turns: int = 8,
+    force_fold: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Folds aged, oversized tool results into compact anchors (in-place on a
@@ -298,8 +303,16 @@ def fold_tool_results(
     Gates: TOKENSAFE_TOOL_LEDGER=0 disables; results inside the last
     `keep_recent` messages are never folded; results under `min_tokens` stay
     verbatim; already-folded results (marker present) are never re-folded.
+    Cache-aware ROI gate: when the prefix is warm-cached, refuses to mutate
+    history if suffix_tokens * (M_in - M_cache) >= expected_savings.
     """
-    stats: Dict[str, Any] = {"folded": 0, "orig_tokens": 0, "new_tokens": 0, "saved_tokens": 0}
+    stats: Dict[str, Any] = {
+        "folded": 0,
+        "orig_tokens": 0,
+        "new_tokens": 0,
+        "saved_tokens": 0,
+        "deferred_roi": False,
+    }
     if not messages or not _env_flag("TOKENSAFE_TOOL_LEDGER"):
         return messages, stats
 
@@ -311,6 +324,7 @@ def fold_tool_results(
                 call_meta[call_id] = (name, args)
 
     protected_from = max(0, len(messages) - keep_recent)
+    pending: List[Tuple[int, Dict[str, Any], str, Dict[str, Any], str, int, int, str]] = []
     for idx, msg in enumerate(messages):
         if idx >= protected_from or not isinstance(msg, dict) or msg.get("role") != "tool":
             continue
@@ -326,6 +340,30 @@ def fold_tool_results(
         if not compacted or count_tokens(compacted) >= orig_tokens * 0.85:
             continue  # compaction must earn its cache-break
         new_tokens = count_tokens(compacted)
+        pending.append((idx, msg, tool_name, tool_args, text, orig_tokens, new_tokens, compacted))
+
+    if not pending:
+        return messages, stats
+
+    total_saved = sum(max(0, orig_t - new_t) for _, _, _, _, _, orig_t, new_t, _ in pending)
+    earliest_idx = pending[0][0]
+    from src.burn_monitor import evaluate_fold_roi
+    roi = evaluate_fold_roi(
+        messages,
+        earliest_fold_idx=earliest_idx,
+        saved_tokens=total_saved,
+        model=model,
+        provider=provider,
+        cache_warm=cache_warm,
+        remaining_turns=remaining_turns,
+        force_fold=force_fold,
+    )
+    stats["roi"] = roi
+    if not roi["should_fold"]:
+        stats["deferred_roi"] = True
+        return messages, stats
+
+    for _, msg, tool_name, tool_args, text, orig_tokens, new_tokens, compacted in pending:
         sha = _content_hash(text)
         anchor = _fold_anchor(tool_name, _args_preview(tool_args, tool_name), orig_tokens, new_tokens, sha, _archive_result(text, sha))
         final_text = f"{anchor}\n\n{compacted}" if not compacted.startswith(FOLD_MARKER) else compacted

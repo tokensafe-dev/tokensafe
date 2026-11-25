@@ -169,6 +169,18 @@ def main():
     except Exception:
         pass
 
+    try:
+        from src.burn_monitor import get_burn_warnings
+        burn_warn = get_burn_warnings(
+            agent="antigravity",
+            session_id=str(payload.get("conversationId") or ""),
+            transcript_path=str(payload.get("transcriptPath") or ""),
+        )
+        if burn_warn:
+            inject_steps.append(_user_markdown(burn_warn))
+    except Exception:
+        pass
+
     print(json.dumps({"injectSteps": inject_steps}))
 
 

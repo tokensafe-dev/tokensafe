@@ -41,6 +41,13 @@ def _resolve_hook_path(raw_path: str, hook_cwd: str) -> str:
 
 
 def _handle(payload: dict) -> dict:
+    # If invoked by ZCode / Claude Code (tool_name + tool_input without Antigravity toolCall),
+    # route through the CC/ZCode PreToolUse evaluator so we return {} / hookSpecificOutput
+    # instead of {"decision": "allow"} (which causes hook.run.failed in ZCode).
+    if not isinstance(payload.get("toolCall"), dict) and payload.get("tool_name"):
+        from src.adapter_core import evaluate_cc_pre_tool_use
+        return evaluate_cc_pre_tool_use(payload, agent=str(payload.get("agent") or "zcode"))
+
     tool_call = payload.get("toolCall")
     if not isinstance(tool_call, dict):
         tool_call = {}
@@ -48,6 +55,8 @@ def _handle(payload: dict) -> dict:
     args = tool_call.get("args")
     if not isinstance(args, dict):
         args = {}
+    from src.adapter_core import canonical_tool_name
+    canon_tool = canonical_tool_name(tool_name)
     conversation_id = str(payload.get("conversationId") or "default_session")
     last_user_input = str(payload.get("lastUserInput") or "")
     # Working directory of the tool call: lets CommandSanitizer peek at
@@ -92,11 +101,11 @@ def _handle(payload: dict) -> dict:
     #     either corrupts content or fails and forces a costly full re-read.
     #     Surface it BEFORE the edit lands — force_ask, never deny.
     #     Kill switch: TOKENSAFE_STALE_GUARD=0.
-    if tool_name in ("edit_file", "replace_file_content"):
+    if canon_tool == "edit":
         try:
             from src.file_state import FileState
             if FileState.guard_enabled():
-                raw_path = str(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
+                raw_path = str(args.get("Path") or args.get("TargetFile") or args.get("path") or args.get("file_path") or "")
                 stale = FileState.check_stale(_resolve_hook_path(raw_path, hook_cwd)) if raw_path else None
                 if stale:
                     tracker.record_event(
@@ -124,11 +133,16 @@ def _handle(payload: dict) -> dict:
             pass
 
     # 2. TokenSafe Guard: Inspect file writes and edits for security violations
-    if tool_name in ("write_file", "edit_file"):
+    if canon_tool in ("write", "edit"):
         from src.guard import TokenSafeGuard
-        raw_path = str(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
+        from src.adapter_core import extract_write_content
+        raw_path = str(args.get("Path") or args.get("TargetFile") or args.get("path") or args.get("file_path") or "")
         path = _resolve_hook_path(raw_path, hook_cwd)
-        code_to_check = args.get("Content", "") if tool_name == "write_file" else args.get("Replacement", "")
+        code_to_check = (
+            (args.get("Content") or args.get("content") or "")
+            if canon_tool == "write"
+            else (extract_write_content(tool_name, args) or "")
+        )
         guard_res = TokenSafeGuard.inspect_file_write(path, code_to_check)
         if guard_res.blocked:
             tracker.record_event(
@@ -158,23 +172,22 @@ def _handle(payload: dict) -> dict:
 
     # 3. Output Guard (shared guard_write, v3.0.0): deny wholesale overwrite of
     #    large existing files to enforce edit_file; ask on small-delta writes.
-    if tool_name == "write_file":
-        raw_path = str(args.get("Path") or args.get("path") or "")
+    if canon_tool == "write":
+        raw_path = str(args.get("Path") or args.get("path") or args.get("file_path") or "")
         path = _resolve_hook_path(raw_path, hook_cwd)
-        content = args.get("Content", "")
-        is_append = args.get("Append", False)
+        content = args.get("Content") or args.get("content") or ""
+        is_append = args.get("Append", args.get("append", False))
         verdict = guard_write(path, str(content or ""), bool(is_append), "antigravity", conversation_id)
         if verdict["decision"] in ("deny", "ask"):
             _trigger_bg_sync()
             return {"decision": verdict["decision"], "reason": verdict["reason"]}
 
     # 3. read_file Optimization (AST Windowing & Skeletonization).
-    #    'view_file' is the IDE-surface name for the same tool (hooks.md) —
-    #    route it through the same optimization pipeline.
-    elif tool_name in ("read_file", "view_file"):
+    #    'view_file' and 'Read' route through the same optimization pipeline.
+    elif canon_tool == "read":
         from src.slicer import ToolSlicer
         from src.skeletonizer import Skeletonizer
-        raw_path = str(args.get("Path") or args.get("path") or args.get("FilePath") or "")
+        raw_path = str(args.get("Path") or args.get("path") or args.get("FilePath") or args.get("file_path") or "")
         path = _resolve_hook_path(raw_path, hook_cwd)
         start_line = args.get("StartLine")
         if start_line is None:
@@ -325,11 +338,11 @@ def _handle(payload: dict) -> dict:
                 return response
 
     # 4. run_command Optimization & TokenSafe Guard
-    elif tool_name == "run_command":
+    elif canon_tool == "bash":
         from src.guard import TokenSafeGuard
         from src.diff_slicer import DiffSlicer
         from src.command_sanitizer import CommandSanitizer
-        cmd = str(args.get("CommandLine") or "")
+        cmd = str(args.get("CommandLine") or args.get("command") or "")
         guard_res = TokenSafeGuard.inspect_command(cmd, cwd=hook_cwd)
         if guard_res.blocked:
             tracker.record_event(
@@ -376,7 +389,8 @@ def _handle(payload: dict) -> dict:
             new_cmd, est_saved, reason = diff_cmd, diff_saved, diff_reason
 
         if new_cmd and est_saved > 0:
-            response["overwrite"] = {"CommandLine": new_cmd}
+            cmd_key = "command" if "command" in args and "CommandLine" not in args else "CommandLine"
+            response["overwrite"] = {cmd_key: new_cmd}
             response["reason"] = f"Token Optimizer: {reason} (Saved ~{est_saved} tokens)"
 
             tracker.record_event(

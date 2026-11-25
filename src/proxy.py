@@ -16,7 +16,7 @@ import threading
 import urllib.request
 import urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
@@ -76,10 +76,82 @@ BROADCASTER = EventBroadcaster()
 
 _CACHE_OBS_MIN_INTERVAL_S = 30.0
 _last_cache_obs_ts = 0.0
+_SESSION_CACHE_WARM: Dict[Tuple[str, str], bool] = {}
+_CACHE_STATE_LOCK = threading.Lock()
+_DEEP_REASONING_RE = re.compile(
+    r"\b(architect|architecture|design|plan|audit|security|migrate|migration|investigate|refactor|root\s+cause)\b"
+    r"|архитектур|план|аудит|расследован|безопасност|рефактор",
+    re.IGNORECASE,
+)
+
+
+def _apply_effort_clamp(
+    payload: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    provider: str,
+) -> Optional[str]:
+    """Clamps reasoning/thinking effort on routine or tool-continuation turns.
+
+    Z.ai Coding Plan defaults `thinking: enabled` (without explicit effort) to
+    `max` effort, inflating expensive output tokens (x16-x24). Tool-result
+    continuation turns clamp to `low`; routine non-architectural turns clamp
+    to `medium`. Opt-out via TOKENSAFE_EFFORT_CLAMP=0.
+    """
+    mode = os.environ.get("TOKENSAFE_EFFORT_CLAMP", "1").strip().lower()
+    if mode in ("0", "false", "no", "off"):
+        return None
+    strict = mode == "strict"
+
+    last_msg = messages[-1] if messages and isinstance(messages[-1], dict) else {}
+    last_role = str(last_msg.get("role") or "")
+    last_user_text = ""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                last_user_text = c
+            elif isinstance(c, list):
+                last_user_text = " ".join(
+                    str(b.get("text") or "") for b in c if isinstance(b, dict) and b.get("text")
+                )
+            break
+
+    is_deep = bool(_DEEP_REASONING_RE.search(last_user_text)) or len(last_user_text) >= 600
+    if last_role == "tool":
+        target_effort = "low"
+    elif not is_deep:
+        target_effort = "medium"
+    else:
+        return None
+
+    if provider == "anthropic":
+        thinking_cfg = payload.get("_tokensafe_thinking_cfg") or payload.get("thinking")
+        out_cfg = payload.get("_tokensafe_output_config") or payload.get("output_config")
+        model_l = str(payload.get("model") or "").lower()
+        # Only touch payloads that use thinking/effort or GLM/Claude models.
+        if thinking_cfg is None and out_cfg is None and "glm" not in model_l and "claude" not in model_l:
+            return None
+        out_cfg_dict = dict(out_cfg) if isinstance(out_cfg, dict) else {}
+        cur_effort = str(out_cfg_dict.get("effort") or "").strip().lower()
+        if cur_effort and cur_effort not in ("max", "xhigh", "ultra", "auto", "adaptive") and not strict:
+            return None
+        if cur_effort in ("high", "max", "xhigh", "ultra") and not strict and last_role != "tool" and cur_effort == "high":
+            return None
+        out_cfg_dict["effort"] = target_effort
+        payload["_tokensafe_output_config"] = out_cfg_dict
+        return target_effort
+
+    if "reasoning_effort" in payload:
+        cur_re = str(payload.get("reasoning_effort") or "").strip().lower()
+        if cur_re in ("", "high", "xhigh", "max") or strict:
+            payload["reasoning_effort"] = target_effort
+            return target_effort
+    return None
 
 
 def _record_cache_obs(tracker, provider: str, mutation_kinds: List[str],
-                      input_tokens: int, cache_read: int, cache_write: int) -> None:
+                      input_tokens: int, cache_read: int, cache_write: int,
+                      model: str = "", output_tokens: int = 0) -> None:
     """CACHE_OBS: per-response KV-cache observation (zero-savings telemetry).
 
     Lets the dashboard PROVE cache stability: average cache-hit ratio on
@@ -92,19 +164,34 @@ def _record_cache_obs(tracker, provider: str, mutation_kinds: List[str],
     if not mutated and (now - _last_cache_obs_ts) < _CACHE_OBS_MIN_INTERVAL_S:
         return
     _last_cache_obs_ts = now
+    est_credits = None
+    if "glm" in (model or "").lower():
+        try:
+            from src.burn_monitor import estimate_zai_credits
+            uncached = max(0, int(input_tokens or 0) - int(cache_read or 0))
+            est_credits = estimate_zai_credits(uncached, int(cache_read or 0), int(output_tokens or 0), model=model)
+        except Exception:
+            est_credits = None
     try:
+        details: Dict[str, Any] = {
+            "provider": str(provider),
+            "input": int(input_tokens or 0),
+            "cache_read": int(cache_read or 0),
+            "cache_write": int(cache_write or 0),
+            "mutations": list(mutation_kinds or []),
+        }
+        if model:
+            details["model"] = str(model)
+        if output_tokens:
+            details["output"] = int(output_tokens)
+        if est_credits is not None:
+            details["est_credits"] = est_credits
         tracker.record_event(
             session_id="proxy_session",
             event_type="CACHE_OBS",
             original_tokens=0,
             optimized_tokens=0,
-            details={
-                "provider": str(provider),
-                "input": int(input_tokens or 0),
-                "cache_read": int(cache_read or 0),
-                "cache_write": int(cache_write or 0),
-                "mutations": list(mutation_kinds or []),
-            },
+            details=details,
             measurement="measured",
         )
     except Exception:
@@ -318,6 +405,14 @@ def _translate_openai_payload_to_anthropic(payload: Dict[str, Any]) -> Dict[str,
 
     for k in _OPENAI_ONLY_FIELDS:
         out.pop(k, None)
+    if isinstance(payload.get("_tokensafe_thinking_cfg"), dict):
+        out["thinking"] = payload["_tokensafe_thinking_cfg"]
+    elif isinstance(payload.get("thinking"), dict):
+        out["thinking"] = payload["thinking"]
+    if isinstance(payload.get("_tokensafe_output_config"), dict):
+        out["output_config"] = payload["_tokensafe_output_config"]
+    elif isinstance(payload.get("output_config"), dict):
+        out["output_config"] = payload["output_config"]
     return out
 
 
@@ -484,6 +579,10 @@ def _translate_anthropic_payload_to_openai(payload: Dict[str, Any]) -> Dict[str,
         out["stop"] = payload["stop_sequences"]
     if isinstance(payload.get("stream"), bool):
         out["stream"] = payload["stream"]
+    if isinstance(payload.get("thinking"), dict):
+        out["_tokensafe_thinking_cfg"] = payload["thinking"]
+    if isinstance(payload.get("output_config"), dict):
+        out["_tokensafe_output_config"] = payload["output_config"]
     tools = payload.get("tools")
     if isinstance(tools, list) and tools:
         oai_tools = []
@@ -1034,13 +1133,56 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
         think_stats: Dict[str, Any] = {}
         gov_stats: Dict[str, Any] = {}
         prompt_mutated = False
+        clamped_effort: Optional[str] = None
+
+        # 1.2 Resolve Multi-Provider Upstream & API Key early so ROI gates and
+        #     effort clamping know the exact upstream provider, model, and warm-cache state.
+        auth_header = self.headers.get("Authorization", "")
+        incoming_key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        if not incoming_key:
+            try:
+                incoming_key = self.headers.get("x-api-key", "") or ""
+            except Exception:
+                incoming_key = ""
+        custom_url = _apply_route_override(incoming_key, os.environ.get("TOKENSAFE_UPSTREAM_URL", ""))
+
+        data_dir = resolve_data_dir()
+        conf_keys = {}
+        config_path = os.path.join(data_dir, "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path) as f:
+                    conf_keys = json.load(f)
+            except Exception:
+                pass
+
+        upstream_url, resolved_key = self._resolve_upstream(conf_keys, custom_url)
+        provider = self._detect_provider(upstream_url)
+        client_anthropic = getattr(self, "_client_shape", "") == "anthropic"
+        if client_anthropic and provider == "anthropic" and not upstream_url.rstrip("/").endswith("/v1/messages"):
+            after_host = upstream_url.split("://", 1)[-1]
+            path = "/" + after_host.split("/", 1)[1] if "/" in after_host else ""
+            if not path or path.rstrip("/").endswith("/anthropic"):
+                upstream_url = f"{upstream_url.rstrip('/')}/v1/messages"
+        upstream_model = os.environ.get("TOKENSAFE_UPSTREAM_MODEL", "").strip()
+        if upstream_model:
+            payload["model"] = upstream_model
+
+        active_model = str(payload.get("model") or "")
+        cache_state_key = (_key_fingerprint(incoming_key or resolved_key), active_model)
+        with _CACHE_STATE_LOCK:
+            session_cache_warm = _SESSION_CACHE_WARM.get(cache_state_key)
 
         # 1.5 Tool Result Ledger: fold aged, oversized tool results into compact
-        #     anchors + local archive (idempotent via marker; cache-aware). Runs
-        #     before the governor so the governor sees the lightened mass.
+        #     anchors + local archive (idempotent via marker; cache-aware ROI gate).
         if messages and not is_quota_exceeded:
             try:
-                messages, ledger_stats = fold_tool_results(messages)
+                messages, ledger_stats = fold_tool_results(
+                    messages,
+                    model=active_model,
+                    provider=provider,
+                    cache_warm=session_cache_warm,
+                )
                 payload["messages"] = messages
                 if ledger_stats.get("folded"):
                     print(
@@ -1050,14 +1192,17 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        # 1.6 Aged Thinking Fold (OPT-IN, DEFAULT OFF via TOKENSAFE_FOLD_THINKING):
+        # 1.6 Aged Thinking Fold (enabled by default; opt-out TOKENSAFE_FOLD_THINKING=0):
         #     collapse extended-thinking payloads of aged assistant turns into
-        #     one-line stubs. The _tokensafe_thinking side-channel key stays a
-        #     valid text block for shape-sensitive mirrors (the 1214 class).
-        #     Enable only after the upstream shape probe matrix passes.
+        #     one-line stubs, gated by the same cache-break ROI check.
         if messages and not is_quota_exceeded:
             try:
-                messages, think_stats = fold_aged_thinking(messages)
+                messages, think_stats = fold_aged_thinking(
+                    messages,
+                    model=active_model,
+                    provider=provider,
+                    cache_warm=session_cache_warm,
+                )
                 payload["messages"] = messages
                 if think_stats.get("folded"):
                     print(
@@ -1112,44 +1257,15 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        # 4. Resolve Multi-Provider Upstream & API Key (needed before provider-aware cache breakpoints)
-        auth_header = self.headers.get("Authorization", "")
-        incoming_key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-        if not incoming_key:
+        # 4.5 Effort Clamp: reduce Z.ai/Anthropic default `max` effort on
+        #     tool-continuation ("low") and routine ("medium") turns.
+        if messages and not is_quota_exceeded:
             try:
-                incoming_key = self.headers.get("x-api-key", "") or ""
+                clamped_effort = _apply_effort_clamp(payload, messages, provider)
+                if clamped_effort:
+                    BROADCASTER.publish("effort_clamp", {"model": active_model, "effort": clamped_effort})
             except Exception:
-                incoming_key = ""
-        custom_url = _apply_route_override(incoming_key, os.environ.get("TOKENSAFE_UPSTREAM_URL", ""))
-
-        data_dir = resolve_data_dir()
-        conf_keys = {}
-        config_path = os.path.join(data_dir, "config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path) as f:
-                    conf_keys = json.load(f)
-            except Exception:
-                pass
-
-        upstream_url, resolved_key = self._resolve_upstream(conf_keys, custom_url)
-        provider = self._detect_provider(upstream_url)
-        # Client shape: "anthropic" when the request arrived on /v1/messages
-        # (Claude Code via ANTHROPIC_BASE_URL), else OpenAI-native.
-        client_anthropic = getattr(self, "_client_shape", "") == "anthropic"
-        # Defensive endpoint completion: an anthropic-dialect upstream registered
-        # as a bare host (https://api.anthropic.com) or an /anthropic mirror base
-        # must receive the payload on its /v1/messages endpoint, not on "/".
-        if client_anthropic and provider == "anthropic" and not upstream_url.rstrip("/").endswith("/v1/messages"):
-            after_host = upstream_url.split("://", 1)[-1]
-            path = "/" + after_host.split("/", 1)[1] if "/" in after_host else ""
-            if not path or path.rstrip("/").endswith("/anthropic"):
-                upstream_url = f"{upstream_url.rstrip('/')}/v1/messages"
-        # Optional upstream model mapping: route client model names (e.g. claude-*)
-        # to the model the upstream account actually serves.
-        upstream_model = os.environ.get("TOKENSAFE_UPSTREAM_MODEL", "").strip()
-        if upstream_model:
-            payload["model"] = upstream_model
+                clamped_effort = None
 
         # 5. Epoch-Aware Context Governor (runs BEFORE cache normalization so breakpoints stay valid)
         if messages and not is_quota_exceeded:
@@ -1220,8 +1336,10 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
             # OpenAI form, and this puts it back into Anthropic shape for upstream.
             payload = _translate_openai_payload_to_anthropic(payload)
         else:
-            # The ingest thinking side-channel is Anthropic-only — never leak it
-            # into an OpenAI-dialect upstream request.
+            # The ingest thinking/effort side-channels are Anthropic-only — never leak
+            # them into an OpenAI-dialect upstream request.
+            payload.pop("_tokensafe_thinking_cfg", None)
+            payload.pop("_tokensafe_output_config", None)
             for _m in payload.get("messages") or []:
                 if isinstance(_m, dict):
                     _m.pop("_tokensafe_thinking", None)
@@ -1318,14 +1436,21 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                             # 64KB tail may evict on very long streams — record
                             # only when at least one real field survived.
                             m_in = re.search(r'"input_tokens":\s*(\d+)', tail_text)
+                            m_out = re.search(r'"output_tokens":\s*(\d+)', tail_text)
                             m_cw = re.search(r'"cache_creation_input_tokens":\s*(\d+)', tail_text)
                             sse_input = int(m_in.group(1)) if m_in else 0
+                            sse_cached = int(m_cached.group(1)) if m_cached else 0
+                            sse_out = int(m_out.group(1)) if m_out else 0
+                            with _CACHE_STATE_LOCK:
+                                _SESSION_CACHE_WARM[cache_state_key] = bool(sse_cached > 0)
                             if m_cached or sse_input > 0:
                                 _record_cache_obs(
                                     proxy_tracker, provider, mutation_kinds,
                                     sse_input,
-                                    int(m_cached.group(1)) if m_cached else 0,
+                                    sse_cached,
                                     int(m_cw.group(1)) if m_cw else 0,
+                                    model=active_model,
+                                    output_tokens=sse_out,
                                 )
                     except Exception:
                         pass
@@ -1364,11 +1489,17 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                         )
                         # Cache-stability observation (non-stream path: both
                         # Anthropic and OpenAI usage shapes are available).
+                        in_tok_obs = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                        out_tok_obs = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                        with _CACHE_STATE_LOCK:
+                            _SESSION_CACHE_WARM[cache_state_key] = bool(int(cached or 0) > 0)
                         _record_cache_obs(
                             proxy_tracker, provider, mutation_kinds,
-                            int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                            in_tok_obs,
                             int(cached or 0),
                             int(usage.get("cache_creation_input_tokens") or 0),
+                            model=active_model,
+                            output_tokens=out_tok_obs,
                         )
                         if cached:
                             BROADCASTER.publish("cache_stats", {"provider": provider, "cached_tokens": int(cached)})

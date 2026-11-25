@@ -730,6 +730,35 @@ def main(argv: Optional[List[str]] = None):
             print(f"  Backend Runtime:   {status['backend'].get('status', 'OK')} ({status['backend'].get('name', 'N/A')})")
             print(f"  Workspace:         {status.get('workspace')}\n")
 
+    elif command in ("burn", "burn-monitor"):
+        from src.burn_monitor import collect_live_burn_snapshot, evaluate_burn_warnings, is_zai_peak_hour
+        from src.transcript_analyzer import discover_transcript_paths, analyze_transcript, render_transcripts_report
+        agent_filter = "auto"
+        for i, a in enumerate(args):
+            if a.startswith("--agent="):
+                agent_filter = a.split("=", 1)[1]
+            elif a in ("--agent", "-a") and i + 1 < len(args):
+                agent_filter = args[i + 1]
+        print("\n\033[1m\033[36m🔥 TOKENSAFE MULTI-AGENT LIVE BURN MONITOR 🔥\033[0m\n")
+        print(f"  Z.ai Peak Hours (Mon-Fri 14:00-18:00 SST): {'ACTIVE (1.0x = 2x off-peak)' if is_zai_peak_hour() else 'OFF-PEAK (0.5x rate)'}")
+        found = discover_transcript_paths(agent=agent_filter, limit=8)
+        if not found:
+            print("  No active session transcripts/rollouts found.\n")
+            sys.exit(0)
+        analyzed = [analyze_transcript(fp, agent_type=ag_type) for ag_type, fp, _ in found]
+        print(render_transcripts_report(analyzed))
+        for ag in ("zcode", "claude_code", "antigravity"):
+            if agent_filter not in ("auto", ag):
+                continue
+            snap = collect_live_burn_snapshot(agent=ag)
+            if snap:
+                warns = evaluate_burn_warnings(snap)
+                if warns:
+                    print(f"  [{ag}] Active session alerts:")
+                    for w in warns:
+                        print(f"    • {w['message']}")
+        sys.exit(0)
+
     elif command in ("transcripts", "transcript"):
         from src.transcript_analyzer import (
             discover_transcript_paths,

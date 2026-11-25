@@ -54,7 +54,14 @@ class TestThinkingFold(unittest.TestCase):
         self.addCleanup(os.environ.pop, "TOKENSAFE_TELEMETRY_DISABLED", None)
         self.addCleanup(os.environ.pop, "TOKENSAFE_FOLD_THINKING", None)
 
-    def test_default_off(self):
+    def test_default_enabled(self):
+        msgs = _messages()
+        out, stats = fold_aged_thinking(msgs)
+        self.assertEqual(stats["folded"], 2)
+        self.assertIn(THINKING_FOLD_MARKER, out[2]["_tokensafe_thinking"][0]["text"])
+
+    def test_flag_disabled_is_noop(self):
+        os.environ["TOKENSAFE_FOLD_THINKING"] = "0"
         msgs = _messages()
         out, stats = fold_aged_thinking(msgs)
         self.assertEqual(stats["folded"], 0)

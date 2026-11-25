@@ -426,3 +426,205 @@ def guard_write(file_path: str, content: str, append: bool = False, agent: str =
         f"Wholesale rewriting via write_file burns expensive output tokens. "
         f"Please use 'edit_file' (surgical Edit) with Target and Replacement blocks instead.",
     )
+
+
+_CODE_EXTS = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".kt", ".swift",
+    ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php", ".vue", ".svelte",
+}
+
+
+def canonical_tool_name(name: str) -> str:
+    """Maps agent-specific tool names onto canonical categories."""
+    t = (name or "").strip()
+    if t in ("Bash", "Shell", "bash", "run_command", "ExecuteCommand", "terminal"):
+        return "bash"
+    if t in ("Write", "write_file"):
+        return "write"
+    if t in ("Edit", "MultiEdit", "edit_file", "replace_file_content"):
+        return "edit"
+    if t in ("Read", "read_file", "view_file", "view_file_outline"):
+        return "read"
+    return t.lower()
+
+
+def _extract_path(tool_input: Dict[str, Any]) -> str:
+    for key in ("file_path", "Path", "path", "FilePath", "TargetFile", "notebook_path"):
+        val = tool_input.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
+
+
+def _large_read_advisory(file_path: str, tool_input: Dict[str, Any]) -> Optional[str]:
+    """Non-blocking advisory when an agent reads an entire large code file unbounded."""
+    if not file_path or not os.path.isfile(file_path):
+        return None
+    has_bounds = any(
+        tool_input.get(k) is not None
+        for k in ("offset", "limit", "StartLine", "EndLine", "startLine", "endLine")
+    )
+    if has_bounds:
+        return None
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in _CODE_EXTS:
+        return None
+    try:
+        size = os.path.getsize(file_path)
+        if size < 8000:
+            return None
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = sum(1 for _ in f)
+        if lines < 250:
+            return None
+        est_tok = max(1, size // 4)
+        return (
+            f"[TokenSafe] '{os.path.basename(file_path)}' is {lines} lines (~{est_tok:,} tokens). "
+            f"Prefer tokensafe:smart_read_file(path='{file_path}', symbol=...) or bounded offset/limit to save context."
+        )
+    except Exception:
+        return None
+
+
+def evaluate_cc_pre_tool_use(payload: Dict[str, Any], agent: str) -> Dict[str, Any]:
+    """Shared PreToolUse evaluator for Claude Code, ZCode, and Kimi Code contracts.
+
+    Covers LoopDetector, MistakesLedger, TokenSafeGuard (command/write/edit/read),
+    FileState stale-edit checks, and unbounded large-file read advisories.
+    Returns {} when clean or a valid hookSpecificOutput dict.
+    """
+    tool = str(payload.get("tool_name") or "")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    session_id = str(payload.get("session_id") or payload.get("conversationId") or "") or f"hook_{agent}"
+    cwd = str(payload.get("cwd") or "")
+    tp = str(payload.get("transcript_path") or "")
+    canon = canonical_tool_name(tool)
+
+    def _cc_decision(decision: str, reason: str, extra_ctx: str = "") -> Dict[str, Any]:
+        inner: Dict[str, Any] = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
+        }
+        if extra_ctx:
+            inner["additionalContext"] = extra_ctx
+        return {"hookSpecificOutput": inner}
+
+    # 1. Loop Detector Guard (all tools)
+    try:
+        from src.loop_detector import LoopDetector
+        is_loop, repeat_count, loop_msg = LoopDetector.check_loop(session_id, tool, tool_input)
+        if is_loop:
+            try:
+                from src.mistakes import MistakesLedger
+                MistakesLedger.record_from_loop(tool, tool_input, repeat_count, project_root=cwd or os.getcwd())
+            except Exception:
+                pass
+            tracker = _get_tracker()
+            if tracker:
+                try:
+                    tracker.record_event(
+                        session_id=session_id,
+                        event_type="LOOP_GUARD",
+                        original_tokens=5000,
+                        optimized_tokens=100,
+                        details={"agent": agent, "tool": tool, "repeats": repeat_count},
+                    )
+                except Exception:
+                    pass
+            return _cc_decision("ask", loop_msg)
+    except Exception:
+        pass
+
+    if canon == "bash":
+        command = str(tool_input.get("command") or tool_input.get("CommandLine") or "")
+        verdict = guard_command(command, agent, session_id, cwd=cwd, transcript_path=tp)
+        if verdict["decision"] in ("deny", "ask"):
+            return _cc_decision(verdict["decision"], verdict["reason"])
+        try:
+            from src.mistakes import MistakesLedger
+            is_blocked, m_reason = MistakesLedger.should_force_ask(command, action_type="command", project_root=cwd or os.getcwd())
+            if is_blocked:
+                return _cc_decision("ask", f"[TokenSafe Anti-Stuck Guard] {m_reason}")
+        except Exception:
+            pass
+        return {}
+
+    if canon == "write":
+        file_path = _extract_path(tool_input)
+        content = tool_input.get("content") or tool_input.get("Content") or tool_input.get("file_text") or ""
+        append = bool(tool_input.get("append") or tool_input.get("Append") or False)
+        sec_verdict = guard_file_content(file_path, str(content or ""), agent, session_id, transcript_path=tp)
+        if sec_verdict["decision"] == "deny":
+            return _cc_decision("deny", sec_verdict["reason"])
+        try:
+            from src.mistakes import MistakesLedger
+            is_blocked, m_reason = MistakesLedger.should_force_ask(file_path, action_type="edit_file", project_root=cwd or os.getcwd())
+            if is_blocked:
+                return _cc_decision("ask", f"[TokenSafe Anti-Stuck Guard] {m_reason}")
+        except Exception:
+            pass
+        verdict = guard_write(file_path, str(content or ""), append, agent, session_id, transcript_path=tp)
+        if verdict["decision"] in ("deny", "ask"):
+            return _cc_decision(verdict["decision"], verdict["reason"])
+        return {}
+
+    if canon == "edit":
+        file_path = _extract_path(tool_input)
+        sec_verdict = guard_file_content(file_path, extract_write_content(tool, tool_input), agent, session_id, transcript_path=tp)
+        if sec_verdict["decision"] == "deny":
+            return _cc_decision("deny", sec_verdict["reason"])
+        try:
+            from src.mistakes import MistakesLedger
+            is_blocked, m_reason = MistakesLedger.should_force_ask(file_path, action_type="edit_file", project_root=cwd or os.getcwd())
+            if is_blocked:
+                return _cc_decision("ask", f"[TokenSafe Anti-Stuck Guard] {m_reason}")
+        except Exception:
+            pass
+        try:
+            from src.file_state import FileState
+            if file_path and FileState.guard_enabled():
+                stale = FileState.check_stale(file_path)
+                if stale:
+                    tracker = _get_tracker()
+                    if tracker:
+                        try:
+                            tracker.record_event(
+                                session_id=session_id,
+                                event_type="STALE_EDIT_ASK",
+                                original_tokens=FileState.estimate_reread_tokens(file_path),
+                                optimized_tokens=0,
+                                details={"agent": agent, "target_file": os.path.basename(file_path), "age_s": stale.get("age_s", 0)},
+                                measurement="estimated",
+                            )
+                        except Exception:
+                            pass
+                    return _cc_decision(
+                        "ask",
+                        f"[TokenSafe] {os.path.basename(file_path)} changed on disk since it was last read "
+                        f"(external edit: build/linter/another session?). Your edit may target outdated content. "
+                        f"Approve if you have verified the current file state.",
+                    )
+        except Exception:
+            pass
+        return {}
+
+    if canon == "read":
+        file_path = _extract_path(tool_input)
+        verdict = guard_read(file_path, agent, session_id, transcript_path=tp)
+        if verdict["decision"] == "deny":
+            return _cc_decision("deny", verdict["reason"])
+        advisory = _large_read_advisory(file_path, tool_input)
+        if advisory:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "additionalContext": advisory,
+                }
+            }
+        return {}
+
+    return {}

@@ -42,14 +42,34 @@ def _allow(event: str) -> dict:
 
 def handle(event: str, payload: dict) -> dict:
     session_id = str(payload.get("conversation_id") or payload.get("session_id") or "") or f"hook_{AGENT}"
+    cwd = str(payload.get("cwd") or "")
+
+    # Loop guard across Cursor pre-tool hooks
+    if event in ("beforeShellExecution", "beforeReadFile", "beforeEditFile"):
+        try:
+            from src.loop_detector import LoopDetector
+            is_loop, _cnt, loop_msg = LoopDetector.check_loop(session_id, event, payload)
+            if is_loop:
+                if event == "beforeShellExecution":
+                    return {"permission": "ask", "agent_message": loop_msg}
+                return {"permission": "deny", "user_message": loop_msg}
+        except Exception:
+            pass
 
     if event == "beforeShellExecution":
         command = str(payload.get("command") or "")
-        verdict = guard_command(command, AGENT, session_id, cwd=str(payload.get("cwd") or ""), transcript_path=str(payload.get("transcript_path") or ""))
+        verdict = guard_command(command, AGENT, session_id, cwd=cwd, transcript_path=str(payload.get("transcript_path") or ""))
         if verdict["decision"] == "deny":
             return {"permission": "deny", "user_message": verdict["reason"]}
         if verdict["decision"] == "ask":
             return {"permission": "ask", "agent_message": verdict["reason"]}
+        try:
+            from src.mistakes import MistakesLedger
+            is_blocked, m_reason = MistakesLedger.should_force_ask(command, action_type="command", project_root=cwd or os.getcwd())
+            if is_blocked:
+                return {"permission": "ask", "agent_message": f"[TokenSafe Anti-Stuck Guard] {m_reason}"}
+        except Exception:
+            pass
         return {"permission": "allow"}
 
     if event == "beforeReadFile":
@@ -70,6 +90,13 @@ def handle(event: str, payload: dict) -> dict:
             verdict = guard_file_content(edit_path, edit_content, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
             if verdict["decision"] == "deny":
                 return {"permission": "deny", "user_message": verdict["reason"]}
+        try:
+            from src.mistakes import MistakesLedger
+            is_blocked, m_reason = MistakesLedger.should_force_ask(edit_path, action_type="edit_file", project_root=cwd or os.getcwd())
+            if is_blocked:
+                return {"permission": "deny", "user_message": f"[TokenSafe Anti-Stuck Guard] {m_reason}"}
+        except Exception:
+            pass
         return {"permission": "allow"}
 
     if event == "beforeSubmitPrompt":

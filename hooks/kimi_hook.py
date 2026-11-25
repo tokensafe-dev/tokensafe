@@ -24,11 +24,7 @@ if PROJECT_ROOT not in sys.path:
 from src.adapter_core import (
     TOKENSAFE_DIRECTIVES,
     compact_for_injection,
-    extract_write_content,
-    guard_command,
-    guard_file_content,
-    guard_read,
-    guard_write,
+    evaluate_cc_pre_tool_use,
 )
 
 AGENT = "kimi_code"
@@ -57,6 +53,17 @@ def handle(event: str, payload: dict) -> dict:
             guard = MistakesLedger.get_guard_prompt(project_root=str(payload.get("cwd") or os.getcwd()))
             if guard:
                 extra = f"{extra}\n\n{guard}"
+        except Exception:
+            pass
+        try:
+            from src.burn_monitor import get_burn_warnings
+            burn_warn = get_burn_warnings(
+                agent=AGENT,
+                session_id=session_id,
+                transcript_path=str(payload.get("transcript_path") or ""),
+            )
+            if burn_warn:
+                extra = f"{extra}\n\n{burn_warn}"
         except Exception:
             pass
         return {
@@ -102,6 +109,17 @@ def handle(event: str, payload: dict) -> dict:
                 f"(TokenSafe: compacted ~{meta['saved_tokens']} prompt tokens, "
                 f"-{meta.get('reduction_pct', 0)}% — original intent preserved.)"
             )
+        try:
+            from src.burn_monitor import get_burn_warnings
+            burn_warn = get_burn_warnings(
+                agent=AGENT,
+                session_id=session_id,
+                transcript_path=str(payload.get("transcript_path") or ""),
+            )
+            if burn_warn:
+                parts.append(burn_warn)
+        except Exception:
+            pass
 
         if parts:
             return {
@@ -113,91 +131,7 @@ def handle(event: str, payload: dict) -> dict:
         return {}
 
     if event == "PreToolUse":
-        tool = str(payload.get("tool_name") or "")
-        tool_input = payload.get("tool_input")
-        if not isinstance(tool_input, dict):
-            tool_input = {}
-
-        if tool in ("Bash", "Shell", "bash"):
-            command = str(tool_input.get("command") or "")
-            verdict = guard_command(command, AGENT, session_id, cwd=str(payload.get("cwd") or ""), transcript_path=str(payload.get("transcript_path") or ""))
-            if verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-            if verdict["decision"] == "ask":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "ask",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-
-        elif tool in ("Write", "write_file", "replace_file_content"):
-            file_path = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
-            content = tool_input.get("content") or tool_input.get("Content") or tool_input.get("file_text") or ""
-            append = bool(tool_input.get("append") or tool_input.get("Append") or False)
-            # Security first (parity with the Antigravity path): hardcoded
-            # secrets / TLS bypass / SQLi / CORS never reach disk.
-            sec_verdict = guard_file_content(file_path, str(content or ""), AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
-            if sec_verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": sec_verdict["reason"],
-                    }
-                }
-            verdict = guard_write(file_path, str(content or ""), append, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
-            if verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-            if verdict["decision"] == "ask":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "ask",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-
-        elif tool in ("Edit", "MultiEdit", "edit_file"):
-            # Security parity: deny hardcoded secrets / TLS bypass / SQLi /
-            # CORS in the replacement text before the edit lands.
-            edit_path = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
-            sec_verdict = guard_file_content(edit_path, extract_write_content(tool, tool_input), AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
-            if sec_verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": sec_verdict["reason"],
-                    }
-                }
-
-        elif tool in ("Read", "read_file", "view_file"):
-            file_path = str(tool_input.get("file_path") or tool_input.get("path") or tool_input.get("Path") or "")
-            verdict = guard_read(file_path, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
-            if verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-
-        return {}
+        return evaluate_cc_pre_tool_use(payload, agent=AGENT)
 
     if event == "PostToolUse":
         tool = str(payload.get("tool_name") or "")
@@ -229,6 +163,17 @@ def handle(event: str, payload: dict) -> dict:
                     f"({orig:,} → {new:,} chars). Output summary:\n{compacted}"
                 ),
             }
+        try:
+            if tool in ("Read", "view_file", "read_file", "Write", "write_file",
+                        "Edit", "MultiEdit", "edit_file", "replace_file_content"):
+                ti = payload.get("tool_input")
+                if isinstance(ti, dict):
+                    track_fp = str(ti.get("file_path") or ti.get("Path") or ti.get("path") or ti.get("FilePath") or "")
+                    if track_fp:
+                        from src.file_state import FileState
+                        FileState.record_seen(track_fp)
+        except Exception:
+            pass
         return {}
 
     return {}

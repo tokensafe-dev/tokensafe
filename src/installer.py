@@ -261,14 +261,19 @@ class AgentInstaller:
                 return f'[[hooks]]\nevent = "{event}"\n{m}command = {toml_hook_cmd}\ntimeout = 10\n'
 
             if "kimi_hook.py" in content:
-                # Migration: older installs lack the PostToolUse output-compaction hook.
-                if 'event = "PostToolUse"' in content:
+                # Migration: older installs lack PostToolUse or PreToolUse Edit matcher.
+                migrated = False
+                if 'event = "PostToolUse"' not in content:
+                    content = content.rstrip() + "\n\n# TokenSafe PostToolUse stdout compaction (migration)\n" + _kimi_section("PostToolUse")
+                    migrated = True
+                if 'matcher = "Edit"' not in content:
+                    content = content.rstrip() + "\n\n# TokenSafe PreToolUse Edit guard (migration)\n" + _kimi_section("PreToolUse", "Edit")
+                    migrated = True
+                if not migrated:
                     return True, "TokenSafe Kimi Code hooks already registered in config.toml"
-                post_section = "\n# TokenSafe PostToolUse stdout compaction (migration)\n" + _kimi_section("PostToolUse")
-                content = content.rstrip() + "\n" + post_section
                 with open(config_file, "w", encoding="utf-8") as f:
                     f.write(content)
-                return True, "PostToolUse hook migrated in ~/.kimi-code/config.toml (stdout compaction)"
+                return True, "Kimi Code hooks migrated in ~/.kimi-code/config.toml (Edit/PostToolUse)"
 
             hook_sections = (
                 '\n# TokenSafe Lifecycle Hooks\n'
@@ -276,6 +281,7 @@ class AgentInstaller:
                 + _kimi_section("UserPromptSubmit") + "\n"
                 + _kimi_section("PreToolUse", "Bash") + "\n"
                 + _kimi_section("PreToolUse", "Write") + "\n"
+                + _kimi_section("PreToolUse", "Edit") + "\n"
                 + _kimi_section("PreToolUse", "Read") + "\n"
                 + _kimi_section("PostToolUse")
             )
@@ -294,6 +300,7 @@ class AgentInstaller:
             prompt_entry = {"hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
             bash_entry = {"matcher": "Bash", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
             write_entry = {"matcher": "Write", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
+            read_entry = {"matcher": "Read", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
             session_entry = {"hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
             post_bash_entry = {"matcher": "Bash", "hooks": [{"type": "command", "command": claude_cmd, "timeout": 10}]}
             # Stale-edit guard: PreToolUse asks on externally-changed targets;
@@ -337,6 +344,7 @@ class AgentInstaller:
                 _sync_claude_event("UserPromptSubmit", prompt_entry),
                 _sync_claude_event("PreToolUse", bash_entry),
                 _sync_claude_event("PreToolUse", write_entry),
+                _sync_claude_event("PreToolUse", read_entry),
                 _sync_claude_event("PreToolUse", stale_edit_entry),
                 _sync_claude_event("PostToolUse", post_bash_entry),
                 _sync_claude_event("PostToolUse", post_track_entry),
@@ -354,24 +362,26 @@ class AgentInstaller:
             if err or data is None:
                 return False, err or f"Failed to parse {config_file}"
             # ZCode configuration-file hooks are disabled by default and only run
-            # with enabled=true. The bundled hook scripts already speak the ZCode
-            # contract (injectSteps/systemMessage outputs + decision/reason), so
-            # registration is pure plumbing — no adapter shim needed.
+            # with enabled=true. Register the dedicated zcode_hook.py adapter
+            # (Claude-Code-compatible PreToolUse/PostToolUse/SessionStart contract
+            # + live burn alerts) and upgrade any legacy Antigravity script entries.
             hooks_block = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
             hooks_block["enabled"] = True
             events = hooks_block.get("events") if isinstance(hooks_block.get("events"), dict) else {}
 
-            def _zcode_entry(script_name: str) -> dict:
+            legacy_scripts = ("session_start.py", "pre_invocation.py", "pre_tool_use.py", "post_tool_use.py", "stop_hook.py")
+            expected = os.path.join(PROJECT_ROOT, "hooks", "zcode_hook.py")
+
+            def _zcode_entry() -> dict:
                 return {"hooks": [{
                     "type": "process",
                     "command": PYTHON_BIN,
-                    "args": [os.path.join(PROJECT_ROOT, "hooks", script_name)],
+                    "args": [expected],
                     "timeoutMs": 10000,
                 }]}
 
-            def _sync_zcode_event(event_name: str, script_name: str) -> bool:
-                entry = _zcode_entry(script_name)
-                expected = os.path.join(PROJECT_ROOT, "hooks", script_name)
+            def _sync_zcode_event(event_name: str) -> bool:
+                entry = _zcode_entry()
                 entries = events.get(event_name)
                 if not isinstance(entries, list):
                     events[event_name] = [entry]
@@ -384,9 +394,10 @@ class AgentInstaller:
                             args = h.get("args") if isinstance(h, dict) else None
                             if not isinstance(args, list):
                                 continue
-                            if any(isinstance(a, str) and a.endswith(script_name) for a in args):
+                            if any(isinstance(a, str) and (a.endswith("zcode_hook.py") or any(a.endswith(s) for s in legacy_scripts)) for a in args):
                                 seen = True
-                                if args[-1] != expected:
+                                if args[-1] != expected or h.get("command") != PYTHON_BIN:
+                                    h["command"] = PYTHON_BIN
                                     args[-1] = expected
                                     dirty = True
                 if not seen:
@@ -395,11 +406,11 @@ class AgentInstaller:
                 return dirty
 
             changed = any([
-                _sync_zcode_event("SessionStart", "session_start.py"),
-                _sync_zcode_event("UserPromptSubmit", "pre_invocation.py"),
-                _sync_zcode_event("PreToolUse", "pre_tool_use.py"),
-                _sync_zcode_event("PostToolUse", "post_tool_use.py"),
-                _sync_zcode_event("Stop", "stop_hook.py"),
+                _sync_zcode_event("SessionStart"),
+                _sync_zcode_event("UserPromptSubmit"),
+                _sync_zcode_event("PreToolUse"),
+                _sync_zcode_event("PostToolUse"),
+                _sync_zcode_event("Stop"),
             ])
             if changed:
                 hooks_block["events"] = events
@@ -438,6 +449,7 @@ class AgentInstaller:
         changed = any([
             _sync_cursor_event("beforeShellExecution"),
             _sync_cursor_event("beforeReadFile"),
+            _sync_cursor_event("beforeEditFile"),
             _sync_cursor_event("beforeSubmitPrompt"),
         ])
         if not changed:
@@ -548,7 +560,7 @@ class AgentInstaller:
             if not isinstance(events, dict):
                 return True, "No events in ZCode hooks"
 
-            tokensafe_scripts = ("session_start.py", "pre_invocation.py", "pre_tool_use.py", "post_tool_use.py", "stop_hook.py")
+            tokensafe_scripts = ("zcode_hook.py", "session_start.py", "pre_invocation.py", "pre_tool_use.py", "post_tool_use.py", "stop_hook.py")
             changed = False
             for event_name in list(events.keys()):
                 entries = events.get(event_name)

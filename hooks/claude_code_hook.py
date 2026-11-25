@@ -22,13 +22,13 @@ PROJECT_ROOT = os.path.dirname(HOOK_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.adapter_core import TOKENSAFE_DIRECTIVES, compact_for_injection, extract_write_content, guard_command, guard_file_content, guard_write
+from src.adapter_core import TOKENSAFE_DIRECTIVES, compact_for_injection, evaluate_cc_pre_tool_use
 
 AGENT = "claude_code"
 
 
-def handle(event: str, payload: dict) -> dict:
-    session_id = str(payload.get("session_id") or "") or f"hook_{AGENT}"
+def handle(event: str, payload: dict, agent: str = AGENT) -> dict:
+    session_id = str(payload.get("session_id") or "") or f"hook_{agent}"
 
     if event == "SessionStart":
         # One-shot session injection (mirrors the Antigravity SessionStart
@@ -73,6 +73,17 @@ def handle(event: str, payload: dict) -> dict:
                     )
         except Exception:
             pass
+        try:
+            from src.burn_monitor import get_burn_warnings
+            burn_warn = get_burn_warnings(
+                agent=agent,
+                session_id=session_id,
+                transcript_path=str(payload.get("transcript_path") or ""),
+            )
+            if burn_warn:
+                extra = f"{extra}\n\n{burn_warn}"
+        except Exception:
+            pass
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
@@ -109,7 +120,7 @@ def handle(event: str, payload: dict) -> dict:
                 }
             return {}
 
-        context, meta = compact_for_injection(prompt, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
+        context, meta = compact_for_injection(prompt, agent, session_id, transcript_path=str(payload.get("transcript_path") or ""))
         if context and meta.get("compacted"):
             parts.append(
                 f"{context}\n"
@@ -117,12 +128,18 @@ def handle(event: str, payload: dict) -> dict:
                 f"-{meta.get('reduction_pct', 0)}% — original intent preserved.)"
             )
 
-        # History auto-fold (parity with the Antigravity PreInvocation hook):
-        # Claude Code ships transcript_path in every hook payload. Once the
-        # transcript holds enough turns, past turns are folded into a State
-        # Ledger and injected; savings are recorded incrementally to avoid
-        # double-counting the same history mass on every submit.
         transcript_path = str(payload.get("transcript_path") or "")
+        try:
+            from src.burn_monitor import get_burn_warnings
+            burn_warn = get_burn_warnings(
+                agent=agent,
+                session_id=session_id,
+                transcript_path=transcript_path,
+            )
+            if burn_warn:
+                parts.append(burn_warn)
+        except Exception:
+            pass
         if transcript_path:
             try:
                 from src.history_compactor import HistoryCompactor
@@ -150,7 +167,7 @@ def handle(event: str, payload: dict) -> dict:
                                 event_type="HISTORY_FOLD",
                                 original_tokens=inc_orig,
                                 optimized_tokens=folded_tok,
-                                details={"turns": turn, "total_accum_orig": orig_hist, "agent": AGENT},
+                                details={"turns": turn, "total_accum_orig": orig_hist, "agent": agent},
                             )
                             parts.append(
                                 f"{folded}\n"
@@ -171,119 +188,7 @@ def handle(event: str, payload: dict) -> dict:
         return {}
 
     if event == "PreToolUse":
-        tool = str(payload.get("tool_name") or "")
-        tool_input = payload.get("tool_input")
-        if not isinstance(tool_input, dict):
-            tool_input = {}
-        if tool in ("Bash", "Shell", "bash"):
-            command = str(tool_input.get("command") or "")
-            verdict = guard_command(command, AGENT, session_id, cwd=str(payload.get("cwd") or ""), transcript_path=str(payload.get("transcript_path") or ""))
-            if verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-            if verdict["decision"] == "ask":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "ask",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-        elif tool in ("Write", "write_file", "replace_file_content"):
-            # Egress economy (v3.0.0): full-file writes over existing files
-            # burn expensive output tokens — steer to surgical Edit instead.
-            file_path = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
-            content = tool_input.get("content") or tool_input.get("Content") or tool_input.get("file_text") or ""
-            append = bool(tool_input.get("append") or tool_input.get("Append") or False)
-            # Security first (parity with the Antigravity path): hardcoded
-            # secrets / TLS bypass / SQLi / CORS never reach disk, before any
-            # egress-economy steering.
-            sec_verdict = guard_file_content(file_path, str(content or ""), AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
-            if sec_verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": sec_verdict["reason"],
-                    }
-                }
-            verdict = guard_write(file_path, str(content or ""), append, AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
-            if verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-            if verdict["decision"] == "ask":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "ask",
-                        "permissionDecisionReason": verdict["reason"],
-                    }
-                }
-        elif tool in ("Edit", "MultiEdit", "edit_file", "replace_file_content"):
-            # Security first (parity with the Antigravity path): deny hardcoded
-            # secrets / TLS bypass / SQLi / CORS in the replacement text before
-            # the stale-file check (deny outranks ask).
-            sec_file = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
-            sec_verdict = guard_file_content(sec_file, extract_write_content(tool, tool_input), AGENT, session_id, transcript_path=str(payload.get("transcript_path") or ""))
-            if sec_verdict["decision"] == "deny":
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": sec_verdict["reason"],
-                    }
-                }
-            # Stale-file edit guard: when the target changed on disk since the
-            # model last saw it (build output, linters, another session), the
-            # edit either corrupts content or fails and forces a costly full
-            # re-read. Surface it BEFORE the edit lands — ask, never deny.
-            # Kill switch: TOKENSAFE_STALE_GUARD=0.
-            try:
-                from src.file_state import FileState
-                stale_fp = str(tool_input.get("file_path") or tool_input.get("Path") or tool_input.get("path") or "")
-                if stale_fp and FileState.guard_enabled():
-                    stale = FileState.check_stale(stale_fp)
-                    if stale:
-                        try:
-                            from src.metrics import MetricsTracker
-                            MetricsTracker().record_event(
-                                session_id=session_id,
-                                event_type="STALE_EDIT_ASK",
-                                original_tokens=FileState.estimate_reread_tokens(stale_fp),
-                                optimized_tokens=0,
-                                details={
-                                    "agent": AGENT,
-                                    "target_file": os.path.basename(stale_fp),
-                                    "age_s": stale.get("age_s", 0),
-                                },
-                                measurement="estimated",
-                            )
-                        except Exception:
-                            pass
-                        return {
-                            "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
-                                "permissionDecision": "ask",
-                                "permissionDecisionReason": (
-                                    f"[TokenSafe] {os.path.basename(stale_fp)} changed on disk since it was last read "
-                                    f"(external edit: build/linter/another session?). Your edit may target outdated content. "
-                                    f"Approve if you have verified the current file state."
-                                ),
-                            }
-                        }
-            except Exception:
-                pass
-        return {}
+        return evaluate_cc_pre_tool_use(payload, agent=agent)
 
     if event == "PostToolUse":
         # Auto-mute noisy stdout of successful shell commands (tests/linters/builds):
@@ -307,7 +212,7 @@ def handle(event: str, payload: dict) -> dict:
                     event_type="TOOL_OUTPUT_COMPACT",
                     original_tokens=count_tokens(str(payload.get("tool_response") or "")),
                     optimized_tokens=count_tokens(compacted),
-                    details={"agent": AGENT, "tool": tool, "chars": f"{orig}->{new}"},
+                    details={"agent": agent, "tool": tool, "chars": f"{orig}->{new}"},
                 )
             except Exception:
                 pass
@@ -353,7 +258,7 @@ def handle(event: str, payload: dict) -> dict:
                             original_tokens=res.get("orig_tokens", 0),
                             optimized_tokens=res.get("pruned_tokens", 0),
                             details={
-                                "agent": AGENT,
+                                "agent": agent,
                                 "pruned": res.get("pruned_count", 0),
                                 "transcript": os.path.basename(rest_tp),
                             },

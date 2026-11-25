@@ -54,17 +54,11 @@ class TestInstallerZcodeHooks(unittest.TestCase):
         hooks = data.get("hooks") or {}
         self.assertTrue(hooks.get("enabled") is True, "ZCode config hooks must carry enabled=true")
         events = hooks.get("events") or {}
-        for event, script in (
-            ("SessionStart", "session_start.py"),
-            ("UserPromptSubmit", "pre_invocation.py"),
-            ("PreToolUse", "pre_tool_use.py"),
-            ("PostToolUse", "post_tool_use.py"),
-            ("Stop", "stop_hook.py"),
-        ):
+        for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
             entries = events.get(event)
             self.assertIsInstance(entries, list, f"{event} missing")
             args = entries[0]["hooks"][0]["args"]
-            self.assertTrue(args[-1].endswith(script), f"{event} should run {script}")
+            self.assertTrue(args[-1].endswith(os.path.join("hooks", "zcode_hook.py")), f"{event} should run zcode_hook.py")
             self.assertEqual(entries[0]["hooks"][0].get("type"), "process")
         # Existing config keys preserved
         self.assertTrue(data["mcp"]["existing"])
@@ -91,7 +85,7 @@ class TestInstallerZcodeHooks(unittest.TestCase):
         self.assertTrue(ok)
         data = self._load()
         args = data["hooks"]["events"]["PreToolUse"][0]["hooks"][0]["args"]
-        self.assertTrue(args[-1].endswith(os.path.join("hooks", "pre_tool_use.py")))
+        self.assertTrue(args[-1].endswith(os.path.join("hooks", "zcode_hook.py")))
         self.assertIn("hooks", args[-1])
 
 
