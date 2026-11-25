@@ -5,12 +5,19 @@ Consolidates multi-hunk and multi-file code modifications into a single
 atomic or best-effort operation with an optional inline verification command.
 
 Key capabilities:
-- In-memory pre-validation across up to 50 files before touching disk (0 files modified on error).
-- best_effort mode: commits valid files atomically while returning closest-line / drift hints for retries.
+- In-memory pre-validation across up to 50 files before touching disk.
+- Atomic mode: validation, disk-write, and inline-verify failures all roll back
+  (`rolled_back: true`); best_effort keeps successful files and reports
+  `edits_kept`.
+- Writes go through a same-directory temp file + os.replace, so a failed write
+  never leaves a truncated file. Restore points are registered before any byte
+  of a file changes.
+- Only valid UTF-8 files are edited: other encodings are rejected per file
+  instead of being rewritten as U+FFFD.
+- Line endings follow the matched region; file permission bits are preserved.
 - Secret leak prevention: detects credentials and private key fallbacks before writing.
-- Preservation of CRLF vs LF line endings, UTF-8 encodings, and file permissions.
-- Inline verify command execution (e.g. `npm test`, `pytest`, `cargo test`) with ANSI stripping
-  and Head-Tail output folding, cutting unnecessary LLM round-trip turns.
+- Inline verify command execution (allowlisted runners, shell=False) with ANSI
+  stripping and head/tail output folding.
 """
 
 import os

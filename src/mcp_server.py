@@ -1357,19 +1357,24 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             q_spec = {
                 "pattern": q,
                 "type": mode,
-                "path": args.get("path") or args.get("project_path") or "",
                 "case_sensitive": bool(args.get("case_sensitive", False)),
                 "max_results": int(args.get("max_results") or 25),
             }
+            # `path` is a sub-query scope relative to the project root, never the
+            # root itself: joining it twice produced "src/x.py/src/x.py" errors.
+            sub_path = args.get("path")
+            if sub_path:
+                q_spec["path"] = sub_path
             raw_sc = str(args.get("scope") or "").strip()
             if raw_sc.startswith("*.") or "*" in raw_sc:
                 q_spec["glob"] = raw_sc
             elif raw_sc and raw_sc.lower() not in ("all", "code", "config"):
                 q_spec["file_type"] = raw_sc.lstrip(".")
-            args = {
-                "queries": [q_spec],
-                "cwd": args.get("cwd") or args.get("project_path") or args.get("path"),
-            }
+            rerouted = {"queries": [q_spec]}
+            explicit_root = args.get("cwd") or args.get("project_path")
+            if explicit_root:
+                rerouted["cwd"] = explicit_root
+            args = rerouted
             name = "batch_search"
         elif mode in ("text", "regex") and args.get("use_regex") is None:
             args = dict(args, use_regex=(mode == "regex"))
@@ -2752,7 +2757,25 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             if isinstance(queries, dict):
                 queries = [queries]
             elif not queries and (args.get("query") or args.get("pattern")):
-                queries = [{"pattern": args.get("query") or args.get("pattern"), "type": args.get("type", "text")}]
+                # Shorthand: forward every per-query knob instead of silently
+                # dropping glob/case_sensitive/max_results/output_mode/scope.
+                # `path` is a sub-query scope ONLY when an explicit project root
+                # is supplied; otherwise it is the legacy cwd and must not be
+                # joined twice.
+                q_spec: Dict[str, Any] = {
+                    "pattern": args.get("query") or args.get("pattern"),
+                    "type": args.get("type", "text"),
+                }
+                has_explicit_root = bool(args.get("cwd") or args.get("project_path"))
+                for key in ("path", "glob", "file_type", "scope", "output_mode",
+                            "case_sensitive", "max_results", "use_regex"):
+                    if key == "path" and not has_explicit_root:
+                        continue
+                    if args.get(key) is not None:
+                        q_spec[key] = args.get(key)
+                if q_spec.get("use_regex") is not None:
+                    q_spec["type"] = "regex" if q_spec.pop("use_regex") else "text"
+                queries = [q_spec]
             if not queries:
                 return _fallback_error("batch_search", "missing required 'queries' list")
 
@@ -2816,7 +2839,12 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 optimized_tokens=res_tokens,
                 details={"query_count": len(safe_queries), "mode": "batch_search"},
             )
-            return {"content": [{"type": "text", "text": summary_md}]}
+            out = {"content": [{"type": "text", "text": summary_md}]}
+            if not res.get("success"):
+                # Every query errored: report a failed tool call instead of a
+                # successful one whose body silently contains only errors.
+                out["isError"] = True
+            return out
         except Exception as e:
             return _fallback_error("batch_search", f"failed to execute batch search: {e}")
 
@@ -2862,71 +2890,122 @@ def _redact_result_secrets(result):
     return redacted
 
 
+def _fold_text_for_guard(text: str, limit_bytes: int, tool_name: str) -> str:
+    """Folds `text` into at most `limit_bytes` UTF-8 bytes.
+
+    Never raises and never returns an over-budget string: if the stash write is
+    unavailable the content is truncated with an explicit marker instead of
+    being passed through uncapped.
+    """
+    if limit_bytes <= 0:
+        return ""
+    try:
+        from src.format_parsers.ansi import strip_ansi
+        clean_text = strip_ansi(text)
+    except Exception:
+        clean_text = text
+    raw = clean_text.encode("utf-8")
+    if len(raw) <= limit_bytes:
+        return clean_text
+
+    marker = ""
+    try:
+        from src.stash import stash_block
+        _hash, marker = stash_block(clean_text, source=f"mcp:{tool_name}")
+    except Exception:
+        marker = ""
+    if not marker:
+        marker = "[TokenSafe Zero-Spill Guard: content folded; stash copy unavailable]"
+
+    footer = "\n" + marker
+    footer_bytes = len(footer.encode("utf-8"))
+    budget = limit_bytes - footer_bytes
+    if budget <= 40:
+        return marker.encode("utf-8")[:limit_bytes].decode("utf-8", errors="ignore")
+
+    lines = clean_text.splitlines()
+    if len(lines) > 35:
+        head = lines[:20]
+        tail = lines[-15:]
+        omitted = len(lines) - (len(head) + len(tail))
+        msg = f"\n... [{omitted} lines / {len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
+        tail_str = "\n".join(tail)
+        tail_bytes = len(tail_str.encode("utf-8"))
+        msg_bytes = len(msg.encode("utf-8"))
+        if msg_bytes + tail_bytes < budget:
+            head_budget = budget - msg_bytes - tail_bytes
+            head_str = ""
+            for line in head:
+                candidate = head_str + line + "\n"
+                if len(candidate.encode("utf-8")) <= head_budget:
+                    head_str = candidate
+                else:
+                    break
+            folded = f"{head_str.rstrip()}{msg}{tail_str}{footer}"
+            if len(folded.encode("utf-8")) <= limit_bytes:
+                return folded
+
+    msg = "\n... [content folded by TokenSafe Zero-Spill Guard] ...\n"
+    avail = budget - len(msg.encode("utf-8"))
+    if avail <= 40:
+        return marker.encode("utf-8")[:limit_bytes].decode("utf-8", errors="ignore")
+    head_n = avail // 2
+    tail_n = avail - head_n
+    head_s = raw[:head_n].decode("utf-8", errors="ignore")
+    tail_s = raw[len(raw) - tail_n:].decode("utf-8", errors="ignore") if tail_n else ""
+    folded = f"{head_s}{msg}{tail_s}{footer}"
+    if len(folded.encode("utf-8")) > limit_bytes:
+        folded = folded.encode("utf-8")[:limit_bytes].decode("utf-8", errors="ignore")
+    return folded
+
+
 def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 8800) -> Any:
-    """Zero-Spill Guard: guarantees no MCP tool response exceeds 8800 UTF-8 bytes.
-    Prevents Antigravity from spilling tool output to disk (output.txt) which forces
-    an extra LLM roundtrip turn to read the spill file. Full content is saved to
-    reversible stash and referenced with an 8-char hash anchor."""
+    """Zero-Spill Guard: keeps the whole tools/call payload under `max_bytes`.
+
+    The budget is per RESPONSE, not per text block: several medium blocks used
+    to slip through and spill to disk. Only ~90% of `max_bytes` is spent on
+    text, leaving headroom for the JSON escaping the JSON-RPC envelope adds.
+    """
     if not isinstance(result, dict):
         return result
     content = result.get("content")
     if not isinstance(content, list):
         return result
 
-    modified = False
-    new_content = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "text":
-            text = block.get("text", "")
-            raw_bytes = text.encode("utf-8")
-            if len(raw_bytes) > max_bytes:
-                try:
-                    from src.stash import stash_block
-                    from src.format_parsers.ansi import strip_ansi
-                    clean_text = strip_ansi(text)
-                    hash8, marker = stash_block(clean_text, source=f"mcp:{tool_name}")
-                    lines = clean_text.splitlines()
-                    footer = f"\n{marker}"
-                    footer_bytes = len(footer.encode("utf-8"))
-                    if len(lines) > 35:
-                        head = lines[:20]
-                        tail = lines[-15:]
-                        omitted = len(lines) - (len(head) + len(tail))
-                        folded_msg = f"\n... [{omitted} lines / {len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
-                        tail_str = "\n".join(tail)
-                        budget = max_bytes - len(folded_msg.encode("utf-8")) - footer_bytes - len(tail_str.encode("utf-8")) - 50
-                        head_str = ""
-                        for line in head:
-                            if len((head_str + line + "\n").encode("utf-8")) <= budget:
-                                head_str += line + "\n"
-                            else:
-                                break
-                        folded_text = f"{head_str.rstrip()}{folded_msg}{tail_str}{footer}"
-                    else:
-                        msg_mid = f"\n... [{len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
-                        avail = max(120, max_bytes - len(msg_mid.encode("utf-8")) - footer_bytes - 50)
-                        head_b = raw_bytes[: avail // 2].decode("utf-8", errors="ignore")
-                        tail_b = raw_bytes[-(avail - avail // 2):].decode("utf-8", errors="ignore")
-                        folded_text = f"{head_b.rstrip()}{msg_mid}{tail_b.lstrip()}{footer}"
+    text_idx = [i for i, b in enumerate(content) if isinstance(b, dict) and b.get("type") == "text"]
+    if not text_idx:
+        return result
 
-                    if len(folded_text.encode("utf-8")) > max_bytes:
-                        allowed_head = max(80, max_bytes - footer_bytes - 60)
-                        folded_text = clean_text.encode("utf-8")[:allowed_head].decode("utf-8", errors="ignore") + f"\n... [folded]\n{footer}"
+    budget = max(256, int(max_bytes * 0.9))
+    sizes = {i: len(str(content[i].get("text") or "").encode("utf-8")) for i in text_idx}
+    total = sum(sizes.values())
+    if total <= budget:
+        return result
 
-                    new_block = dict(block)
-                    new_block["text"] = folded_text
-                    new_content.append(new_block)
-                    modified = True
-                    continue
-                except Exception:
-                    pass
-        new_content.append(block)
+    new_content = list(content)
+    # Fold the largest blocks first: that frees the most bytes per block touched.
+    for i in sorted(text_idx, key=lambda idx: sizes[idx], reverse=True):
+        if total <= budget:
+            break
+        others = total - sizes[i]
+        target = max(200, budget - others)
+        if target >= sizes[i]:
+            continue
+        folded = _fold_text_for_guard(str(content[i].get("text") or ""), target, tool_name)
+        new_content[i] = {**content[i], "text": folded}
+        total = total - sizes[i] + len(folded.encode("utf-8"))
 
-    if modified:
-        new_res = dict(result)
-        new_res["content"] = new_content
-        return new_res
-    return result
+    if total > budget:
+        # Last resort: keep only the first block, folded to the full budget.
+        first = text_idx[0]
+        kept = _fold_text_for_guard(str(content[first].get("text") or ""), budget, tool_name)
+        for i in text_idx[1:]:
+            new_content[i] = {**new_content[i], "text": ""}
+        new_content[first] = {**content[first], "text": kept}
+
+    new_res = dict(result)
+    new_res["content"] = new_content
+    return new_res
 
 
 def _execute_with_timeout(tool_name: str, tool_args: dict, timeout: float = MCP_TOOL_TIMEOUT) -> dict:

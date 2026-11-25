@@ -652,6 +652,40 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertIn("TokenSafe Zero-Spill Guard", capped_text)
         self.assertIn("[TokenSafe folded: #", capped_text)
 
+    def test_zero_spill_guard_per_response_and_fail_closed(self):
+        """Regression: the cap applies to the whole response and survives stash failure."""
+        blocks = [{"type": "text", "text": ch * 5000} for ch in ("A", "B", "C")]
+        capped = _cap_mcp_output_size({"content": blocks}, tool_name="multi")
+        total = sum(len(b["text"].encode("utf-8")) for b in capped["content"])
+        self.assertLessEqual(total, 8800)
+        self.assertLess(total, sum(len(b["text"].encode()) for b in blocks))
+
+        # Many medium blocks must not slip through either
+        many = {"content": [{"type": "text", "text": "y" * 1000} for _ in range(20)]}
+        capped_many = _cap_mcp_output_size(many, tool_name="many")
+        self.assertLessEqual(
+            sum(len(b["text"].encode("utf-8")) for b in capped_many["content"]), 8800
+        )
+
+        # Stash unavailable: content must still be truncated (never passed through)
+        import src.stash as stash_mod
+
+        original = stash_mod.stash_block
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("stash offline")
+
+        stash_mod.stash_block = _boom
+        try:
+            big = {"content": [{"type": "text", "text": "X" * 20000}]}
+            capped_big = _cap_mcp_output_size(big, tool_name="nostash")
+        finally:
+            stash_mod.stash_block = original
+
+        text = capped_big["content"][0]["text"]
+        self.assertLessEqual(len(text.encode("utf-8")), 8800)
+        self.assertIn("Zero-Spill", text)
+
     def test_transcript_analyzer(self):
         """Tests parsing of JSONL transcript and A/B comparison."""
         transcript_a = os.path.join(self.tmp_dir, "transcript_a.jsonl")
