@@ -84,6 +84,13 @@ def handle(event: str, payload: dict, agent: str = AGENT) -> dict:
                 extra = f"{extra}\n\n{burn_warn}"
         except Exception:
             pass
+        try:
+            from src.adapter_core import format_cumulative_banner
+            cum_banner = format_cumulative_banner()
+            if cum_banner:
+                extra = f"{extra}\n\n{cum_banner}"
+        except Exception:
+            pass
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",

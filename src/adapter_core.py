@@ -628,3 +628,25 @@ def evaluate_cc_pre_tool_use(payload: Dict[str, Any], agent: str) -> Dict[str, A
         return {}
 
     return {}
+
+
+def format_cumulative_banner(tracker: Optional[Any] = None) -> str:
+    """One-line cumulative savings summary injected once at SessionStart."""
+    try:
+        tr = tracker or _get_tracker()
+        if not tr:
+            return ""
+        s = tr.get_summary()
+        saved = int(s.get("total_saved_tokens") or 0)
+        if saved <= 0:
+            return ""
+        usd = float(s.get("total_usd_saved") or 0.0)
+        if saved >= 1_000_000:
+            tok_str = f"{saved / 1_000_000:.2f}M"
+        elif saved >= 1_000:
+            tok_str = f"{saved / 1_000:.1f}K"
+        else:
+            tok_str = f"{saved:,}"
+        return f"[TokenSafe Cumulative: {tok_str} tokens saved (~${usd:.2f} approx)]"
+    except Exception:
+        return ""

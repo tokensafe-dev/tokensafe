@@ -135,6 +135,14 @@ def main():
     except Exception:
         pass
 
+    try:
+        from src.adapter_core import format_cumulative_banner
+        cum_banner = format_cumulative_banner()
+        if cum_banner:
+            system_sections.append(cum_banner)
+    except Exception:
+        pass
+
     inject_steps = [
         {"systemMessage": {"systemMessage": "\n\n".join(system_sections), "metadata": {}}}
     ]

@@ -422,6 +422,29 @@ class TestMultiAgentBurnMonitor(unittest.TestCase):
         self.assertEqual(res_cx["input_tokens"], 10000)
         self.assertEqual(res_cx["cache_read_tokens"], 8000)
 
+    def test_session_start_injects_cumulative_banner_when_events_exist(self):
+        from hooks import claude_code_hook, kimi_hook, session_start, zcode_hook
+        from src.metrics import MetricsTracker
+
+        tracker = MetricsTracker(db_path=os.environ["TOKENSAFE_DB_PATH"])
+        tracker.record_event("s_cum", "SCOPED_SEARCH", 20000, 2000)
+
+        # Claude Code / ZCode / Kimi SessionStart
+        for mod in (claude_code_hook, zcode_hook, kimi_hook):
+            out = mod.handle("SessionStart", {"session_id": "s_cum"})
+            ctx = out["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("[TokenSafe Cumulative: 18.0K tokens saved", ctx)
+
+        # Antigravity SessionStart
+        with patch("src.license_manager.LicenseManager.check_quota", return_value={"is_quota_exceeded": False}), \
+             patch("src.version_checker.VersionChecker.notify_os_update_background"), \
+             patch("sys.stdin", io.StringIO(json.dumps({"conversationId": "s_cum", "workspacePaths": [self._tmp]}))), \
+             patch("sys.stdout", new_callable=io.StringIO) as out_ag:
+            session_start.main()
+        ag_data = json.loads(out_ag.getvalue())
+        ag_text = ag_data["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertIn("[TokenSafe Cumulative: 18.0K tokens saved", ag_text)
+
 
 if __name__ == "__main__":
     unittest.main()
