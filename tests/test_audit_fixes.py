@@ -1171,8 +1171,10 @@ class TestReleaseVersionConsistency(unittest.TestCase):
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
-        # Env takes priority without reading defaults
-        with patch.dict(os.environ, {"NPM_TOKEN": "npm_test_tok_123"}, clear=False):
+        # Env takes priority without reading defaults.
+        # NODE_AUTH_TOKEN is blanked because CI runners (actions/setup-node with
+        # registry-url) export it globally and it would shadow NPM_TOKEN.
+        with patch.dict(os.environ, {"NPM_TOKEN": "npm_test_tok_123", "NODE_AUTH_TOKEN": ""}, clear=False):
             self.assertEqual(mod.resolve_npm_token(), "npm_test_tok_123")
 
         # Cloud repo manifests update cleanly in isolation
