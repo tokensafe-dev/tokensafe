@@ -513,6 +513,65 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertIn("Scripts: test", snap)
         self.assertLessEqual(len(snap.encode("utf-8")), 1400)
 
+    def test_snapshot_porcelain_paths_and_gitignore(self):
+        """Regression: porcelain paths keep their prefix; gitignored dirs stay out of the snapshot."""
+        from src.snapshot import _parse_porcelain_paths
+        from src.snapshot import build_workspace_snapshot as build_snap
+
+        raw = (
+            " M src/index.ts\n"
+            "R  old/name.py -> new/name.py\n"
+            "?? untracked.md\n"
+        )
+        self.assertEqual(
+            _parse_porcelain_paths(raw),
+            ["src/index.ts", "new/name.py", "untracked.md"],
+        )
+
+        with open(os.path.join(self.tmp_dir, ".gitignore"), "w", encoding="utf-8") as f:
+            f.write("generated-out/\n")
+        os.makedirs(os.path.join(self.tmp_dir, "generated-out"), exist_ok=True)
+        with open(os.path.join(self.tmp_dir, "generated-out", "junk.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        os.makedirs(os.path.join(self.tmp_dir, "src"), exist_ok=True)
+
+        snap = build_snap(self.tmp_dir, max_bytes=1400)
+        self.assertIsNotNone(snap)
+        self.assertNotIn("generated-out", snap)
+
+    def test_snapshot_unknown_on_git_failure_and_truncation_marker(self):
+        """Regression: a failed 'git status' is 'unknown', never 'clean'; truncation is marked."""
+        from unittest import mock
+        from src import snapshot as snapshot_mod
+
+        class _Res:
+            def __init__(self, stdout: str, returncode: int):
+                self.stdout = stdout
+                self.returncode = returncode
+
+        def fake_run(cmd, *args, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+            if "rev-parse" in joined:
+                return _Res("main\n", 0)
+            if "status" in joined:
+                return _Res("", 128)
+            return _Res("abc1234 first commit\n", 0)
+
+        with mock.patch.object(snapshot_mod.subprocess, "run", side_effect=fake_run):
+            summary = snapshot_mod._get_git_summary(self.tmp_dir)
+
+        self.assertIn("unknown", summary)
+        self.assertNotIn("clean", summary)
+
+        os.makedirs(os.path.join(self.tmp_dir, "src"), exist_ok=True)
+        for name in ("a.py", "b.py", "c.py"):
+            with open(os.path.join(self.tmp_dir, "src", name), "w", encoding="utf-8") as f:
+                f.write("x = 1\n")
+        snap = snapshot_mod.build_workspace_snapshot(self.tmp_dir, max_bytes=60)
+        self.assertIsNotNone(snap)
+        self.assertLessEqual(len(snap.encode("utf-8")), 60)
+        self.assertIn("(truncated)", snap)
+
     def test_zero_spill_guard_capping(self):
         """Tests that outputs > 8800 bytes are folded and tagged with stash anchor."""
         huge_text = "Line content item: " + ("x" * 80) + "\n"

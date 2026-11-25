@@ -1,22 +1,29 @@
 """
 TokenSafe Workspace Snapshot Generator (v3.5.0).
 
-Produces a deterministic, token-efficient workspace snapshot (<=1.4 KB)
-in ~35-50 ms on SessionStart. Injected once as a persistent systemMessage,
-it eliminates the cold-start exploration phase (turns 1-3) where agents
-waste 45+ seconds running exploratory `ls`, `git status`, and script lookups.
+Produces a deterministic, token-efficient workspace snapshot (<=1.4 KB) on
+SessionStart in roughly 50-150 ms depending on repo size. Injected once as a
+persistent systemMessage, it eliminates the cold-start exploration phase
+(turns 1-3) where agents waste 45+ seconds running exploratory `ls`,
+`git status`, and script lookups.
+
+Truthfulness rules: a failed git call is reported as "unknown" (never
+"clean"), non-existent paths are never invented, gitignored entries are
+filtered out, and a truncated snapshot is explicitly marked as truncated.
 """
 
 import os
 import re
 import json
 import shutil
+import fnmatch
 import subprocess
 from typing import Dict, Any, List, Optional, Set
 
 HARDENED_GIT_BASE_ARGS = [
     "--no-optional-locks",
     "-c", "core.fsmonitor=false",
+    "-c", "core.quotePath=false",
     "-c", "diff.external=",
     "-c", "gpg.program=false",
     "--no-pager"
@@ -58,8 +65,27 @@ def _is_system_or_home_root(p: str) -> bool:
     return False
 
 
-def _get_git_summary(workspace_dir: str, timeout_sec: float = 0.5) -> Optional[str]:
-    """Extracts git branch, working tree status, and last 3 commits in <= 350 ms."""
+def _parse_porcelain_paths(status_raw: str, limit: int = 6) -> List[str]:
+    """Extracts display paths from `git status --porcelain=v1` output.
+
+    Porcelain v1 is "XY <path>": the 2 status columns are fixed-width, so the
+    line must not be stripped before slicing (that shifted every path by two
+    characters and reported e.g. " M src/a.py" as "rc/a.py").
+    """
+    paths: List[str] = []
+    status_lines = [l for l in status_raw.splitlines() if l.strip()]
+    for line in status_lines[:limit]:
+        path = line[3:].strip() if len(line) > 3 else line.strip()
+        if " -> " in path:  # renames: "R  old -> new"
+            path = path.split(" -> ", 1)[1]
+        if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+            path = path[1:-1]
+        paths.append(path)
+    return paths
+
+
+def _get_git_summary(workspace_dir: str, timeout_sec: float = 2.0) -> Optional[str]:
+    """Extracts git branch, working tree status, and last 3 commits (bounded, truthful)."""
     git_bin = shutil.which("git")
     if not git_bin:
         return None
@@ -68,42 +94,48 @@ def _get_git_summary(workspace_dir: str, timeout_sec: float = 0.5) -> Optional[s
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_PAGER"] = "cat"
 
-    def _run_git(args: List[str]) -> Optional[str]:
+    def _run_git(args: List[str], optional_locks: bool = True) -> Optional[str]:
+        # --no-optional-locks blocks the index refresh shortcut, which makes
+        # `git status` far slower on large trees; allow locks where it matters.
+        base_args = HARDENED_GIT_BASE_ARGS if optional_locks else [
+            a for a in HARDENED_GIT_BASE_ARGS if a != "--no-optional-locks"
+        ]
         try:
             res = subprocess.run(
-                [git_bin, *HARDENED_GIT_BASE_ARGS, *args],
+                [git_bin, *base_args, *args],
                 cwd=workspace_dir,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=timeout_sec,
                 env=env
             )
-            return res.stdout.strip() if res.returncode == 0 else None
+            return res.stdout if res.returncode == 0 else None
         except Exception:
             return None
 
     branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
     if not branch:
         return None
+    branch = branch.strip()
 
-    status_raw = _run_git(["status", "--porcelain=v1"]) or ""
-    log_raw = _run_git(["log", "-n", "3", "--format=%h %s"]) or ""
+    status_raw = _run_git(["status", "--porcelain=v1"], optional_locks=False)
+    log_raw = _run_git(["log", "-n", "3", "--format=%h %s"])
 
     parts = [f"Git: branch `{branch}`"]
 
-    # Modified files
-    status_lines = [l.strip() for l in status_raw.splitlines() if l.strip()]
-    if not status_lines:
-        parts.append("Working tree: clean")
+    if status_raw is None:
+        # A failed/timed-out status must never be reported as a clean tree.
+        parts.append("Working tree: unknown (git status unavailable)")
     else:
-        file_items = []
-        for l in status_lines[:6]:
-            # e.g. " M src/index.ts" -> "src/index.ts"
-            fname = l[3:].strip() if len(l) > 3 else l
-            file_items.append(fname)
-        more = f" (+{len(status_lines) - len(file_items)} more)" if len(status_lines) > len(file_items) else ""
-        parts.append(f"Working tree: {len(status_lines)} modified ({', '.join(file_items)}{more})")
+        total = len([l for l in status_raw.splitlines() if l.strip()])
+        if total == 0:
+            parts.append("Working tree: clean")
+        else:
+            file_items = _parse_porcelain_paths(status_raw)
+            more = f" (+{total - len(file_items)} more)" if total > len(file_items) else ""
+            parts.append(f"Working tree: {total} modified ({', '.join(file_items)}{more})")
 
     # Recent commits
     if log_raw:
@@ -115,11 +147,38 @@ def _get_git_summary(workspace_dir: str, timeout_sec: float = 0.5) -> Optional[s
 
 
 def _get_layout_summary(workspace_dir: str, max_depth: int = 2) -> Optional[str]:
-    """Generates a compact 2-level directory tree without noise."""
+    """Generates a compact 2-level directory tree without noise or gitignored paths."""
     try:
         entries = sorted(os.listdir(workspace_dir))
     except Exception:
         return None
+
+    # Reuse the guard's .gitignore parser instead of injecting ignored/generated
+    # directories (build output, local dumps) into the system prompt. The guard's
+    # own matcher drops the trailing slash from "dir/" patterns via relpath, so
+    # directory matching is done here.
+    is_ignored = None
+    try:
+        from src.guard import TokenSafeGuard
+        patterns = TokenSafeGuard._load_gitignore_patterns(workspace_dir)
+
+        def is_ignored(p: str) -> bool:  # type: ignore[misc]
+            rel = os.path.relpath(p, workspace_dir).replace("\\", "/")
+            name = os.path.basename(p)
+            is_dir = os.path.isdir(p)
+            for pat in patterns:
+                if pat.endswith("/"):
+                    base = pat.rstrip("/")
+                    if is_dir and (rel == base or rel.startswith(base + "/")):
+                        return True
+                    continue
+                if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel, pat):
+                    return True
+                if "/" not in pat and (rel == pat or rel.startswith(pat + "/")):
+                    return True
+            return False
+    except Exception:
+        is_ignored = None
 
     top_dirs = []
     top_files = []
@@ -128,6 +187,8 @@ def _get_layout_summary(workspace_dir: str, max_depth: int = 2) -> Optional[str]
         if name.startswith(".") or name in SKIP_SNAPSHOT_DIRS:
             continue
         full_p = os.path.join(workspace_dir, name)
+        if is_ignored is not None and is_ignored(full_p):
+            continue
         if os.path.isdir(full_p):
             top_dirs.append(name)
         elif os.path.isfile(full_p):
@@ -144,7 +205,11 @@ def _get_layout_summary(workspace_dir: str, max_depth: int = 2) -> Optional[str]
             continue
         try:
             sub = sorted(os.listdir(d_path))
-            sub_files = [s for s in sub if not s.startswith(".") and s not in SKIP_SNAPSHOT_DIRS][:6]
+            sub_files = [
+                s for s in sub
+                if not s.startswith(".") and s not in SKIP_SNAPSHOT_DIRS
+                and not (is_ignored is not None and is_ignored(os.path.join(d_path, s)))
+            ][:6]
             has_more = len(sub) > len(sub_files)
             more_str = f" +{len(sub) - len(sub_files)}" if has_more else ""
             lines.append(f"  {d}/ ({', '.join(sub_files)}{more_str})")
@@ -244,6 +309,12 @@ def build_workspace_snapshot(workspace_dir: str, max_bytes: int = 1400) -> Optio
     if len(combined_bytes) <= max_bytes:
         return combined
 
-    # Safe truncation
-    truncated = combined_bytes[:max_bytes].decode("utf-8", errors="ignore")
-    return truncated.rsplit("\n", 1)[0]
+    # Safe truncation: cut at the last newline that fits AND mark it, so a
+    # truncated snapshot never masquerades as a complete one.
+    marker = "\n… (truncated)"
+    budget = max_bytes - len(marker.encode("utf-8"))
+    truncated = combined_bytes[:budget].decode("utf-8", errors="ignore")
+    cut = truncated.rfind("\n")
+    if cut > 0:
+        truncated = truncated[:cut]
+    return truncated.rstrip() + marker
