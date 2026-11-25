@@ -10,7 +10,12 @@ Supported query types:
 - 'regex': regular expression pattern matching.
 - 'glob': file name and path pattern matching.
 - 'fuzzy': case-insensitive fuzzy path and symbol search.
-- 'git': read-only git queries (status, diff, log, show, branch, rev-parse, ls-files).
+- 'git': read-only git queries (status, diff, log, show, branch, rev-parse,
+  ls-files, blame, shortlog, describe, tag) with writing/escaping flags blocked.
+
+`path` may point to a directory or to a single file. A missing path, an
+uncompilable regex, and an unknown `file_type` are reported as per-query
+errors instead of silent zero-hit results.
 """
 
 import os
@@ -36,10 +41,14 @@ ALLOWED_GIT_COMMANDS = {
 HARDENED_GIT_BASE_ARGS = [
     "--no-optional-locks",
     "-c", "core.fsmonitor=false",
+    "-c", "core.quotePath=false",
     "-c", "diff.external=",
     "-c", "gpg.program=false",
-    "--no-pager"
+    "--no-pager",
 ]
+
+# Subcommands that support --no-textconv (a per-command option, not a global one)
+_TEXTCONV_SUBCOMMANDS = frozenset({"diff", "log", "show", "blame"})
 
 
 def _is_git_command_safe(args_str: str) -> Tuple[bool, str, List[str]]:
@@ -57,8 +66,15 @@ def _is_git_command_safe(args_str: str) -> Tuple[bool, str, List[str]]:
     if subcmd not in ALLOWED_GIT_COMMANDS:
         return False, f"Git subcommand '{subcmd}' is not in the read-only allowlist ({', '.join(sorted(ALLOWED_GIT_COMMANDS))}).", []
 
-    # Block destructive, config-overriding, or mutating flags
-    _BLOCKED_GIT_PREFIXES = ("-c", "-C", "--git-dir", "--work-tree", "--exec-path", "--output", "--ext-diff", "--exec")
+    # Block destructive, config-overriding, escaping, or helper-executing options.
+    # --no-index/--contents/--pathspec-from-file read arbitrary files outside the
+    # workspace root the MCP handler confines sub-queries to; --textconv runs
+    # repo-configured helpers, so it is blocked and --no-textconv is forced below.
+    _BLOCKED_GIT_PREFIXES = (
+        "-c", "-C", "--git-dir", "--work-tree", "--exec-path", "--output",
+        "--ext-diff", "--exec", "--no-index", "--contents", "--pathspec-from-file",
+        "--textconv",
+    )
     _READ_ONLY_BRANCH_TAG_FLAGS = {
         "-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
         "--show-current", "--contains", "--no-contains", "--merged", "--no-merged",
@@ -80,7 +96,7 @@ def _is_git_command_safe(args_str: str) -> Tuple[bool, str, List[str]]:
     return True, "", tokens
 
 
-def _run_git_query(pattern: str, cwd: str, timeout_sec: int = 5) -> Dict[str, Any]:
+def _run_git_query(pattern: str, cwd: str, timeout_sec: int = 5, max_results: int = 50) -> Dict[str, Any]:
     """Runs a read-only git query."""
     is_safe, err_msg, tokens = _is_git_command_safe(pattern)
     if not is_safe:
@@ -90,15 +106,24 @@ def _run_git_query(pattern: str, cwd: str, timeout_sec: int = 5) -> Dict[str, An
     if not git_bin:
         return {"error": "git executable not found in PATH", "matches": [], "count": 0}
 
-    cmd = [git_bin, *HARDENED_GIT_BASE_ARGS, *tokens]
+    # --no-textconv is a per-subcommand option (diff/log/show/blame), so it must
+    # follow the subcommand, not sit in the global option block.
+    if tokens and tokens[0].lower() in _TEXTCONV_SUBCOMMANDS:
+        cmd = [git_bin, *HARDENED_GIT_BASE_ARGS, tokens[0], "--no-textconv", *tokens[1:]]
+    else:
+        cmd = [git_bin, *HARDENED_GIT_BASE_ARGS, *tokens]
+
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_PAGER"] = "cat"
+    # Never let git consume the MCP server's own stdin (rev-parse --parseopt blocks on it).
+    stdin_devnull = subprocess.DEVNULL
 
     try:
         proc = subprocess.run(
             cmd,
             cwd=cwd,
+            stdin=stdin_devnull,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -111,7 +136,8 @@ def _run_git_query(pattern: str, cwd: str, timeout_sec: int = 5) -> Dict[str, An
 
         raw_out = strip_ansi(proc.stdout or "").strip()
         lines = [l for l in raw_out.splitlines() if l.strip()]
-        return {"matches": lines[:50], "count": len(lines), "raw": "\n".join(lines[:50])}
+        limited = lines[:max_results]
+        return {"matches": limited, "count": len(limited), "raw": "\n".join(limited)}
     except subprocess.TimeoutExpired:
         return {"error": f"git query timed out after {timeout_sec}s", "matches": [], "count": 0}
     except Exception as e:
@@ -159,11 +185,16 @@ def _run_rg_query(
         proc = subprocess.run(
             cmd,
             cwd=cwd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=5
         )
+        err_text = (proc.stderr or "").strip()
+        # rg exits 1 for "no matches" (not an error) and 2 for real failures.
+        if proc.returncode not in (0, 1) and err_text:
+            raise RuntimeError(f"ripgrep failed: {err_text.splitlines()[0]}")
         matches = []
         _rg_line_re = re.compile(r"^(.*):(\d+):(.*)$")
         for line in proc.stdout.splitlines():
@@ -198,6 +229,37 @@ def _iter_search_files(search_root: str, cwd: str):
             yield full_path, os.path.relpath(full_path, cwd)
 
 
+# Approximation of ripgrep's --type map for the pure-Python fallback, so the
+# file_type filter is not silently ignored when rg is unavailable.
+FILE_TYPE_EXTENSIONS = {
+    "typescript": {".ts", ".tsx", ".mts", ".cts"},
+    "ts": {".ts", ".tsx", ".mts", ".cts"},
+    "javascript": {".js", ".jsx", ".mjs", ".cjs"},
+    "js": {".js", ".jsx", ".mjs", ".cjs"},
+    "python": {".py", ".pyi"},
+    "py": {".py", ".pyi"},
+    "rust": {".rs"},
+    "go": {".go"},
+    "java": {".java"},
+    "ruby": {".rb"},
+    "php": {".php"},
+    "c": {".c", ".h"},
+    "cpp": {".cpp", ".cc", ".cxx", ".hpp", ".hh"},
+    "csharp": {".cs"},
+    "markdown": {".md", ".markdown"},
+    "md": {".md", ".markdown"},
+    "json": {".json"},
+    "yaml": {".yaml", ".yml"},
+    "toml": {".toml"},
+    "html": {".html", ".htm"},
+    "css": {".css", ".scss", ".sass", ".less"},
+    "sql": {".sql"},
+    "shell": {".sh", ".bash", ".zsh"},
+    "swift": {".swift"},
+    "kotlin": {".kt", ".kts"},
+}
+
+
 def _run_python_text_search(
     pattern: str,
     cwd: str,
@@ -206,20 +268,30 @@ def _run_python_text_search(
     case_sensitive: bool = False,
     scope: str = "all",
     glob_filter: Optional[str] = None,
+    file_type: Optional[str] = None,
     max_results: int = 25
 ) -> List[Dict[str, Any]]:
-    """Pure Python search fallback."""
+    """Pure Python search fallback. Raises ValueError for an unusable regex or file_type."""
     search_root = os.path.normpath(os.path.join(cwd, path_filter)) if path_filter else cwd
     if not os.path.exists(search_root):
         return []
+
+    type_exts = None
+    if file_type:
+        type_exts = FILE_TYPE_EXTENSIONS.get(str(file_type).lower().lstrip("."))
+        if type_exts is None:
+            raise ValueError(
+                f"unsupported file_type '{file_type}' (known: {', '.join(sorted(FILE_TYPE_EXTENSIONS))})"
+            )
 
     regex = None
     if is_regex:
         flags = 0 if case_sensitive else re.IGNORECASE
         try:
             regex = re.compile(pattern, flags)
-        except re.error:
-            regex = None
+        except re.error as e:
+            # Never degrade to a literal search: that silently returns bogus hits.
+            raise ValueError(f"invalid regular expression: {e}")
 
     matches = []
     target_lower = pattern if case_sensitive else pattern.lower()
@@ -233,6 +305,8 @@ def _run_python_text_search(
             if ext in IGNORED_EXTENSIONS:
                 continue
             if scope == "code" and ext not in CODE_EXTENSIONS:
+                continue
+            if type_exts is not None and ext not in type_exts:
                 continue
             if glob_filter and not (fnmatch.fnmatch(os.path.basename(full_path), glob_filter) or fnmatch.fnmatch(rel_p, glob_filter)):
                 continue
@@ -312,20 +386,39 @@ def _execute_single_query(query_dict: Dict[str, Any], cwd: str) -> Dict[str, Any
     output_mode = str(query_dict.get("output_mode") or "content").lower()
     file_type = query_dict.get("file_type")
     glob_filter = query_dict.get("glob")
+    scope = str(query_dict.get("scope") or "all").lower()
 
     if not pattern and q_type != "git":
         return {"type": q_type, "pattern": pattern, "error": "Empty pattern.", "matches": [], "count": 0}
 
+    # A path that does not exist must be an explicit error: an empty result list
+    # is indistinguishable from a genuine zero-hit search.
+    if path_filter:
+        search_root = os.path.normpath(os.path.join(cwd, str(path_filter)))
+        if not os.path.exists(search_root):
+            return {
+                "type": q_type,
+                "pattern": pattern,
+                "error": f"path does not exist: {path_filter}",
+                "matches": [],
+                "count": 0,
+            }
+
     if q_type == "git":
-        res = _run_git_query(pattern, cwd)
+        git_cwd = os.path.normpath(os.path.join(cwd, str(path_filter))) if path_filter else cwd
+        res = _run_git_query(pattern, git_cwd, max_results=max_res)
         return {"type": "git", "pattern": pattern, **res}
 
     if q_type == "glob":
         matched_paths = _run_glob_search(pattern, cwd, path_filter=path_filter, max_results=max_res)
+        if output_mode == "count":
+            return {"type": "glob", "pattern": pattern, "count": len(matched_paths)}
         return {"type": "glob", "pattern": pattern, "matches": matched_paths, "count": len(matched_paths)}
 
     if q_type == "fuzzy":
         matched_paths = _run_fuzzy_search(pattern, cwd, path_filter=path_filter, max_results=max_res)
+        if output_mode == "count":
+            return {"type": "fuzzy", "pattern": pattern, "count": len(matched_paths)}
         return {"type": "fuzzy", "pattern": pattern, "matches": matched_paths, "count": len(matched_paths)}
 
     is_regex = (q_type == "regex")
@@ -341,16 +434,20 @@ def _execute_single_query(query_dict: Dict[str, Any], cwd: str) -> Dict[str, Any
         max_results=max_res
     )
 
-    matches = rg_matches if rg_matches is not None else _run_python_text_search(
-        pattern=pattern,
-        cwd=cwd,
-        path_filter=path_filter,
-        is_regex=is_regex,
-        case_sensitive=case_sensitive,
-        scope="all",
-        glob_filter=glob_filter,
-        max_results=max_res
-    )
+    try:
+        matches = rg_matches if rg_matches is not None else _run_python_text_search(
+            pattern=pattern,
+            cwd=cwd,
+            path_filter=path_filter,
+            is_regex=is_regex,
+            case_sensitive=case_sensitive,
+            scope=scope,
+            glob_filter=glob_filter,
+            file_type=file_type,
+            max_results=max_res
+        )
+    except ValueError as e:
+        return {"type": q_type, "pattern": pattern, "error": str(e), "matches": [], "count": 0}
 
     if output_mode == "files_with_matches":
         unique_files = list(dict.fromkeys(m["file"] for m in matches if isinstance(m, dict) and "file" in m))
@@ -418,11 +515,13 @@ def execute_batch_search(
         if q_type == "git":
             raw_git = res.get("raw")
             if raw_git:
-                md_lines.append("```text\n" + raw_git[:1200] + "\n```")
+                md_lines.append("```text\n" + raw_git + "\n```")
             elif not matches:
                 md_lines.append("*(clean / no output)*")
         elif isinstance(matches, list):
-            for m in matches[:15]:
+            # Honor the caller's max_results instead of a fixed 15-item cap;
+            # the Zero-Spill Guard folds oversized payloads at the MCP boundary.
+            for m in matches:
                 if isinstance(m, dict):
                     f_name = m.get("file", "")
                     l_num = m.get("line", "")
@@ -430,12 +529,11 @@ def execute_batch_search(
                     md_lines.append(f"- `{f_name}:{l_num}`: {content}")
                 elif isinstance(m, str):
                     md_lines.append(f"- `{m}`")
-            if len(matches) > 15:
-                md_lines.append(f"- *(+{len(matches) - 15} more matches)*")
 
     summary_md = "\n".join(md_lines)
+    errored = [r for r in results if isinstance(r, dict) and r.get("error")]
     return {
-        "success": True,
+        "success": not (errored and len(errored) == len(results)),
         "query_count": len(queries),
         "results": results,
         "summary_md": summary_md

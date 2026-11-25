@@ -430,6 +430,72 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertEqual(matches[0]["file"], "single.py")
         self.assertEqual(matches[0]["line"], 1)
 
+    def test_batch_search_reports_errors_instead_of_silent_zeros(self):
+        """Regression: missing path / bad regex / unknown file_type are errors, not empty results."""
+        sub = os.path.join(self.tmp_dir, "src")
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "a.py"), "w", encoding="utf-8") as f:
+            f.write("def alpha():\n    return 1\n")
+        with open(os.path.join(sub, "b.ts"), "w", encoding="utf-8") as f:
+            f.write("export function alpha() {}\n")
+
+        res = execute_batch_search(queries=[
+            {"pattern": "alpha", "type": "text", "path": "no/such/dir"},
+            {"pattern": "alpha(", "type": "regex"},
+            {"pattern": "alpha", "type": "text", "file_type": "cobol"},
+        ], cwd=self.tmp_dir)
+
+        self.assertFalse(res["success"])
+        for q in res["results"]:
+            self.assertIn("error", q, q)
+
+    def test_python_fallback_honors_file_type(self):
+        """Regression: file_type must not be ignored when rg is unavailable."""
+        sub = os.path.join(self.tmp_dir, "src")
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "a.py"), "w", encoding="utf-8") as f:
+            f.write("marker here\n")
+        with open(os.path.join(sub, "b.ts"), "w", encoding="utf-8") as f:
+            f.write("marker here\n")
+
+        py_only = _run_python_text_search("marker", cwd=self.tmp_dir, file_type="python")
+        self.assertEqual([m["file"] for m in py_only], [os.path.join("src", "a.py")])
+
+        ts_only = _run_python_text_search("marker", cwd=self.tmp_dir, file_type="typescript")
+        self.assertEqual([m["file"] for m in ts_only], [os.path.join("src", "b.ts")])
+
+        with self.assertRaises(ValueError):
+            _run_python_text_search("marker", cwd=self.tmp_dir, file_type="cobol")
+
+        with self.assertRaises(ValueError):
+            _run_python_text_search("marker(", cwd=self.tmp_dir, is_regex=True)
+
+    def test_batch_search_git_blocks_escaping_flags(self):
+        """Regression: read-only-but-escaping git options must be rejected."""
+        blocked = [
+            "git diff --no-index /etc/passwd README.md",
+            "git blame --contents=/etc/passwd README.md",
+            "git log --pathspec-from-file=/etc/passwd",
+            "git diff --textconv",
+        ]
+        for cmd in blocked:
+            res = execute_batch_search([{"pattern": cmd, "type": "git"}], cwd=self.tmp_dir)
+            self.assertTrue(res["results"][0].get("error"), f"Expected block for: {cmd}")
+
+    def test_batch_search_honors_max_results_and_success(self):
+        """Regression: rendering must not cap at 15 items; all-error batches are failures."""
+        target = os.path.join(self.tmp_dir, "many.txt")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("needle\n" * 40)
+
+        res = execute_batch_search(
+            [{"pattern": "needle", "type": "text", "path": "many.txt", "max_results": 30}],
+            cwd=self.tmp_dir,
+        )
+        self.assertTrue(res["success"])
+        rendered = res["summary_md"].count("- `many.txt:")
+        self.assertEqual(rendered, 30, res["summary_md"][:400])
+
     def test_workspace_snapshot(self):
         """Tests workspace snapshot generation for project directory."""
         with open(os.path.join(self.tmp_dir, "package.json"), "w", encoding="utf-8") as f:
