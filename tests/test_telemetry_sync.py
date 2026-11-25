@@ -250,6 +250,54 @@ class TestTelemetrySync(unittest.TestCase):
         st = TelemetrySync.get_state()
         self.assertEqual(st["last_synced_event_id"], 2050)
 
+    @patch("urllib.request.urlopen")
+    def test_rollup_lifetime_not_reemitted_after_upgrade_or_prune_of_synced(self, mock_urlopen):
+        sent_events = []
+
+        def fake_urlopen(req, *args, **kwargs):
+            payload = json.loads(req.data.decode("utf-8"))
+            sent_events.extend(payload.get("events", []))
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = json.dumps({"status": "synced", "processed": len(payload.get("events", []))}).encode("utf-8")
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        mock_urlopen.side_effect = fake_urlopen
+
+        tracker = MetricsTracker(db_path=ts_mod.METRICS_DB_PATH)
+        for i in range(5):
+            tracker.record_event(f"s_{i}", "PROMPT", 1000, 200)
+
+        # Simulate pre-watermark legacy sync_state.json where lifetime_rollup_synced=True already existed
+        import sqlite3
+        with sqlite3.connect(ts_mod.METRICS_DB_PATH) as c:
+            c.execute("UPDATE lifetime_aggregates SET total_saved_tokens = 5000000, total_original_tokens = 6000000, total_usd_saved = 15.0 WHERE id = 1")
+        TelemetrySync.save_state({
+            "last_synced_event_id": 0,
+            "last_synced_at": 1000,
+            "total_synced_events": 10,
+            "lifetime_rollup_synced": True,
+        })
+
+        res1 = TelemetrySync.sync(cloud_url="http://mock-cloud.internal", license_key="TS1.mock.key", email="test@domain.com")
+        self.assertTrue(res1["success"])
+        self.assertFalse(any(e["event_type"] == "ROLLUP_LIFETIME" for e in sent_events))
+        self.assertEqual(len(sent_events), 5)
+
+        # Now prune events that were ALREADY synced -> ROLLUP_LIFETIME must NOT re-emit them
+        sent_events.clear()
+        pruned = tracker.prune(max_events=2, vacuum=False)
+        self.assertEqual(pruned["pruned_events"], 3)
+        tracker.record_event("s_new", "PROMPT", 500, 100)
+
+        res2 = TelemetrySync.sync(cloud_url="http://mock-cloud.internal", license_key="TS1.mock.key", email="test@domain.com")
+        self.assertTrue(res2["success"])
+        self.assertEqual([e["event_type"] for e in sent_events], ["PROMPT"])
+        st = TelemetrySync.get_state()
+        self.assertIn("last_synced_rollup_tokens", st)
+
 
 if __name__ == "__main__":
     unittest.main()

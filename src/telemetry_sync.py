@@ -239,6 +239,13 @@ class TelemetrySync:
             total_sent = 0
             cumulative_synced = state.get("total_synced_events", 0)
             rollup_synced = bool(state.get("lifetime_rollup_synced", False))
+            has_rollup_watermark = "last_synced_rollup_tokens" in state
+            last_synced_rollup = int(state.get("last_synced_rollup_tokens", 0) or 0)
+            last_synced_rollup_orig = int(state.get("last_synced_rollup_orig", 0) or 0)
+            last_synced_rollup_usd = float(state.get("last_synced_rollup_usd", 0.0) or 0.0)
+            current_rollup_tokens = last_synced_rollup
+            current_rollup_orig = last_synced_rollup_orig
+            current_rollup_usd = last_synced_rollup_usd
             current_last_id = last_id
             headers = {
                 "Content-Type": "application/json",
@@ -255,7 +262,10 @@ class TelemetrySync:
                     "last_quota_sync_at": state.get("last_quota_sync_at", 0),
                     "consecutive_failures": int(state.get("consecutive_failures", 0) or 0) + 1,
                     "total_synced_events": cumulative_synced,
-                    "lifetime_rollup_synced": rollup_synced
+                    "lifetime_rollup_synced": rollup_synced,
+                    "last_synced_rollup_tokens": last_synced_rollup,
+                    "last_synced_rollup_orig": last_synced_rollup_orig,
+                    "last_synced_rollup_usd": last_synced_rollup_usd,
                 }
                 cls.save_state(fail_state)
                 return {
@@ -267,8 +277,6 @@ class TelemetrySync:
             page_limit = 2000
             max_pages = 25
             batch_size = min(max(1, int(batch_size or 50)), 200)
-            last_synced_rollup = int(state.get("last_synced_rollup_tokens", 0) or 0)
-            current_rollup_tokens = last_synced_rollup
             for page_idx in range(max_pages):
                 try:
                     with closing(sqlite3.connect(db_path, timeout=5.0)) as conn:
@@ -279,20 +287,37 @@ class TelemetrySync:
                         if page_idx == 0:
                             try:
                                 life_row = cur.execute("SELECT * FROM lifetime_aggregates WHERE id = 1").fetchone()
-                                if life_row and int(life_row["total_saved_tokens"] or 0) > last_synced_rollup:
-                                    current_rollup_tokens = int(life_row["total_saved_tokens"])
-                                    delta_orig = max(0, int(life_row["total_original_tokens"]) - int(state.get("last_synced_rollup_orig", 0) or 0))
-                                    delta_saved = current_rollup_tokens - last_synced_rollup
-                                    synthetic_events.append({
-                                        "event_type": "ROLLUP_LIFETIME",
-                                        "original_tokens": delta_orig or int(life_row["total_original_tokens"]),
-                                        "saved_tokens": delta_saved,
-                                        "usd_saved": max(0.0, float(life_row["total_usd_saved"]) - float(state.get("last_synced_rollup_usd", 0.0) or 0.0)),
-                                        "model": "aggregate",
-                                        "timestamp": int(time.time()),
-                                        # Rolled-up historical mass of mixed provenance: conservatively estimated.
-                                        "measurement": "estimated"
-                                    })
+                                if life_row:
+                                    life_dict = dict(life_row)
+                                    syncable_orig = max(0, int(life_dict.get("total_original_tokens") or 0) - int(life_dict.get("pruned_synced_orig_tokens") or 0))
+                                    syncable_saved = max(0, int(life_dict.get("total_saved_tokens") or 0) - int(life_dict.get("pruned_synced_saved_tokens") or 0))
+                                    syncable_usd = max(0.0, float(life_dict.get("total_usd_saved") or 0.0) - float(life_dict.get("pruned_synced_usd") or 0.0))
+                                    # Upgrade migration from pre-watermark sync_state.json: do not re-emit already synced rollup
+                                    if rollup_synced and not has_rollup_watermark:
+                                        last_synced_rollup = syncable_saved
+                                        last_synced_rollup_orig = syncable_orig
+                                        last_synced_rollup_usd = syncable_usd
+                                        current_rollup_tokens = syncable_saved
+                                        current_rollup_orig = syncable_orig
+                                        current_rollup_usd = syncable_usd
+                                        has_rollup_watermark = True
+                                    elif syncable_saved > last_synced_rollup:
+                                        current_rollup_tokens = syncable_saved
+                                        current_rollup_orig = syncable_orig
+                                        current_rollup_usd = syncable_usd
+                                        delta_orig = max(0, syncable_orig - last_synced_rollup_orig)
+                                        delta_saved = syncable_saved - last_synced_rollup
+                                        delta_usd = max(0.0, syncable_usd - last_synced_rollup_usd)
+                                        synthetic_events.append({
+                                            "event_type": "ROLLUP_LIFETIME",
+                                            "original_tokens": delta_orig or delta_saved,
+                                            "saved_tokens": delta_saved,
+                                            "usd_saved": delta_usd,
+                                            "model": "aggregate",
+                                            "timestamp": int(time.time()),
+                                            # Rolled-up historical mass of mixed provenance: conservatively estimated.
+                                            "measurement": "estimated"
+                                        })
                             except Exception:
                                 pass
 
@@ -441,6 +466,8 @@ class TelemetrySync:
                                     if ev_payload and ev_payload.get("event_type") == "ROLLUP_LIFETIME":
                                         rollup_synced = True
                                         last_synced_rollup = current_rollup_tokens
+                                        last_synced_rollup_orig = current_rollup_orig
+                                        last_synced_rollup_usd = current_rollup_usd
                                 cls.save_state({
                                     "last_synced_event_id": current_last_id,
                                     "last_synced_at": int(time.time()),
@@ -450,6 +477,8 @@ class TelemetrySync:
                                     "total_synced_events": cumulative_synced,
                                     "lifetime_rollup_synced": rollup_synced,
                                     "last_synced_rollup_tokens": last_synced_rollup,
+                                    "last_synced_rollup_orig": last_synced_rollup_orig,
+                                    "last_synced_rollup_usd": last_synced_rollup_usd,
                                 })
                             else:
                                 return _record_failure(f"Server returned HTTP {resp.status}")

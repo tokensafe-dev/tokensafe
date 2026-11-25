@@ -150,22 +150,32 @@ class MetricsTracker:
                     user_ver = int(uv_row[0]) if uv_row else 0
                 except Exception:
                     user_ver = 0
-                if user_ver >= 3:
+                if user_ver >= 4:
                     _INITIALIZED_METRICS_DBS.add(self.db_path)
                     return
                 if user_ver >= 2:
                     tbl = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events';").fetchone()
                     if tbl is not None:
-                        cursor.execute(
-                            "UPDATE events SET measurement = 'estimated' "
-                            "WHERE measurement = 'measured' AND event_type IN "
-                            "('GRAPH_TOPOLOGY', 'HISTORY_FOLD', 'PROMPT', 'ROLLUP_LIFETIME', "
-                            "'COMMAND_FILTER', 'LOOP_GUARD', 'SCOPED_SEARCH', 'DIR_LIST', "
-                            "'GUARD_SECRET', 'GUARD_DESTRUCTIVE', 'GUARD_TLS_VERIFY_BYPASS', "
-                            "'GUARD_JUNK_READ', 'GUARD_INFINITE', 'GUARD_RAW_CODE_SEARCH');"
-                        )
+                        if user_ver < 3:
+                            cursor.execute(
+                                "UPDATE events SET measurement = 'estimated' "
+                                "WHERE measurement = 'measured' AND event_type IN "
+                                "('GRAPH_TOPOLOGY', 'HISTORY_FOLD', 'PROMPT', 'ROLLUP_LIFETIME', "
+                                "'COMMAND_FILTER', 'LOOP_GUARD', 'SCOPED_SEARCH', 'DIR_LIST', "
+                                "'GUARD_SECRET', 'GUARD_DESTRUCTIVE', 'GUARD_TLS_VERIFY_BYPASS', "
+                                "'GUARD_JUNK_READ', 'GUARD_INFINITE', 'GUARD_RAW_CODE_SEARCH');"
+                            )
+                        for alter_sql in (
+                            "ALTER TABLE lifetime_aggregates ADD COLUMN pruned_synced_orig_tokens INTEGER NOT NULL DEFAULT 0;",
+                            "ALTER TABLE lifetime_aggregates ADD COLUMN pruned_synced_saved_tokens INTEGER NOT NULL DEFAULT 0;",
+                            "ALTER TABLE lifetime_aggregates ADD COLUMN pruned_synced_usd REAL NOT NULL DEFAULT 0.0;",
+                        ):
+                            try:
+                                cursor.execute(alter_sql)
+                            except sqlite3.OperationalError:
+                                pass
                         try:
-                            cursor.execute("PRAGMA user_version = 3;")
+                            cursor.execute("PRAGMA user_version = 4;")
                         except sqlite3.Error:
                             pass
                         _INITIALIZED_METRICS_DBS.add(self.db_path)
@@ -226,9 +236,21 @@ class MetricsTracker:
                         total_optimized_tokens INTEGER DEFAULT 0,
                         total_saved_tokens INTEGER DEFAULT 0,
                         total_usd_saved REAL DEFAULT 0.0,
-                        breakdown TEXT DEFAULT '{}'
+                        breakdown TEXT DEFAULT '{}',
+                        pruned_synced_orig_tokens INTEGER NOT NULL DEFAULT 0,
+                        pruned_synced_saved_tokens INTEGER NOT NULL DEFAULT 0,
+                        pruned_synced_usd REAL NOT NULL DEFAULT 0.0
                     )
                 """)
+                for alter_sql in (
+                    "ALTER TABLE lifetime_aggregates ADD COLUMN pruned_synced_orig_tokens INTEGER NOT NULL DEFAULT 0;",
+                    "ALTER TABLE lifetime_aggregates ADD COLUMN pruned_synced_saved_tokens INTEGER NOT NULL DEFAULT 0;",
+                    "ALTER TABLE lifetime_aggregates ADD COLUMN pruned_synced_usd REAL NOT NULL DEFAULT 0.0;",
+                ):
+                    try:
+                        cursor.execute(alter_sql)
+                    except sqlite3.OperationalError:
+                        pass
                 cursor.execute("""
                     INSERT OR IGNORE INTO lifetime_aggregates (
                         id, total_events, total_original_tokens, total_optimized_tokens,
@@ -257,7 +279,7 @@ class MetricsTracker:
                         GROUP BY substr(timestamp, 1, 10)
                     """, (cutoff_30,))
                 try:
-                    cursor.execute("PRAGMA user_version = 3;")
+                    cursor.execute("PRAGMA user_version = 4;")
                 except sqlite3.Error:
                     pass
             _INITIALIZED_METRICS_DBS.add(self.db_path)
@@ -883,6 +905,33 @@ class MetricsTracker:
                     current_breakdown[ev_type]["saved"] += vals["saved"]
                     current_breakdown[ev_type]["estimated_saved"] += vals["estimated_saved"]
 
+                # Track how much of the pruned mass was already synced individually to Cloud
+                last_synced_id = 0
+                sync_state_path = os.path.join(os.path.dirname(self.db_path), "sync_state.json")
+                if os.path.exists(sync_state_path):
+                    try:
+                        with open(sync_state_path, "r", encoding="utf-8") as sf:
+                            sdata = json.load(sf)
+                        if isinstance(sdata, dict):
+                            last_synced_id = int(sdata.get("last_synced_event_id", 0) or 0)
+                    except Exception:
+                        last_synced_id = 0
+                synced_orig, synced_saved, synced_usd = 0, 0, 0.0
+                if last_synced_id > 0:
+                    cursor.execute(f"""
+                        SELECT
+                            COALESCE(SUM(original_tokens), 0),
+                            COALESCE(SUM(saved_tokens), 0),
+                            COALESCE(SUM(est_usd_saved), 0.0)
+                        FROM events
+                        WHERE ({combined_where}) AND id <= ?
+                    """, [*params, last_synced_id])
+                    s_row = cursor.fetchone()
+                    if s_row:
+                        synced_orig = int(s_row[0] or 0)
+                        synced_saved = int(s_row[1] or 0)
+                        synced_usd = float(s_row[2] or 0.0)
+
                 # 4. Update lifetime_aggregates
                 cursor.execute("""
                     UPDATE lifetime_aggregates SET
@@ -891,12 +940,16 @@ class MetricsTracker:
                         total_optimized_tokens = total_optimized_tokens + ?,
                         total_saved_tokens = total_saved_tokens + ?,
                         total_usd_saved = total_usd_saved + ?,
-                        breakdown = ?
+                        breakdown = ?,
+                        pruned_synced_orig_tokens = COALESCE(pruned_synced_orig_tokens, 0) + ?,
+                        pruned_synced_saved_tokens = COALESCE(pruned_synced_saved_tokens, 0) + ?,
+                        pruned_synced_usd = COALESCE(pruned_synced_usd, 0.0) + ?
                     WHERE id = 1
                 """, (
                     agg_row["cnt"], agg_row["orig"], agg_row["opt"],
                     agg_row["saved"], agg_row["usd"],
-                    json.dumps(current_breakdown, ensure_ascii=False)
+                    json.dumps(current_breakdown, ensure_ascii=False),
+                    synced_orig, synced_saved, synced_usd,
                 ))
 
                 # 5. Delete pruned events
@@ -944,7 +997,10 @@ class MetricsTracker:
                     total_optimized_tokens = 0,
                     total_saved_tokens = 0,
                     total_usd_saved = 0.0,
-                    breakdown = '{}'
+                    breakdown = '{}',
+                    pruned_synced_orig_tokens = 0,
+                    pruned_synced_saved_tokens = 0,
+                    pruned_synced_usd = 0.0
                 WHERE id = 1
             """)
         self.vacuum()
