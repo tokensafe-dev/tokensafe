@@ -133,7 +133,9 @@ def _run_rg_query(
     if not rg_bin:
         return None
 
-    cmd = [rg_bin, "--no-heading", "--line-number", "--color=never", "--max-count", str(max_results)]
+    # --with-filename is mandatory: for a single-file target ripgrep omits the
+    # path prefix, so every output line would be unparseable below (silent 0 hits).
+    cmd = [rg_bin, "--no-heading", "--with-filename", "--line-number", "--color=never", "--max-count", str(max_results)]
     if not is_regex:
         cmd.append("--fixed-strings")
     if not case_sensitive:
@@ -184,6 +186,18 @@ def _run_rg_query(
         return None
 
 
+def _iter_search_files(search_root: str, cwd: str):
+    """Yields (full_path, rel_path) for an explicit file target or a directory tree."""
+    if os.path.isfile(search_root):
+        yield search_root, os.path.relpath(search_root, cwd)
+        return
+    for root, dirs, files in os.walk(search_root):
+        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS and not d.startswith(".")]
+        for f in files:
+            full_path = os.path.join(root, f)
+            yield full_path, os.path.relpath(full_path, cwd)
+
+
 def _run_python_text_search(
     pattern: str,
     cwd: str,
@@ -209,41 +223,41 @@ def _run_python_text_search(
 
     matches = []
     target_lower = pattern if case_sensitive else pattern.lower()
+    explicit_file = os.path.isfile(search_root)
 
-    for root, dirs, files in os.walk(search_root):
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS and not d.startswith(".")]
-        for f in files:
-            ext = os.path.splitext(f)[1].lower()
+    for full_path, rel_p in _iter_search_files(search_root, cwd):
+        # An explicitly named file is searched as-is: extension, scope, and glob
+        # filters only make sense when walking a directory tree.
+        if not explicit_file:
+            ext = os.path.splitext(full_path)[1].lower()
             if ext in IGNORED_EXTENSIONS:
                 continue
             if scope == "code" and ext not in CODE_EXTENSIONS:
                 continue
-            full_path = os.path.join(root, f)
-            rel_p = os.path.relpath(full_path, cwd)
-            if glob_filter and not (fnmatch.fnmatch(f, glob_filter) or fnmatch.fnmatch(rel_p, glob_filter)):
+            if glob_filter and not (fnmatch.fnmatch(os.path.basename(full_path), glob_filter) or fnmatch.fnmatch(rel_p, glob_filter)):
                 continue
 
-            try:
-                with open(full_path, "r", encoding="utf-8", errors="replace") as fp:
-                    for line_idx, line in enumerate(fp):
-                        hit = False
-                        if regex:
-                            hit = bool(regex.search(line))
-                        elif case_sensitive:
-                            hit = pattern in line
-                        else:
-                            hit = target_lower in line.lower()
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as fp:
+                for line_idx, line in enumerate(fp):
+                    hit = False
+                    if regex:
+                        hit = bool(regex.search(line))
+                    elif case_sensitive:
+                        hit = pattern in line
+                    else:
+                        hit = target_lower in line.lower()
 
-                        if hit:
-                            matches.append({
-                                "file": rel_p,
-                                "line": line_idx + 1,
-                                "content": line.strip()[:180]
-                            })
-                            if len(matches) >= max_results:
-                                return matches
-            except Exception:
-                continue
+                    if hit:
+                        matches.append({
+                            "file": rel_p,
+                            "line": line_idx + 1,
+                            "content": line.strip()[:180]
+                        })
+                        if len(matches) >= max_results:
+                            return matches
+        except Exception:
+            continue
 
     return matches
 
@@ -254,15 +268,18 @@ def _run_glob_search(pattern: str, cwd: str, path_filter: Optional[str] = None, 
     if not os.path.exists(search_root):
         return []
 
+    if os.path.isfile(search_root):
+        rel_p = os.path.relpath(search_root, cwd)
+        if fnmatch.fnmatch(rel_p, pattern) or fnmatch.fnmatch(os.path.basename(search_root), pattern):
+            return [rel_p]
+        return []
+
     results = []
-    for root, dirs, files in os.walk(search_root):
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS and not d.startswith(".")]
-        for f in files:
-            rel_p = os.path.relpath(os.path.join(root, f), cwd)
-            if fnmatch.fnmatch(rel_p, pattern) or fnmatch.fnmatch(f, pattern):
-                results.append(rel_p)
-                if len(results) >= max_results:
-                    return results
+    for full_path, rel_p in _iter_search_files(search_root, cwd):
+        if fnmatch.fnmatch(rel_p, pattern) or fnmatch.fnmatch(os.path.basename(full_path), pattern):
+            results.append(rel_p)
+            if len(results) >= max_results:
+                return results
     return results
 
 
@@ -274,17 +291,14 @@ def _run_fuzzy_search(pattern: str, cwd: str, path_filter: Optional[str] = None,
 
     pat_lower = pattern.lower().replace(" ", "")
     results = []
-    for root, dirs, files in os.walk(search_root):
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS and not d.startswith(".")]
-        for f in files:
-            rel_p = os.path.relpath(os.path.join(root, f), cwd)
-            name_lower = rel_p.lower()
-            # Subsequence match
-            it = iter(name_lower)
-            if all(ch in it for ch in pat_lower):
-                results.append(rel_p)
-                if len(results) >= max_results:
-                    return results
+    for _, rel_p in _iter_search_files(search_root, cwd):
+        name_lower = rel_p.lower()
+        # Subsequence match
+        it = iter(name_lower)
+        if all(ch in it for ch in pat_lower):
+            results.append(rel_p)
+            if len(results) >= max_results:
+                return results
     return results
 
 

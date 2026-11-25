@@ -20,7 +20,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.batch_editor import execute_batch_edits
-from src.batch_search import execute_batch_search
+from src.batch_search import execute_batch_search, _run_python_text_search
 from src.snapshot import build_workspace_snapshot
 from src.mcp_server import _cap_mcp_output_size
 from src.transcript_analyzer import analyze_transcript, compare_transcripts, render_transcripts_report
@@ -263,6 +263,43 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertEqual(res["query_count"], 4)
         self.assertIn("handleRequest", res["summary_md"])
         self.assertIn("helper", res["summary_md"])
+
+    def test_batch_search_file_scoped_path(self):
+        """Regression: an explicit file in 'path' must be searched, not walked as a directory.
+
+        A directory walk over a file path yields zero hits (silently), and rg without
+        --with-filename emits no path prefix, which the parser then drops.
+        """
+        sub = os.path.join(self.tmp_dir, "src")
+        os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, "service.ts"), "w", encoding="utf-8") as f:
+            f.write("export function handleRequest() {}\nexport function other() {}\n")
+        with open(os.path.join(sub, "decoy.ts"), "w", encoding="utf-8") as f:
+            f.write("export function handleRequest() {}\n")
+
+        res = execute_batch_search(queries=[
+            {"pattern": "handleRequest", "type": "text", "path": "src/service.ts"},
+            {"pattern": "*.ts", "type": "glob", "path": "src/service.ts"},
+            {"pattern": "service", "type": "fuzzy", "path": "src/service.ts"},
+        ], cwd=self.tmp_dir)
+
+        self.assertTrue(res["success"])
+        text_q, glob_q, fuzzy_q = res["results"]
+        self.assertEqual(text_q["count"], 1)
+        self.assertEqual(text_q["matches"][0]["file"], os.path.join("src", "service.ts"))
+        self.assertEqual(glob_q["matches"], [os.path.join("src", "service.ts")])
+        self.assertEqual(fuzzy_q["matches"], [os.path.join("src", "service.ts")])
+
+    def test_python_text_search_file_scoped(self):
+        """Regression: the pure-Python fallback (used when rg is absent) searches a single file."""
+        target = os.path.join(self.tmp_dir, "single.py")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("def target_fn():\n    return 1\n")
+
+        matches = _run_python_text_search("target_fn", cwd=self.tmp_dir, path_filter="single.py")
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["file"], "single.py")
+        self.assertEqual(matches[0]["line"], 1)
 
     def test_workspace_snapshot(self):
         """Tests workspace snapshot generation for project directory."""

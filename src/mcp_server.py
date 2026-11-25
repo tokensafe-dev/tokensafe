@@ -42,7 +42,7 @@ from src.paths import get_active_workspace, is_plugin_or_system_dir
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
-    "version": "4.5.5"
+    "version": "4.5.6"
 }
 
 # MCP client attribution: the initialize handshake carries clientInfo, which
@@ -2685,6 +2685,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                     details={"cmd": str(verify or "")[:100], "reason": str(res.get("error") or "")}
                 )
                 return _fallback_error("apply_edits", str(res.get("error") or "verify command blocked"))
+            applied_files = res.get("applied_files") or []
             lines = []
             if res.get("success"):
                 action_desc = "Validated" if dry_run else "Applied"
@@ -2713,6 +2714,31 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                     lines.append(f"Error: {v['error']}")
 
             out_msg = {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            if applied_files:
+                # Dashboards must see batch edits: without this the batch editor is
+                # invisible in metrics while every single-file edit is counted.
+                payload_text = "".join(
+                    str(h.get("target") or "") + str(h.get("replacement") or "")
+                    for e in (edits or []) if isinstance(e, dict)
+                    for h in (e.get("hunks") or []) if isinstance(h, dict)
+                ) + "".join(
+                    str(e.get("create") or "") for e in (edits or []) if isinstance(e, dict)
+                )
+                edit_tokens = count_tokens(payload_text)
+                # Same convention as SCOPED_SEARCH: serial per-file round-trips cost
+                # roughly an order of magnitude more than the consolidated payload.
+                tracker.record_event(
+                    session_id=_mcp_session_id(),
+                    event_type="BATCH_EDIT",
+                    original_tokens=max(1500, edit_tokens * 8),
+                    optimized_tokens=edit_tokens,
+                    details={
+                        "files": len(applied_files),
+                        "hunks": sum(int(f.get("hunks") or 0) for f in applied_files),
+                        "dry_run": dry_run,
+                        "verify": bool(verify),
+                    },
+                )
             if not res.get("success"):
                 out_msg["isError"] = True
             return out_msg
