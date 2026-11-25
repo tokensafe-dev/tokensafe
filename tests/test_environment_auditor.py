@@ -225,9 +225,13 @@ class TestAuditorWorkspaceAndRules(unittest.TestCase):
                 fix_res = EnvironmentAuditor.auto_fix(workspace_root=tmp)
                 self.assertTrue(len(fix_res["fixed"]) >= 2)
                 # Verify config.toml is valid TOML now & .cursorrules is lean pointer
-                import tomllib
-                parsed = tomllib.loads(open(codex_toml, "r", encoding="utf-8").read())
-                self.assertIn("tokensafe", parsed["mcp_servers"])
+                try:
+                    import tomllib
+                except ImportError:
+                    tomllib = None
+                if tomllib is not None:
+                    parsed = tomllib.loads(open(codex_toml, "r", encoding="utf-8").read())
+                    self.assertIn("tokensafe", parsed["mcp_servers"])
                 ghost_after = EnvironmentAuditor.audit_ghost_tokens(tmp)
                 self.assertFalse(ghost_after["has_ghost_tokens"])
 

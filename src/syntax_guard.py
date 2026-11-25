@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from typing import Dict
 
-_NODE_TIMEOUT_SEC = 3.0
+_NODE_TIMEOUT_SEC = 10.0
 
 _EXT_STRATEGY = {
     ".py": "python-ast",

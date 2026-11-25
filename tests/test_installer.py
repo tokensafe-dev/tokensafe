@@ -375,7 +375,10 @@ class TestAgentsPluginsConfig(unittest.TestCase):
             self.assertIn(["/usr/local/bin/tokensafe", "version", "--check"], calls)
 
     def test_codex_toml_reinstall_cleans_orphans_and_stays_valid(self):
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            tomllib = None
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_config = os.path.join(tmpdir, "config.toml")
             with open(fake_config, "w", encoding="utf-8") as f:
@@ -402,10 +405,11 @@ class TestAgentsPluginsConfig(unittest.TestCase):
                 raw = open(fake_config, "r", encoding="utf-8").read()
                 self.assertEqual(raw.count("[mcp_servers.tokensafe]"), 1)
                 self.assertNotIn('["/old/', raw)
-                parsed = tomllib.loads(raw)
-                self.assertIn("tokensafe", parsed["mcp_servers"])
-                self.assertIn("context7", parsed["mcp_servers"])
-                self.assertTrue(parsed["features"]["multi_agent"])
+                if tomllib is not None:
+                    parsed = tomllib.loads(raw)
+                    self.assertIn("tokensafe", parsed["mcp_servers"])
+                    self.assertIn("context7", parsed["mcp_servers"])
+                    self.assertTrue(parsed["features"]["multi_agent"])
             finally:
                 AGENTS_REGISTRY["codex"] = orig_entry
 
