@@ -46,9 +46,23 @@ jobs:
           python3 -m py_compile bin/tokensafe
 
       - name: Publish to npm
-        run: npm publish --access public --no-git-tag-version
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set +e
+          OUTPUT=$(npm publish --access public --no-git-tag-version 2>&1)
+          STATUS=$?
+          echo "$OUTPUT"
+          if [ $STATUS -eq 0 ]; then
+            exit 0
+          fi
+          # Idempotent reruns: a version already published (or staged by npm's
+          # validation queue) must not fail a tag-triggered release.
+          if echo "$OUTPUT" | grep -qE 'E409|EPUBLISHCONFLICT|Cannot publish over'; then
+            echo "::warning::Version already published or staged on npm — treating as idempotent success."
+            exit 0
+          fi
+          exit $STATUS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
