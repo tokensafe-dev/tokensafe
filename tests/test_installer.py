@@ -374,5 +374,71 @@ class TestAgentsPluginsConfig(unittest.TestCase):
             self.assertFalse(os.path.exists(cache_file))
             self.assertIn(["/usr/local/bin/tokensafe", "version", "--check"], calls)
 
+    def test_codex_toml_reinstall_cleans_orphans_and_stays_valid(self):
+        import tomllib
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_config = os.path.join(tmpdir, "config.toml")
+            with open(fake_config, "w", encoding="utf-8") as f:
+                f.write(
+                    '[mcp_servers.context7]\nurl = "https://x"\n\n'
+                    '[mcp_servers.tokensafe]\n'
+                    'command = "/old/python3"\n'
+                    'args = ["/old/tokensafe/src/mcp_server.py"]\n\n'
+                    '["/old/tokensafe/src/mcp_server.py"]\n\n'
+                    '["/other/mcp_server.py"]\n\n'
+                    '[features]\nmulti_agent = true\n'
+                )
+            orig_entry = AGENTS_REGISTRY["codex"]
+            AGENTS_REGISTRY["codex"] = {
+                "name": "OpenAI Codex",
+                "type": "codex_toml",
+                "config_path": fake_config,
+                "detect_path": tmpdir,
+            }
+            try:
+                ok1, _ = AgentInstaller.install_mcp_config("codex")
+                ok2, _ = AgentInstaller.install_mcp_config("codex")
+                self.assertTrue(ok1 and ok2)
+                raw = open(fake_config, "r", encoding="utf-8").read()
+                self.assertEqual(raw.count("[mcp_servers.tokensafe]"), 1)
+                self.assertNotIn('["/old/', raw)
+                parsed = tomllib.loads(raw)
+                self.assertIn("tokensafe", parsed["mcp_servers"])
+                self.assertIn("context7", parsed["mcp_servers"])
+                self.assertTrue(parsed["features"]["multi_agent"])
+            finally:
+                AGENTS_REGISTRY["codex"] = orig_entry
+
+    def test_self_update_refreshes_agents_via_fresh_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.join(tmpdir, "data")
+            os.makedirs(data_dir)
+            fake_bin = os.path.join(tmpdir, "npm_bin", "tokensafe")
+            fake_npm = os.path.join(tmpdir, "npm_bin", "npm")
+            os.makedirs(os.path.dirname(fake_bin))
+            open(fake_bin, "w").write("#!/bin/sh\n")
+            os.chmod(fake_bin, 0o755)
+            open(fake_npm, "w").write("#!/bin/sh\n")
+            os.chmod(fake_npm, 0o755)
+
+            calls = []
+
+            def fake_run(cmd, *args, **kwargs):
+                calls.append(cmd)
+                if "list" in cmd:
+                    return MagicMock(returncode=0, stdout="tokensafe@4.5.3\n", stderr="")
+                return MagicMock(returncode=0, stdout="Synchronized 3 installed/configured agent environment(s).\n", stderr="")
+
+            with patch.dict(os.environ, {"TOKENSAFE_DATA_DIR": data_dir}), \
+                 patch.object(AgentInstaller, "_find_npm", return_value=fake_npm), \
+                 patch.object(AgentInstaller, "_find_npm_candidates", return_value=[fake_npm]), \
+                 patch.object(AgentInstaller, "detect_available_agents", return_value={"antigravity": {"name": "Google Antigravity", "installed": True}}), \
+                 patch.object(AgentInstaller, "restart_mcp_daemons", return_value=0), \
+                 patch.object(AgentInstaller, "_ensure_proxy_default"), \
+                 patch("src.installer.subprocess.run", side_effect=fake_run):
+                AgentInstaller.self_update()
+
+            self.assertIn([fake_bin, "install", "--refresh"], calls)
+
 if __name__ == "__main__":
     unittest.main()

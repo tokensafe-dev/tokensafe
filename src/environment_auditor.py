@@ -9,7 +9,9 @@ Also audits always-on rule files against the Antigravity limits (rules.md):
 import os
 import re
 import json
-from typing import Dict, List, Any, Optional
+import hashlib
+import shutil
+from typing import Dict, List, Any, Optional, Tuple
 
 from src.tokenizer import count_tokens
 
@@ -27,6 +29,34 @@ RULE_FILE_LIMIT_BYTES = 24000   # per rule file, after @[label](path) expansion
 RULES_BUDGET_TOKENS = 20000     # shared always-on/global rules budget
 
 _RULE_INCLUDE_RE = re.compile(r"@\[[^\]]*\]\(([^)]+)\)")
+_SUBTABLE_RE = re.compile(r'^\s*\[mcp_servers\.(?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_-]+))(?:\.|\])')
+
+
+def _parse_codex_toml_servers(raw_bytes: bytes) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Parses [mcp_servers.*] top-level server entries from Codex config.toml.
+    Returns (servers_dict, parse_error). Never treats nested subtables like
+    .env or .http_headers as separate MCP servers."""
+    text = raw_bytes.decode("utf-8", errors="replace")
+    parse_err: Optional[str] = None
+    try:
+        import tomllib
+        try:
+            loaded_toml = tomllib.loads(text)
+            mcp_tbl = loaded_toml.get("mcp_servers")
+            return (dict(mcp_tbl) if isinstance(mcp_tbl, dict) else {}), None
+        except Exception as exc:
+            parse_err = str(exc)
+    except ImportError:
+        pass
+
+    servers: Dict[str, Any] = {}
+    for line in text.splitlines():
+        m = _SUBTABLE_RE.match(line)
+        if m:
+            s_name = next((g for g in m.groups() if g), "").strip()
+            if s_name:
+                servers.setdefault(s_name, {})
+    return servers, parse_err
 
 
 class EnvironmentAuditor:
@@ -113,17 +143,9 @@ class EnvironmentAuditor:
                 try:
                     with open(p, "rb") as f:
                         raw_bytes = f.read()
-                    try:
-                        import tomllib
-                        loaded_toml = tomllib.loads(raw_bytes.decode("utf-8", errors="replace"))
-                        if isinstance(loaded_toml.get("mcp_servers"), dict):
-                            configured.update(loaded_toml["mcp_servers"])
-                    except Exception:
-                        text = raw_bytes.decode("utf-8", errors="replace")
-                        for m in re.finditer(r"^\s*\[mcp_servers\.([^\]]+)\]", text, re.MULTILINE):
-                            s_name = m.group(1).strip().strip('"\'')
-                            if s_name:
-                                configured.setdefault(s_name, {})
+                    parsed_toml, _ = _parse_codex_toml_servers(raw_bytes)
+                    if parsed_toml:
+                        configured.update(parsed_toml)
                 except Exception:
                     continue
                 continue
@@ -280,11 +302,13 @@ class EnvironmentAuditor:
 
         # 2. Count skills (follow symlinked plugins/skills with cycle protection; skip disabled plugins)
         skills_count = 0
+        skills_breakdown: Dict[str, int] = {}
         disabled_plugins = cls._get_disabled_plugin_names()
         plugins_dir = os.path.abspath(cls.get_plugins_dir())
         seen_skill_dirs = set()
         for sdir in cls.get_skills_dirs(workspace_root):
             is_plugins_root = os.path.abspath(sdir) == plugins_dir
+            dir_skills = 0
             for root, dirs, files in os.walk(sdir, followlinks=True):
                 real_root = os.path.realpath(root)
                 if real_root in seen_skill_dirs:
@@ -297,6 +321,32 @@ class EnvironmentAuditor:
                     dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "__pycache__", ".venv", "venv") and not d.endswith(".disabled")]
                 if "SKILL.md" in files:
                     skills_count += 1
+                    dir_skills += 1
+            if dir_skills > 0:
+                skills_breakdown[sdir] = dir_skills
+
+        # Detect config & schema hygiene issues fixable via `tokensafe doctor --fix`
+        config_issues: List[Dict[str, str]] = []
+        for p in cls.get_config_paths():
+            if p.endswith(".toml") and os.path.isfile(p):
+                try:
+                    with open(p, "rb") as f:
+                        _, parse_err = _parse_codex_toml_servers(f.read())
+                    if parse_err:
+                        config_issues.append({
+                            "type": "CORRUPTED_CODEX_TOML",
+                            "path": p,
+                            "description": f"Invalid TOML syntax in {os.path.basename(p)} ({parse_err[:80]})"
+                        })
+                except Exception:
+                    pass
+        if os.path.isdir(schemas_dir):
+            if os.path.isdir(os.path.join(schemas_dir, "tokensafe_tokensafe")) and os.path.isdir(os.path.join(schemas_dir, "tokensafe_tokensafe-mcp")):
+                config_issues.append({
+                    "type": "STALE_MCP_SCHEMA",
+                    "path": os.path.join(schemas_dir, "tokensafe_tokensafe-mcp"),
+                    "description": "Legacy schema directory tokensafe_tokensafe-mcp duplicates tokensafe_tokensafe"
+                })
 
         # 3. Rule files (rules.md limits)
         rules = cls.audit_rules(workspace_root)
@@ -333,11 +383,13 @@ class EnvironmentAuditor:
             "total_active_servers": len([s for s in servers.values() if s["active"]]),
             "total_tools": total_mcp_tools,
             "total_skills": skills_count,
+            "skills_breakdown": skills_breakdown,
             "mcp_tokens_per_turn": total_mcp_tokens,
             "skills_tokens_per_turn": total_skills_tokens,
             "total_static_tokens_per_turn": total_static_tokens,
             "bloated_servers": bloated_servers,
             "has_critical_bloat": len(bloated_servers) > 0,
+            "config_issues": config_issues,
             "rules": rules,
             "ghost_tokens": ghost_tokens,
             "treesitter": treesitter_info,
@@ -571,9 +623,131 @@ class EnvironmentAuditor:
         }
 
     @classmethod
+    def auto_fix(cls, workspace_root: Optional[str] = None) -> Dict[str, Any]:
+        """Automatically fixes safe, recoverable context/config issues found by `doctor`:
+        1. Repairs corrupted [mcp_servers.tokensafe] / orphaned lines in Codex config.toml.
+        2. Removes stale duplicate tokensafe_tokensafe-mcp schema directory.
+        3. Backs up & consolidates redundant cross-IDE rule files into AGENTS.md pointer stubs
+           and strips large inactive comment blocks from rule files.
+        4. Cleans conflicting orphan competitor hooks/rules."""
+        root = workspace_root or os.getcwd()
+        fixed: List[str] = []
+        skipped: List[str] = []
+
+        try:
+            from src.paths import resolve_data_dir
+            backup_base = resolve_data_dir()
+        except Exception:
+            backup_base = os.path.join(os.path.expanduser("~"), ".tokensafe", "data")
+        ws_hash = hashlib.sha256(os.path.abspath(root).encode("utf-8")).hexdigest()[:12]
+        backup_dir = os.path.join(backup_base, "backups", ws_hash)
+
+        # 1. Repair Codex config.toml orphaned lines / corrupted [mcp_servers.tokensafe]
+        for p in cls.get_config_paths():
+            if not (p.endswith(".toml") and os.path.isfile(p)):
+                continue
+            try:
+                with open(p, "rb") as fb:
+                    raw_bytes = fb.read()
+                _, parse_err = _parse_codex_toml_servers(raw_bytes)
+                orig_text = raw_bytes.decode("utf-8", errors="replace")
+                from src.installer import AgentInstaller
+                if parse_err or AgentInstaller._CODEX_ORPHAN_LINE_RE.search(orig_text):
+                    shutil.copy2(p, f"{p}.backup")
+                    cleaned = AgentInstaller._clean_codex_orphans(orig_text)
+                    try:
+                        import tomllib
+                        tomllib.loads(cleaned)
+                        with open(p, "w", encoding="utf-8") as f:
+                            f.write(cleaned)
+                        fixed.append(f"Repaired TOML syntax/orphans in {p} (backup: {p}.backup)")
+                    except Exception as e2:
+                        skipped.append(f"Could not auto-repair {p} ({e2}); manual edit needed")
+            except Exception:
+                pass
+
+        # 2. Clean stale legacy tokensafe_tokensafe-mcp schema dir when tokensafe_tokensafe exists
+        schemas_dir = cls.get_mcp_schemas_dir()
+        if os.path.isdir(schemas_dir):
+            legacy_schema = os.path.join(schemas_dir, "tokensafe_tokensafe-mcp")
+            canonical_schema = os.path.join(schemas_dir, "tokensafe_tokensafe")
+            if os.path.isdir(legacy_schema) and os.path.isdir(canonical_schema):
+                try:
+                    shutil.rmtree(legacy_schema)
+                    fixed.append("Removed stale legacy MCP schema dir tokensafe_tokensafe-mcp")
+                except Exception as exc:
+                    skipped.append(f"Could not remove {legacy_schema}: {exc}")
+
+        # 3. Consolidate cross-IDE ghost rule duplicates & strip large dead HTML comment blocks
+        ghost = cls.audit_ghost_tokens(root)
+        agents_md_path = os.path.join(root, "AGENTS.md")
+        has_agents_md = os.path.isfile(agents_md_path)
+        pointer_stub = (
+            "# TokenSafe Project Rules (Pointer)\n\n"
+            "The canonical project rules live in AGENTS.md in this repository — "
+            "read that file now and follow it for this repo.\n"
+        )
+        dead_comment_re = re.compile(r"<!--[\s\S]*?-->")
+        for gf in ghost.get("ghost_files", []):
+            rel = gf.get("file", "")
+            gtype = gf.get("type", "")
+            abs_p = os.path.join(root, rel)
+            if not rel or not os.path.isfile(abs_p):
+                continue
+            if gtype == "DUPLICATE_CROSS_IDE_RULE" and has_agents_md and rel != "AGENTS.md":
+                try:
+                    os.makedirs(backup_dir, exist_ok=True)
+                    bak_target = os.path.join(backup_dir, rel.replace(os.sep, "__") + ".bak")
+                    shutil.copy2(abs_p, bak_target)
+                    with open(abs_p, "w", encoding="utf-8") as f:
+                        f.write(pointer_stub)
+                    fixed.append(f"Consolidated {rel} -> AGENTS.md pointer (-{gf.get('tokens', 0):,} tok/turn, backup: {bak_target})")
+                except Exception as exc:
+                    skipped.append(f"Failed to consolidate {rel}: {exc}")
+            elif gtype == "DEAD_COMMENT_BLOCKS":
+                try:
+                    with open(abs_p, "r", encoding="utf-8", errors="replace") as f:
+                        txt = f.read()
+                    # Preserve <!-- tokensafe --> markers; strip large non-tokensafe HTML comment blocks (>300 chars)
+                    def _strip_dead_comment(m: "re.Match[str]") -> str:
+                        block = m.group(0)
+                        if "<!-- tokensafe" in block or "<!-- /tokensafe" in block:
+                            return block
+                        return "" if len(block) > 300 else block
+
+                    new_txt = dead_comment_re.sub(_strip_dead_comment, txt)
+                    new_txt = re.sub(r"\n{3,}", "\n\n", new_txt).strip() + "\n"
+                    if new_txt != txt:
+                        os.makedirs(backup_dir, exist_ok=True)
+                        bak_target = os.path.join(backup_dir, rel.replace(os.sep, "__") + ".bak")
+                        shutil.copy2(abs_p, bak_target)
+                        with open(abs_p, "w", encoding="utf-8") as f:
+                            f.write(new_txt)
+                        fixed.append(f"Stripped inactive comment blocks in {rel} (backup: {bak_target})")
+                except Exception as exc:
+                    skipped.append(f"Failed to strip comments in {rel}: {exc}")
+
+        # 4. Cleanup conflicting competitor hooks/rules
+        try:
+            from src.competitors import CompetitorAuditor
+            for c in CompetitorAuditor.audit():
+                res = CompetitorAuditor.cleanup(c["id"])
+                if res.get("removed"):
+                    fixed.append(f"Cleaned conflicting {c['name']}: {', '.join(res['removed'])}")
+        except Exception:
+            pass
+
+        return {
+            "fixed": fixed,
+            "skipped": skipped,
+            "backup_dir": backup_dir if fixed else None,
+        }
+
+    @classmethod
     def format_cli_report(cls, workspace_root: Optional[str] = None) -> str:
         """Formats visual CLI report for tokensafe doctor."""
         report = cls.audit(workspace_root)
+        q_score: Dict[str, Any] = {}
         score_line = ""
         try:
             from src.quality_score import ContextQualityScore
@@ -607,6 +781,9 @@ class EnvironmentAuditor:
             lines.append(f"    {status}")
 
         lines.append(f"\n  \033[1mInstalled Skills:\033[0m {report['total_skills']} skills (~{report['skills_tokens_per_turn']:,} tokens/turn)")
+        if report["total_skills"] >= 15 and report.get("skills_breakdown"):
+            for sdir, cnt in sorted(report["skills_breakdown"].items(), key=lambda kv: -kv[1])[:4]:
+                lines.append(f"    \033[2m• {sdir}: {cnt} skill(s)\033[0m")
 
         rules = report.get("rules") or {}
         if rules.get("files"):
@@ -623,6 +800,12 @@ class EnvironmentAuditor:
                 missing_str = ", ".join(ts.get("missing", []))
                 lines.append(f"  \033[1mAST Engines (Tree-sitter):\033[0m \033[33m⚠ {ts['active']}/{ts['total']} active (missing: {missing_str})\033[0m")
 
+        config_issues = report.get("config_issues") or []
+        if config_issues:
+            lines.append("\n  \033[33m\033[1m⚠ Config / Schema Issues Detected:\033[0m")
+            for ci in config_issues:
+                lines.append(f"    • {ci['description']}")
+
         ghost = report.get("ghost_tokens") or {}
         if ghost.get("has_ghost_tokens"):
             lines.append(f"\n  \033[33m\033[1m👻 Ghost Tokens Detected:\033[0m ~{ghost['ghost_tokens_per_turn']:,} wasted tokens per turn")
@@ -632,12 +815,20 @@ class EnvironmentAuditor:
         else:
             lines.append("\n  \033[32m✔ No Ghost Tokens detected: Rule files and configs are lean.\033[0m")
 
-        if report["has_critical_bloat"]:
-            lines.append("\n  \033[33m\033[1mDiagnostic Recommendation:\033[0m")
+        has_auto_fixable = bool(ghost.get("has_ghost_tokens") or config_issues)
+        low_grade = q_score.get("grade") in ("C", "F")
+        if report["has_critical_bloat"] or has_auto_fixable or rules.get("budget_exceeded") or low_grade:
+            lines.append("\n  \033[33m\033[1mDiagnostic Recommendations:\033[0m")
             for b in report["bloated_servers"]:
                 lines.append(f"    ➜ Run: \033[36mtokensafe mcp disable {b['name']}\033[0m to save ~{b['est_tokens_per_turn']:,} tokens per turn!")
+            if has_auto_fixable:
+                lines.append("    ➜ Run: \033[36mtokensafe doctor --fix\033[0m to repair configs & consolidate ghost rule duplicates (with backups)")
+            if report["skills_tokens_per_turn"] >= 4000:
+                lines.append(f"    ➜ Disable unused skills/plugins (currently {report['total_skills']} skills ≈ ~{report['skills_tokens_per_turn']:,} tok/turn)")
+            if q_score.get("headroom_pct", 100.0) < 35.0:
+                lines.append("    ➜ Run: \033[36mtokensafe compact\033[0m or start a fresh session to restore context headroom")
         else:
-            lines.append("\n  \033[32m✔ Environment healthy: No critical MCP bloat detected.\033[0m")
+            lines.append("\n  \033[32m✔ Environment healthy: No critical context bloat detected.\033[0m")
 
         lines.append("")
         return "\n".join(lines)

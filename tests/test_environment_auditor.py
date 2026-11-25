@@ -190,5 +190,46 @@ class TestAuditorWorkspaceAndRules(unittest.TestCase):
             self.assertIn("github", servers)
             self.assertIn("prisma", servers)
 
+    def test_codex_toml_subtables_not_counted_as_servers_and_autofix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_toml = os.path.join(tmp, "config.toml")
+            with open(codex_toml, "w", encoding="utf-8") as f:
+                f.write(
+                    '[mcp_servers.context7]\nurl = "https://x"\n'
+                    '[mcp_servers.context7.http_headers]\nX-Key = "1"\n\n'
+                    '[mcp_servers.rea]\ncommand = "rea"\n'
+                    '[mcp_servers.rea.env]\nFOO = "BAR"\n\n'
+                    '[mcp_servers.tokensafe]\ncommand = "python3"\nargs = ["/old/mcp_server.py"]\n\n'
+                    '["/old/mcp_server.py"]\n'
+                )
+            with open(os.path.join(tmp, "AGENTS.md"), "w", encoding="utf-8") as f:
+                f.write("## Canonical AGENTS rules\n- Always verify before push.\n" * 10)
+            with open(os.path.join(tmp, ".cursorrules"), "w", encoding="utf-8") as f:
+                f.write("## Redundant cursor rules\n- Duplicate instruction text.\n" * 15)
+
+            with patch.object(EnvironmentAuditor, "get_config_paths", return_value=[codex_toml]), \
+                 patch.object(EnvironmentAuditor, "get_plugins_dir", return_value=os.path.join(tmp, "no_plugins")), \
+                 patch.object(EnvironmentAuditor, "get_mcp_schemas_dir", return_value=os.path.join(tmp, "no_schemas")), \
+                 patch.object(EnvironmentAuditor, "get_skills_dirs", return_value=[]):
+                servers = EnvironmentAuditor.get_configured_mcp_servers()
+                self.assertIn("context7", servers)
+                self.assertIn("rea", servers)
+                self.assertIn("tokensafe", servers)
+                self.assertNotIn("context7.http_headers", servers)
+                self.assertNotIn("rea.env", servers)
+
+                rep = EnvironmentAuditor.format_cli_report(workspace_root=tmp)
+                self.assertIn("tokensafe doctor --fix", rep)
+                self.assertNotIn("Environment healthy", rep)
+
+                fix_res = EnvironmentAuditor.auto_fix(workspace_root=tmp)
+                self.assertTrue(len(fix_res["fixed"]) >= 2)
+                # Verify config.toml is valid TOML now & .cursorrules is lean pointer
+                import tomllib
+                parsed = tomllib.loads(open(codex_toml, "r", encoding="utf-8").read())
+                self.assertIn("tokensafe", parsed["mcp_servers"])
+                ghost_after = EnvironmentAuditor.audit_ghost_tokens(tmp)
+                self.assertFalse(ghost_after["has_ghost_tokens"])
+
 if __name__ == "__main__":
     unittest.main()

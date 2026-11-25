@@ -422,6 +422,9 @@ def main(argv: Optional[List[str]] = None):
                     agents_plugin = args[idx + 1]
             res = AgentInstaller.install_project(os.getcwd(), agents_plugin_path=agents_plugin)
             print(f"\n\033[32m✔ TokenSafe rules injected into project: {', '.join(res['created_rules'])}\033[0m\n")
+        elif "--refresh" in args or "--sync-installed" in args:
+            res = AgentInstaller.refresh_installed_agents()
+            print(f"\n\033[32m✔ Synchronized {res['synced_count']} installed/configured agent environment(s).\033[0m\n")
         else:
             AgentInstaller.run_interactive()
 
@@ -927,9 +930,21 @@ def main(argv: Optional[List[str]] = None):
 
     elif command in ("doctor", "audit", "tax"):
         from src.environment_auditor import EnvironmentAuditor
+        from src.competitors import CompetitorAuditor
+
+        if "--fix" in args:
+            print("\n\033[1m\033[36m🔧 TOKENSAFE ENVIRONMENT AUTO-FIX 🔧\033[0m\n")
+            fix_res = EnvironmentAuditor.auto_fix()
+            for item in fix_res.get("fixed", []):
+                print(f"  \033[32m✔\033[0m {item}")
+            for item in fix_res.get("skipped", []):
+                print(f"  \033[33m⚠\033[0m {item}")
+            if not fix_res.get("fixed") and not fix_res.get("skipped"):
+                print("  \033[32m✔\033[0m No auto-fixable config or ghost-token issues found.")
+            print()
+
         print(EnvironmentAuditor.format_cli_report())
 
-        from src.competitors import CompetitorAuditor
         conflicts = CompetitorAuditor.audit()
         if conflicts:
             print("\n\033[1m\033[33m⚡ DETECTED CONFLICTING OR STALE TOOLS ⚡\033[0m")
@@ -938,7 +953,7 @@ def main(argv: Optional[List[str]] = None):
                 for tr in c['traces']:
                     loc = tr.get('path') or tr.get('file') or tr.get('config')
                     print(f"    - {tr['kind']}: {loc}")
-            print("\n  💡 Tip: Run 'tokensafe doctor --cleanup' to remove conflicting orphan hooks/rules.\n")
+            print("\n  💡 Tip: Run 'tokensafe doctor --cleanup' (or '--fix') to remove conflicting orphan hooks/rules.\n")
 
             if "--cleanup" in args:
                 for c in conflicts:

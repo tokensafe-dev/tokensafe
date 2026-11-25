@@ -113,7 +113,7 @@ AGENTS_REGISTRY = {
         "type": "mcp_json",
         "config_path": _app_data_dir("Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json"),
         "rules_path": _app_data_dir("Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "Rule_TokenSafe.md"),
-        "detect_path": _app_data_dir("Code")
+        "detect_path": _app_data_dir("Code", "User", "globalStorage", "saoudrizwan.claude-dev")
     },
     "claude_code": {
         "name": "Claude Code CLI",
@@ -159,27 +159,188 @@ AGENTS_REGISTRY = {
     }
 }
 
+_DEFAULT_DETECT_PATHS = {k: v["detect_path"] for k, v in AGENTS_REGISTRY.items()}
+
+
+def _has_vscode_extension(prefixes: Tuple[str, ...]) -> bool:
+    ext_root = os.path.join(HOME, ".vscode", "extensions")
+    if os.path.isdir(ext_root):
+        try:
+            for entry in os.listdir(ext_root):
+                low = entry.lower()
+                if any(low.startswith(p) for p in prefixes):
+                    return True
+        except OSError:
+            pass
+    return False
+
+
 class AgentInstaller:
     """Manages multi-agent detection and configuration injection."""
 
+    _CODEX_SECTION_RE = re.compile(
+        r'(?ms)^\[mcp_servers\.tokensafe\]\s*\n(?:(?!^\[{1,2}\s*(?!["\']?(?:/|[A-Za-z]:\\))[A-Za-z0-9_."\' -]+\]{1,2}\s*(?:#.*)?$).)*'
+    )
+    _CODEX_ORPHAN_LINE_RE = re.compile(r'(?m)^\s*\["[^"\n]*(?:mcp_server\.py|tokensafe[^"\n]*)"\]\s*\n?')
+
+    @classmethod
+    def _clean_codex_orphans(cls, content: str) -> str:
+        """Removes orphaned array lines left by legacy Codex TOML regex bugs."""
+        return cls._CODEX_ORPHAN_LINE_RE.sub("", content)
+
+    @classmethod
+    def _is_real_agent_installed(cls, key: str, info: Dict[str, Any]) -> bool:
+        """Checks genuine IDE/CLI installation artifacts rather than empty/installer-created dirs."""
+        detect_path = info.get("detect_path", "")
+        if detect_path != _DEFAULT_DETECT_PATHS.get(key):
+            return bool(detect_path and os.path.exists(detect_path))
+
+        if key == "antigravity":
+            return any((
+                os.path.exists("/Applications/Antigravity.app"),
+                os.path.exists("/Applications/Antigravity IDE.app"),
+                os.path.exists(os.path.join(HOME, "Applications", "Antigravity.app")),
+                os.path.exists(os.path.join(HOME, ".gemini", "antigravity")),
+                os.path.exists(os.path.join(HOME, ".gemini", "antigravity-ide")),
+                shutil.which("agy") is not None,
+            ))
+        if key == "claude_desktop":
+            return any((
+                os.path.exists("/Applications/Claude.app"),
+                os.path.exists(os.path.join(HOME, "Applications", "Claude.app")),
+                os.path.exists(_app_data_dir("Claude", "claude_desktop_config.json")),
+                os.path.exists(_app_data_dir("Claude", "IndexedDB")),
+                os.path.exists(_app_data_dir("Claude", "Session Storage")),
+            ))
+        if key == "cursor":
+            if sys.platform == "darwin":
+                return any((
+                    os.path.exists("/Applications/Cursor.app"),
+                    os.path.exists(os.path.join(HOME, "Applications", "Cursor.app")),
+                    shutil.which("cursor") is not None,
+                ))
+            return any((
+                os.path.exists(_app_data_dir("Cursor")),
+                os.path.exists(os.path.join(HOME, ".cursor", "projects")),
+                shutil.which("cursor") is not None,
+            ))
+        if key == "windsurf":
+            if sys.platform == "darwin":
+                return any((
+                    os.path.exists("/Applications/Windsurf.app"),
+                    os.path.exists(os.path.join(HOME, "Applications", "Windsurf.app")),
+                    shutil.which("windsurf") is not None,
+                ))
+            return any((
+                os.path.exists(_app_data_dir("Windsurf")),
+                os.path.exists(os.path.join(HOME, ".codeium", "windsurf", "User")),
+                os.path.exists(os.path.join(HOME, ".codeium", "windsurf", "globalStorage")),
+                shutil.which("windsurf") is not None,
+            ))
+        if key == "cline":
+            # Require the actual installed extension (not bare VS Code or deleted globalStorage).
+            return _has_vscode_extension(("saoudrizwan.claude-dev", "rooveterinaryinc.roo-cline"))
+        if key == "claude_code":
+            return any((
+                shutil.which("claude") is not None,
+                os.path.exists(os.path.join(HOME, ".claude", "projects")),
+                os.path.exists(os.path.join(HOME, ".claude", "statsig")),
+                os.path.exists(os.path.join(HOME, ".claude", ".credentials.json")),
+            ))
+        if key == "codex":
+            codex_dir = os.path.join(HOME, ".codex")
+            has_logs = os.path.isdir(codex_dir) and any(
+                n.startswith("logs") or n in ("auth.json", "sessions", "history.jsonl")
+                for n in os.listdir(codex_dir)
+            )
+            return any((
+                os.path.exists("/Applications/Codex.app"),
+                os.path.exists(os.path.join(HOME, "Applications", "Codex.app")),
+                shutil.which("codex") is not None,
+                has_logs,
+            ))
+        if key == "copilot":
+            return any((
+                shutil.which("github-copilot-cli") is not None,
+                shutil.which("copilot") is not None,
+                os.path.exists(os.path.join(HOME, ".local", "share", "gh", "extensions", "gh-copilot")),
+                _has_vscode_extension(("github.copilot",)),
+            ))
+        if key == "zcode":
+            return any((
+                os.path.exists("/Applications/ZCode.app"),
+                os.path.exists(os.path.join(HOME, "Applications", "ZCode.app")),
+                os.path.exists(os.path.join(HOME, ".zcode", "v2")),
+                os.path.exists(os.path.join(HOME, ".zcode", "workspace")),
+                shutil.which("zcode") is not None,
+            ))
+        if key == "kimi":
+            return any((
+                os.path.exists("/Applications/Kimi Code.app"),
+                os.path.exists(os.path.join(HOME, "Applications", "Kimi Code.app")),
+                os.path.exists(os.path.join(HOME, ".kimi-code", "sessions")),
+                os.path.exists(os.path.join(HOME, ".kimi-code", "oauth")),
+                shutil.which("kimi") is not None,
+            ))
+        return bool(detect_path and os.path.exists(detect_path))
+
+    @classmethod
+    def _is_agent_configured(cls, key: str, info: Dict[str, Any]) -> bool:
+        """True if TokenSafe MCP/plugin is currently wired into this agent."""
+        if info.get("type") == "plugin":
+            t = info.get("target_path", "")
+            return bool(t and os.path.exists(t))
+        if key == "codex":
+            p = info.get("config_path", "")
+            if os.path.isfile(p):
+                try:
+                    return "[mcp_servers.tokensafe]" in open(p, "r", encoding="utf-8", errors="replace").read()
+                except Exception:
+                    return False
+            return False
+        if key == "zcode":
+            p = info.get("config_path", "")
+            if os.path.isfile(p):
+                try:
+                    d = json.load(open(p, "r", encoding="utf-8"))
+                    return "tokensafe" in ((d.get("mcp") or {}).get("servers") or {})
+                except Exception:
+                    return False
+            return False
+        p = info.get("config_path", "")
+        if os.path.isfile(p):
+            try:
+                d = json.load(open(p, "r", encoding="utf-8"))
+                return "tokensafe" in (d.get("mcpServers") or {})
+            except Exception:
+                return False
+        return False
+
+    @classmethod
+    def refresh_installed_agents(cls) -> Dict[str, Any]:
+        """Re-synchronizes MCP, plugins, skills, rules, and hooks for genuinely installed or already-configured agents."""
+        agents = cls.detect_available_agents()
+        synced_count = 0
+        details: Dict[str, Any] = {}
+        for key, info in agents.items():
+            if info.get("installed") or cls._is_agent_configured(key, info):
+                ok, msg = cls.install_mcp_config(key)
+                if ok:
+                    h_ok, h_msg = cls.install_hooks_config(key)
+                    if h_ok:
+                        msg = f"{msg}; {h_msg}"
+                    synced_count += 1
+                details[key] = {"name": info["name"], "success": ok, "message": msg}
+        return {"synced_count": synced_count, "agents": details}
+
     @classmethod
     def detect_available_agents(cls) -> Dict[str, Dict[str, Any]]:
-        """Scans filesystem to find which AI agent platforms are installed."""
+        """Scans filesystem to find which AI agent platforms are genuinely installed."""
         detected = {}
         for key, info in AGENTS_REGISTRY.items():
-            is_present = os.path.exists(info["detect_path"])
-            # Fallback for cursor / windsurf on macOS
-            if not is_present and key == "cursor":
-                is_present = os.path.exists(os.path.join(HOME, "Library", "Application Support", "Cursor"))
-            if not is_present and key == "kimi":
-                is_present = (
-                    os.path.exists("/Applications/Kimi Code.app")
-                    or os.path.exists(os.path.join(HOME, "Applications", "Kimi Code.app"))
-                    or shutil.which("kimi") is not None
-                )
             detected[key] = {
                 **info,
-                "installed": is_present
+                "installed": cls._is_real_agent_installed(key, info)
             }
         return detected
 
@@ -256,8 +417,16 @@ class AgentInstaller:
                 return f'[[hooks]]\nevent = "{event}"\n{m}command = {toml_hook_cmd}\ntimeout = 10\n'
 
             if "kimi_hook.py" in content:
-                # Migration: older installs lack PostToolUse, PreToolUse Edit matcher, or Stop.
+                # Refresh command path/interpreter on upgrade + add missing events.
                 migrated = False
+                new_content, cmd_replacements = re.subn(
+                    r'(?m)^command\s*=\s*".*kimi_hook\.py[^"\n]*"\s*$',
+                    f'command = {toml_hook_cmd}',
+                    content,
+                )
+                if new_content != content and cmd_replacements > 0:
+                    content = new_content
+                    migrated = True
                 if 'event = "PostToolUse"' not in content:
                     content = content.rstrip() + "\n\n# TokenSafe PostToolUse stdout compaction (migration)\n" + _kimi_section("PostToolUse")
                     migrated = True
@@ -271,7 +440,7 @@ class AgentInstaller:
                     return True, "TokenSafe Kimi Code hooks already registered in config.toml"
                 with open(config_file, "w", encoding="utf-8") as f:
                     f.write(content)
-                return True, "Kimi Code hooks migrated in ~/.kimi-code/config.toml (Edit/PostToolUse/Stop)"
+                return True, "Kimi Code hooks updated in ~/.kimi-code/config.toml (Edit/PostToolUse/Stop)"
 
             hook_sections = (
                 '\n# TokenSafe Lifecycle Hooks\n'
@@ -1334,10 +1503,10 @@ WantedBy=default.target
                 f'args = [{toml_srv}]\n'
             )
 
+            content = cls._clean_codex_orphans(content)
             if re.search(r'(?m)^\[mcp_servers\.tokensafe\]\s*$', content):
-                # Replace the entire section up to the next TOML table header or EOF (keeps args=[...] intact)
-                pattern = re.compile(r'(?ms)^\[mcp_servers\.tokensafe\]\s*\n(?:(?!^\[).)*')
-                content = pattern.sub(lambda _: server_section + "\n", content)
+                # Replace the entire section up to the next valid TOML table header or EOF (never stop at array items like ["/path/..."]).
+                content = cls._CODEX_SECTION_RE.sub(lambda _: server_section + "\n", content)
             else:
                 content = (content.rstrip() + "\n\n" + server_section) if content.strip() else server_section
 
@@ -1587,10 +1756,10 @@ WantedBy=default.target
                 try:
                     with open(config_file, "r", encoding="utf-8") as f:
                         content = f.read()
-                    if re.search(r'(?m)^\[mcp_servers\.tokensafe\]\s*$', content):
+                    if re.search(r'(?m)^\[mcp_servers\.tokensafe\]\s*$', content) or cls._CODEX_ORPHAN_LINE_RE.search(content):
                         shutil.copy2(config_file, f"{config_file}.backup")
-                        pattern = re.compile(r'(?ms)^\[mcp_servers\.tokensafe\]\s*\n(?:(?!^\[).)*')
-                        content = pattern.sub("", content)
+                        content = cls._clean_codex_orphans(content)
+                        content = cls._CODEX_SECTION_RE.sub("", content)
                         with open(config_file, "w", encoding="utf-8") as f:
                             f.write(content.strip() + "\n" if content.strip() else "")
                 except Exception:
@@ -2552,21 +2721,30 @@ WantedBy=default.target
         else:
             print(f"  {YELLOW}⚠{RESET} npm not found — skipping npm channel.")
 
-        # 3. Check pip
-        pip_cmd = "pip3" if shutil.which("pip3") else ("pip" if shutil.which("pip") else None)
-        if pip_cmd:
+        # 3. Check pip (prefer current interpreter's pip, fallback to pip3/pip)
+        pip_cmds: List[List[str]] = [[sys.executable, "-m", "pip"]]
+        pip_bin = shutil.which("pip3") or shutil.which("pip")
+        if pip_bin:
+            pip_cmds.append([pip_bin])
+        upgraded_pip = False
+        seen_pip_bins = set()
+        for pip_base in pip_cmds:
+            if upgraded_pip:
+                break
             try:
-                res = subprocess.run([pip_cmd, "list"], capture_output=True, text=True, timeout=15)
-                if "tokensafe" in res.stdout:
-                    print(f"  {CYAN}→{RESET} Updating Python package ({pip_cmd} install --upgrade tokensafe)...")
-                    up_res = subprocess.run([pip_cmd, "install", "--upgrade", "tokensafe"], capture_output=True, text=True, timeout=120)
+                res = subprocess.run([*pip_base, "list"], capture_output=True, text=True, timeout=15)
+                if "tokensafe" in (res.stdout or ""):
+                    print(f"  {CYAN}→{RESET} Updating Python package ({' '.join(pip_base)} install --upgrade tokensafe)...")
+                    up_res = subprocess.run([*pip_base, "install", "--upgrade", "tokensafe"], capture_output=True, text=True, timeout=120)
                     if up_res.returncode == 0:
                         print(f"  {GREEN}✔{RESET} Python package upgraded successfully.")
+                        upgraded_pip = True
                     else:
                         detail = (up_res.stderr or up_res.stdout or "").strip()[:200]
                         print(f"  {YELLOW}⚠{RESET} pip upgrade failed: {detail}")
             except Exception as e:
                 print(f"  {YELLOW}⚠{RESET} pip update skipped: {e}")
+        pip_cmd = pip_bin
 
         # 3b. Check and upgrade TokenSafe ecosystem packages (Frontend & Backend)
         print(f"\n  {CYAN}→{RESET} Checking TokenSafe Ecosystem packages (UI & Backend)...")
@@ -2625,22 +2803,54 @@ WantedBy=default.target
                 except Exception:
                     pass
 
-        # 4. Re-synchronize all detected agents
-        print(f"\n  {CYAN}→{RESET} Re-synchronizing AI Agent MCP configs & rules...")
+        # 4. Re-synchronize active/configured agents using the FRESHLY upgraded binary when available
+        # (so plugins, hooks, skills, and rules come from the new release instead of the old process).
+        print(f"\n  {CYAN}→{RESET} Re-synchronizing AI Agent plugins, hooks, MCP configs & rules...")
+        fresh_bin = None
+        for npm_bin in upgraded_npm_bins:
+            cand_bin = os.path.join(os.path.dirname(npm_bin), "tokensafe.cmd" if os.name == "nt" else "tokensafe")
+            if os.path.isfile(cand_bin) and os.access(cand_bin, os.X_OK):
+                fresh_bin = cand_bin
+                break
+        if not fresh_bin:
+            fresh_bin = shutil.which("tokensafe")
+
         agents = cls.detect_available_agents()
         synced_count = 0
-        for key, info in agents.items():
-            if info["installed"]:
-                ok, msg = cls.install_mcp_config(key)
-                if ok:
-                    h_ok, h_msg = cls.install_hooks_config(key)
-                    if h_ok:
-                        msg = f"{msg}; {h_msg}"
-                if ok:
-                    print(f"    {GREEN}✔{RESET} {info['name']}: {msg}")
-                    synced_count += 1
+        if fresh_bin and (upgraded_npm_bins or upgraded_pip) and agents:
+            try:
+                sync_env = cls._npm_subprocess_env(fresh_bin)
+                ref_res = subprocess.run(
+                    [fresh_bin, "install", "--refresh"],
+                    env=sync_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if ref_res.returncode == 0:
+                    m_cnt = re.search(r"Synchronized\s+(\d+)", ref_res.stdout or "")
+                    synced_count = int(m_cnt.group(1)) if m_cnt else sum(1 for _, i in agents.items() if i.get("installed"))
+                    print(f"    {GREEN}✔{RESET} Refreshed {synced_count} agent environment(s) via upgraded binary ({fresh_bin}).")
                 else:
-                    print(f"    {YELLOW}⚠{RESET} {info['name']}: {msg}")
+                    ref_res = None
+            except Exception:
+                ref_res = None
+            if ref_res is None:
+                refresh_res = cls.refresh_installed_agents()
+                synced_count = refresh_res["synced_count"]
+        else:
+            for key, info in agents.items():
+                if info["installed"] or cls._is_agent_configured(key, info):
+                    ok, msg = cls.install_mcp_config(key)
+                    if ok:
+                        h_ok, h_msg = cls.install_hooks_config(key)
+                        if h_ok:
+                            msg = f"{msg}; {h_msg}"
+                    if ok:
+                        print(f"    {GREEN}✔{RESET} {info['name']}: {msg}")
+                        synced_count += 1
+                    else:
+                        print(f"    {YELLOW}⚠{RESET} {info['name']}: {msg}")
 
         # 5. Refresh local version cache and report the newly installed version in a fresh process
         try:
@@ -2651,14 +2861,7 @@ WantedBy=default.target
         except Exception:
             pass
         try:
-            tokensafe_bin = None
-            for npm_bin in upgraded_npm_bins:
-                cand_bin = os.path.join(os.path.dirname(npm_bin), "tokensafe.cmd" if os.name == "nt" else "tokensafe")
-                if os.path.isfile(cand_bin) and os.access(cand_bin, os.X_OK):
-                    tokensafe_bin = cand_bin
-                    break
-            if not tokensafe_bin:
-                tokensafe_bin = shutil.which("tokensafe")
+            tokensafe_bin = fresh_bin or shutil.which("tokensafe")
             sync_cmd = [tokensafe_bin, "version", "--check"] if tokensafe_bin else [sys.executable, os.path.join(PROJECT_ROOT, "src", "cli.py"), "version", "--check"]
             sync_env = cls._npm_subprocess_env(tokensafe_bin) if tokensafe_bin else None
             subprocess.run(sync_cmd, env=sync_env, capture_output=True, text=True, timeout=5)
@@ -2675,12 +2878,7 @@ WantedBy=default.target
         # route for every wire-able agent. Agent/app updates are known to rewrite
         # their own configs and drop third-party routing, so after every update we
         # reinstall the daemon with the FRESH engine binary and re-claim the wiring.
-        ensure_bin = None
-        for npm_bin in upgraded_npm_bins:
-            cand_bin = os.path.join(os.path.dirname(npm_bin), "tokensafe.cmd" if os.name == "nt" else "tokensafe")
-            if os.path.isfile(cand_bin) and os.access(cand_bin, os.X_OK):
-                ensure_bin = cand_bin
-                break
+        ensure_bin = fresh_bin
         cls._ensure_proxy_default("update", fresh_bin=ensure_bin)
 
         print(f"\n{BOLD}{GREEN}✅ Self-update complete!{RESET}")
