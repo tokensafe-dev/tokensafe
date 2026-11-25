@@ -142,12 +142,56 @@ class TestAcceleratorFeatures(unittest.TestCase):
             }
         ]
 
-        verify_cmd = f"python3 -c 'import calc; assert calc.val == 2'"
+        verify_cmd = "python3 -m py_compile calc.py"
         res = execute_batch_edits(edits=edits, verify=verify_cmd, cwd=self.tmp_dir)
         self.assertTrue(res["success"])
         self.assertIn("verify", res)
         self.assertTrue(res["verify"]["passed"])
         self.assertEqual(res["verify"]["exit_code"], 0)
+
+    def test_batch_editor_verify_blocks_shell_injection_and_escape(self):
+        """Regression tests for CWE-78 / CWE-863 on apply_edits.verify and cwd."""
+        file_a = os.path.join(self.tmp_dir, "safe.py")
+        with open(file_a, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        edits = [{"path": "safe.py", "hunks": [{"target": "x = 1", "replacement": "x = 2"}]}]
+
+        hostile_cmds = [
+            "sh -c 'id; uname -a; cat ~/.ssh/id_rsa 2>/dev/null | head -c 200'",
+            "bash -c 'echo pwned'",
+            "python3 -c 'import os; os.system(\"id\")'",
+            "pytest && cat ~/.ssh/id_rsa",
+            "pytest; id",
+            "id",
+            "/bin/sh -c id",
+            "cat ~/.ssh/id_rsa",
+        ]
+        for bad_cmd in hostile_cmds:
+            res = execute_batch_edits(edits=edits, verify=bad_cmd, cwd=self.tmp_dir)
+            self.assertFalse(res["success"], f"Command should be blocked: {bad_cmd}")
+            self.assertTrue(res.get("blocked"), f"Expected blocked=True for {bad_cmd}")
+            with open(file_a, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "x = 1\n", f"File must NOT be modified on blocked verify: {bad_cmd}")
+
+        # Hostile system cwd must also fail closed
+        res_root = execute_batch_edits(edits=edits, verify="pytest", cwd="/")
+        self.assertFalse(res_root["success"])
+
+        # MCP dispatcher must also reject PoC (system cwd + hostile sh -c verify)
+        from src.mcp_server import _dispatch_tool_call
+        mcp_res = _dispatch_tool_call("apply_edits", {
+            "edits": edits,
+            "verify": "sh -c 'id; uname -a; cat ~/.ssh/id_rsa 2>/dev/null | head -c 200'",
+            "cwd": "/",
+        })
+        self.assertTrue(mcp_res.get("isError"))
+        mcp_res_ws = _dispatch_tool_call("apply_edits", {
+            "edits": edits,
+            "verify": "sh -c 'id; uname -a; cat ~/.ssh/id_rsa 2>/dev/null | head -c 200'",
+            "cwd": self.tmp_dir,
+        })
+        self.assertTrue(mcp_res_ws.get("isError"))
+        self.assertIn("disallowed", mcp_res_ws["content"][0]["text"].lower())
 
     def test_batch_editor_secret_leak_blocked(self):
         """Tests that hardcoded private keys or secrets in replacements are blocked."""

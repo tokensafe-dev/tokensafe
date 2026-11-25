@@ -552,9 +552,10 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                                        'type': 'object'},
                                                           'maxItems': 50,
                                                           'type': 'array'},
-                                             'verify': {   'description': 'Optional shell command to execute immediately '
+                                             'verify': {   'description': 'Optional allowlisted verification command '
                                                                           'after applying edits (e.g. npm test, pytest, '
-                                                                          'cargo test)',
+                                                                          'cargo test, go test, python3 -m unittest) '
+                                                                          'validated via TokenSafeGuard without a shell',
                                                            'type': 'string'},
                                              'verify_timeout_sec': {   'description': 'Verification timeout in seconds '
                                                                                       '(default 30)',
@@ -2653,7 +2654,19 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             dry_run = bool(args.get("dry_run", False))
             verify = args.get("verify")
             verify_timeout = int(args.get("verify_timeout_sec") or 30)
-            cwd = args.get("cwd") or get_active_workspace()
+            raw_cwd = args.get("cwd")
+            active_ws = get_active_workspace()
+            if raw_cwd:
+                if not os.path.isabs(str(raw_cwd)) and active_ws and os.path.isdir(os.path.join(active_ws, str(raw_cwd))):
+                    cwd = os.path.abspath(os.path.join(active_ws, str(raw_cwd)))
+                else:
+                    cwd = os.path.abspath(str(raw_cwd))
+            else:
+                cwd, err = _resolve_project_root(args)
+                if err or not cwd:
+                    return _fallback_error("apply_edits", err or "unspecified project workspace cwd")
+            if is_plugin_or_system_dir(cwd):
+                return _fallback_error("apply_edits", f"refusing to run apply_edits in system root or plugin dir '{cwd}'")
 
             res = execute_batch_edits(
                 edits=edits,
@@ -2663,6 +2676,15 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 verify_timeout_sec=verify_timeout,
                 cwd=cwd
             )
+            if res.get("blocked"):
+                tracker.record_event(
+                    session_id=_mcp_session_id(),
+                    event_type=f"GUARD_{res.get('check_name') or 'VERIFY_COMMAND_BLOCKED'}",
+                    original_tokens=count_tokens(str(verify or "")),
+                    optimized_tokens=0,
+                    details={"cmd": str(verify or "")[:100], "reason": str(res.get("error") or "")}
+                )
+                return _fallback_error("apply_edits", str(res.get("error") or "verify command blocked"))
             lines = []
             if res.get("success"):
                 action_desc = "Validated" if dry_run else "Applied"

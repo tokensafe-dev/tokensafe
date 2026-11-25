@@ -16,15 +16,182 @@ Key capabilities:
 import os
 import re
 import difflib
+import shlex
 import subprocess
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
+from src.guard import TokenSafeGuard
+from src.paths import is_plugin_or_system_dir
 from src.secret_redactor import SecretRedactor
 from src.format_parsers.ansi import strip_ansi
 
 MAX_BATCH_FILES = 50
 MAX_VERIFY_OUTPUT_CHARS = 4000
+
+_VERIFY_SIMPLE_RUNNERS = frozenset({
+    "pytest", "py.test", "ruff", "mypy", "pyright", "flake8", "tox", "nox",
+    "vitest", "jest", "mocha", "ava", "tsc", "eslint", "prettier", "biome",
+    "oxlint", "rspec", "phpunit", "ctest",
+})
+_VERIFY_PYTHON_RUNNERS = frozenset({
+    "python", "python3", "python3.10", "python3.11", "python3.12", "python3.13",
+})
+_VERIFY_PYTHON_MODULES = frozenset({
+    "unittest", "pytest", "py_compile", "compileall", "mypy", "ruff", "flake8", "doctest",
+})
+_VERIFY_JS_PKG_MANAGERS = frozenset({"npm", "pnpm", "yarn"})
+_VERIFY_SAFE_SCRIPT_PREFIXES = ("test", "lint", "check", "typecheck", "build")
+_VERIFY_SUBCOMMAND_ALLOWLIST = {
+    "go": frozenset({"test", "vet", "build"}),
+    "cargo": frozenset({"test", "check", "clippy", "build"}),
+    "dotnet": frozenset({"test", "build"}),
+    "zig": frozenset({"test", "build"}),
+    "swift": frozenset({"test", "build"}),
+    "tokensafe": frozenset({"tests"}),
+}
+_VERIFY_FORBIDDEN_FLAGS = frozenset({
+    "-c", "-e", "--eval", "-p", "--print", "-r", "--require",
+    "--import", "--loader", "-exec", "--exec", "-toolexec",
+})
+_DISALLOWED_SYSTEM_DIRS = frozenset({"/etc", "/usr", "/bin", "/sbin", "/System", "/private/etc"})
+
+
+def _has_unquoted_shell_operators(cmd_str: str) -> bool:
+    """Detects shell chaining, redirection, or command substitution operators."""
+    in_single = False
+    in_double = False
+    escaped = False
+    n = len(cmd_str)
+    for i, ch in enumerate(cmd_str):
+        if ch in ("\n", "\r", "\x00"):
+            return True
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and not in_single:
+            escaped = True
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if not in_single:
+            if ch == "`":
+                return True
+            if ch == "$" and i + 1 < n and cmd_str[i + 1] in ("(", "{"):
+                return True
+        if not in_single and not in_double and ch in (";", "|", "&", ">", "<"):
+            return True
+    return False
+
+
+def validate_verify_command(
+    verify_cmd: str, base_dir: str = ""
+) -> Tuple[Optional[List[str]], Optional[str], Optional[str]]:
+    """
+    Validates an inline verify command through TokenSafeGuard, shell-operator
+    rejection, shlex tokenization, and a strict verification-runner allowlist.
+    Returns (argv, error_reason, guard_check_name).
+    """
+    cmd_str = str(verify_cmd or "").strip()
+    if not cmd_str:
+        return None, "Verification command cannot be empty.", "VERIFY_COMMAND_BLOCKED"
+
+    guard_res = TokenSafeGuard.inspect_command(cmd_str, cwd=base_dir)
+    if guard_res.blocked:
+        return (
+            None,
+            f"TokenSafe Security Guard ({guard_res.check_name}) blocked verify command: {guard_res.reason}",
+            guard_res.check_name,
+        )
+
+    if _has_unquoted_shell_operators(cmd_str):
+        return (
+            None,
+            "Shell chaining, redirection, and command substitution operators are disallowed in apply_edits.verify.",
+            "VERIFY_COMMAND_BLOCKED",
+        )
+
+    try:
+        argv = shlex.split(cmd_str)
+    except ValueError as exc:
+        return None, f"Malformed verify command syntax: {exc}", "VERIFY_COMMAND_BLOCKED"
+
+    if not argv:
+        return None, "Verification command cannot be empty.", "VERIFY_COMMAND_BLOCKED"
+
+    raw_exe = argv[0]
+    if "/" in raw_exe or "\\" in raw_exe:
+        return (
+            None,
+            f"Path-qualified executables ('{raw_exe}') are disallowed in apply_edits.verify.",
+            "VERIFY_COMMAND_BLOCKED",
+        )
+
+    exe = raw_exe.lower()
+    if exe.endswith(".exe"):
+        exe = exe[:-4]
+
+    args_rest = argv[1:]
+    if any(a in _VERIFY_FORBIDDEN_FLAGS or a.startswith("--eval=") or a.startswith("-exec=") for a in args_rest):
+        return (
+            None,
+            f"Flag '{next(a for a in args_rest if a in _VERIFY_FORBIDDEN_FLAGS or a.startswith(('--eval=', '-exec=')))}' is disallowed in apply_edits.verify.",
+            "VERIFY_COMMAND_BLOCKED",
+        )
+
+    if exe in _VERIFY_PYTHON_RUNNERS:
+        if len(argv) >= 3 and argv[1] == "-m" and argv[2] in _VERIFY_PYTHON_MODULES:
+            return argv, None, None
+        return (
+            None,
+            f"Python verify commands must use '-m <allowed_module>' (one of {sorted(_VERIFY_PYTHON_MODULES)}).",
+            "VERIFY_COMMAND_BLOCKED",
+        )
+
+    if exe in _VERIFY_JS_PKG_MANAGERS:
+        if args_rest and args_rest[0] in ("test", "t", "lint", "check", "typecheck", "build"):
+            return argv, None, None
+        if len(args_rest) >= 2 and args_rest[0] == "run" and args_rest[1].startswith(_VERIFY_SAFE_SCRIPT_PREFIXES):
+            return argv, None, None
+        return (
+            None,
+            f"'{exe}' verify command only allows test/lint/check/typecheck/build subcommands.",
+            "VERIFY_COMMAND_BLOCKED",
+        )
+
+    if exe == "bun":
+        if args_rest and args_rest[0] == "test":
+            return argv, None, None
+        if len(args_rest) >= 2 and args_rest[0] == "run" and args_rest[1].startswith(_VERIFY_SAFE_SCRIPT_PREFIXES):
+            return argv, None, None
+        return (
+            None,
+            "'bun' verify command only allows 'bun test' or 'bun run <test|lint|check|typecheck|build>*'.",
+            "VERIFY_COMMAND_BLOCKED",
+        )
+
+    if exe in _VERIFY_SUBCOMMAND_ALLOWLIST:
+        allowed_subs = _VERIFY_SUBCOMMAND_ALLOWLIST[exe]
+        if args_rest and args_rest[0] in allowed_subs:
+            return argv, None, None
+        return (
+            None,
+            f"'{exe}' verify command only allows subcommands: {sorted(allowed_subs)}.",
+            "VERIFY_COMMAND_BLOCKED",
+        )
+
+    if exe in _VERIFY_SIMPLE_RUNNERS:
+        return argv, None, None
+
+    return (
+        None,
+        f"Executable '{raw_exe}' is not in the allowlisted verification runners for apply_edits.verify.",
+        "VERIFY_COMMAND_BLOCKED",
+    )
 
 
 def _find_closest_line_hint(target: str, content: str, max_lines_preview: int = 5) -> str:
@@ -140,6 +307,29 @@ def execute_batch_edits(
 
     base_dir = os.path.abspath(cwd or os.getcwd())
     real_base = os.path.realpath(base_dir)
+    if is_plugin_or_system_dir(base_dir) or real_base in _DISALLOWED_SYSTEM_DIRS or not os.path.isdir(real_base):
+        return {
+            "success": False,
+            "error": f"Refusing batch edits in system, plugin, or non-existent directory '{cwd or base_dir}'.",
+            "applied_files": [],
+            "failed_files": []
+        }
+
+    verified_argv: Optional[List[str]] = None
+    if verify:
+        verified_argv, verify_err, verify_check = validate_verify_command(str(verify), base_dir=real_base)
+        if verify_err or not verified_argv:
+            return {
+                "success": False,
+                "blocked": True,
+                "check_name": verify_check or "VERIFY_COMMAND_BLOCKED",
+                "error": verify_err or "Verification command blocked.",
+                "applied_count": 0,
+                "applied_files": [],
+                "failed_count": 0,
+                "failed_files": [],
+                "dry_run": dry_run,
+            }
 
     # Pre-validation & secret check
     prepared_files: Dict[str, Dict[str, Any]] = {}
@@ -345,15 +535,15 @@ def execute_batch_edits(
         "dry_run": dry_run
     }
 
-    # Execute inline verify command if requested and files were modified
-    if verify and applied_files_info and not dry_run:
+    # Execute inline verify command if requested and files were modified (shell=False, allowlisted argv)
+    if verified_argv and applied_files_info and not dry_run:
         cmd_str = str(verify).strip()
         t0 = time.time()
         try:
             proc = subprocess.run(
-                cmd_str,
-                shell=True,
-                cwd=base_dir,
+                verified_argv,
+                shell=False,
+                cwd=real_base,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
