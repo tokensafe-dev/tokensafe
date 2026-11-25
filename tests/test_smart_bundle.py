@@ -97,9 +97,12 @@ class TestSmartBundle(unittest.TestCase):
         self.assertTrue(res.get("isError"))
 
     def test_bundle_tools_listed(self):
-        from src.mcp_server import TOOLS
+        from src.mcp_server import TOOLS, FULL_TOOLS
         names = {t["name"] for t in TOOLS}
-        self.assertIn("smart_bundle", names)
+        self.assertIn("smart_read_file", names)
+        sr_schema = next(t for t in TOOLS if t["name"] == "smart_read_file")
+        self.assertIn("targets", sr_schema["inputSchema"]["properties"])
+        self.assertIn("smart_bundle", {t["name"] for t in FULL_TOOLS})
 
 
 if __name__ == "__main__":

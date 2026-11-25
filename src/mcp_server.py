@@ -77,7 +77,7 @@ def _client_supports_pointers() -> bool:
     return bool(_MCP_CLIENT_NAME and any(k in _MCP_CLIENT_NAME for k in _KNOWN_POINTER_CLIENTS))
 
 
-TOOLS = [   {   'annotations': {'readOnlyHint': True},
+FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
         'description': 'AST-skeleton file reader: keeps the target function/class body + 1-line 1-hop dependency '
                        'signatures, folds inert code (-90-99% tokens). Relative or absolute paths. Schema files '
                        "(OpenAPI/Prisma/GraphQL/SQL) auto-slice via 'symbol'. For 3+ related symbols use smart_bundle "
@@ -471,6 +471,20 @@ TOOLS = [   {   'annotations': {'readOnlyHint': True},
                            'required': ['target'],
                            'type': 'object'},
         'name': 'oumv_verify'},
+    {   'annotations': {'readOnlyHint': True},
+        'description': 'Unified cross-stack intelligence graph (spec §11): nodes and edges across frontend actions '
+                       'and backend endpoints with evidence metadata. Queries: overview (graph summary, optionally '
+                       'filtered by target), who_depends_on (which frontend code calls an endpoint), impact (affected '
+                       'callers + suggested verification steps).',
+        'inputSchema': {   'properties': {   'query': {   'default': 'overview',
+                                                          'description': 'Graph query (overview, who_depends_on, impact)',
+                                                          'enum': ['overview', 'who_depends_on', 'impact'],
+                                                          'type': 'string'},
+                                             'target': {   'description': "Target resource (e.g. '/api/orders' or "
+                                                                          "'POST /api/orders')",
+                                                          'type': 'string'}},
+                           'type': 'object'},
+        'name': 'oumv_graph'},
     {   'annotations': {'readOnlyHint': False, 'destructiveHint': False},
         'description': 'Atomic or best-effort multi-hunk and multi-file code editor (up to 50 files) with optional '
                        'inline verification command (e.g. npm test, pytest). Replaces serial single-hunk edit turns. '
@@ -626,6 +640,221 @@ TOOLS = [   {   'annotations': {'readOnlyHint': True},
                            'required': ['queries'],
                            'type': 'object'},
         'name': 'batch_search'}]
+
+# Compact MCP surface (default): 7 consolidated tools (~2.2k tok vs ~6.0k tok for 28 schemas).
+# All 28 legacy tool names remain callable in _dispatch_tool_call for backward compatibility.
+# Set TOKENSAFE_MCP_PROFILE=full to expose FULL_TOOLS in tools/list.
+TOOLS = [
+    {
+        'name': 'smart_read_file',
+        'description': (
+            'AST-skeleton reader (-90-98% tokens). Pass path+symbol for one file (auto-slices '
+            'OpenAPI/Prisma/GraphQL/SQL/lockfiles), targets=[{path,symbol}] to bundle 2-8 symbols, '
+            'or package_name+symbol for 3rd-party .d.ts types.'
+        ),
+        'annotations': {'readOnlyHint': True},
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': 'File path (relative or absolute)'},
+                'symbol': {'type': 'string', 'description': 'Function/class/model/type to extract'},
+                'start_line': {'type': 'integer', 'description': 'Optional start line'},
+                'end_line': {'type': 'integer', 'description': 'Optional end line'},
+                'dep_mode': {'type': 'string', 'enum': ['signature', 'full'], 'description': '1-hop dep mode (default signature)'},
+                'include_deps': {'type': 'boolean', 'description': 'Include 1-hop deps (default true)'},
+                'force_full': {'type': 'boolean', 'description': 'Bypass pointer dedup'},
+                'targets': {
+                    'type': 'array', 'maxItems': 8,
+                    'description': 'Bundle mode: 2-8 {path, symbol} targets in one call',
+                    'items': {'type': 'object', 'properties': {'path': {'type': 'string'}, 'symbol': {'type': 'string'}}, 'required': ['path']},
+                },
+                'package_name': {'type': 'string', 'description': 'External .d.ts npm package name'},
+            },
+        },
+    },
+    {
+        'name': 'scoped_search',
+        'description': (
+            'Safe token-bounded search replacing grep/find (-90% tokens). Pass query+scope for single '
+            'search (mode/type: auto|text|regex|glob|fuzzy|git), or queries=[{pattern,type,path,glob}] '
+            'for up to 20 concurrent queries.'
+        ),
+        'annotations': {'readOnlyHint': True},
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'query': {'type': 'string', 'description': 'Text, symbol, regex, glob, or read-only git query'},
+                'mode': {'type': 'string', 'enum': ['auto', 'text', 'regex', 'glob', 'fuzzy', 'git'], 'description': 'Single-query mode'},
+                'scope': {'type': 'string', 'description': "'code', 'config', 'all', ext ('py'), or subfolder"},
+                'path': {'type': 'string', 'description': 'Directory path (default project root)'},
+                'project_path': {'type': 'string', 'description': 'Alias for path'},
+                'use_regex': {'type': 'boolean', 'description': 'Force regex true/false'},
+                'case_sensitive': {'type': 'boolean'},
+                'max_results': {'type': 'integer', 'description': 'Max lines (default 25, max 100)'},
+                'queries': {
+                    'type': 'array', 'maxItems': 20,
+                    'description': 'Batch mode: up to 20 {pattern, type, path, glob, output_mode} objects',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'pattern': {'type': 'string'},
+                            'type': {'type': 'string', 'enum': ['text', 'regex', 'glob', 'fuzzy', 'git']},
+                            'path': {'type': 'string'},
+                            'glob': {'type': 'string'},
+                            'file_type': {'type': 'string'},
+                            'output_mode': {'type': 'string', 'enum': ['content', 'files_with_matches', 'count']},
+                            'case_sensitive': {'type': 'boolean'},
+                            'max_results': {'type': 'integer'},
+                        },
+                        'required': ['pattern'],
+                    },
+                },
+                'cwd': {'type': 'string', 'description': 'Optional working directory for batch mode'},
+            },
+        },
+    },
+    {
+        'name': 'apply_edits',
+        'description': 'Atomic/best-effort multi-hunk editor (up to 50 files) with optional inline verify command.',
+        'annotations': {'readOnlyHint': False, 'destructiveHint': False},
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'edits': {
+                    'type': 'array', 'maxItems': 50,
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'path': {'type': 'string'},
+                            'create': {'type': 'string'},
+                            'overwrite': {'type': 'boolean'},
+                            'hunks': {
+                                'type': 'array',
+                                'items': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'target': {'type': 'string'},
+                                        'replacement': {'type': 'string'},
+                                        'start_line': {'type': 'integer'},
+                                        'end_line': {'type': 'integer'},
+                                        'replace_all': {'type': 'boolean'},
+                                    },
+                                    'required': ['target', 'replacement'],
+                                },
+                            },
+                        },
+                        'required': ['path'],
+                    },
+                },
+                'best_effort': {'type': 'boolean'},
+                'dry_run': {'type': 'boolean'},
+                'verify': {'type': 'string', 'description': 'Shell command to run after edits (e.g. pytest, npm test)'},
+                'verify_timeout_sec': {'type': 'integer'},
+                'cwd': {'type': 'string'},
+            },
+            'required': ['edits'],
+        },
+    },
+    {
+        'name': 'repo_map',
+        'description': (
+            'Project structure & architecture without crawling: view="graph" (God Nodes & deps), '
+            '"api" (exported classes/types/interfaces), or "tree" (clean directory tree).'
+        ),
+        'annotations': {'readOnlyHint': True},
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'view': {'type': 'string', 'enum': ['graph', 'api', 'tree'], 'default': 'graph'},
+                'project_path': {'type': 'string', 'description': 'Project root (pass absolute path in multi-repo setups)'},
+                'path': {'type': 'string', 'description': "Directory path for view='tree' (default '.')"},
+                'depth': {'type': 'integer', 'description': 'Tree depth (default 2, max 4)'},
+                'max_entries': {'type': 'integer'},
+            },
+        },
+    },
+    {
+        'name': 'session_context',
+        'description': (
+            'Session & context hygiene: action="budget" (Context Quality Score S-F), "compact" (fold transcript '
+            'to State Ledger), "prune" (drop superseded reads), "mistakes" (anti-stuck memory), or "metrics".'
+        ),
+        'annotations': {'readOnlyHint': False, 'destructiveHint': False},
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'action': {'type': 'string', 'enum': ['budget', 'compact', 'prune', 'mistakes', 'metrics'], 'default': 'budget'},
+                'model': {'type': 'string'},
+                'session_id': {'type': 'string'},
+                'transcript_path': {'type': 'string'},
+                'window_tokens': {'type': 'integer'},
+                'invocation_num': {'type': 'integer'},
+                'project_root': {'type': 'string'},
+                'clear': {'type': 'boolean'},
+            },
+            'required': ['action'],
+        },
+    },
+    {
+        'name': 'oumv',
+        'description': (
+            'Live Frontend/Backend OUMV runtime protocol: action="status"|"observe" (L0-L4)|"understand" '
+            '(causality/impact)|"verify" (in-memory sandbox)|"mutate" (OCC edit)|"graph" (cross-stack).'
+        ),
+        'annotations': {'readOnlyHint': False, 'destructiveHint': False},
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'action': {'type': 'string', 'enum': ['status', 'observe', 'understand', 'mutate', 'verify', 'graph'], 'default': 'status'},
+                'level': {'type': 'string', 'enum': ['L0', 'L1', 'L2', 'L3', 'L4']},
+                'query': {'type': 'string'},
+                'runtime': {'type': 'string', 'enum': ['frontend', 'backend', 'auto']},
+                'target': {'type': 'string'},
+                'path': {'type': 'string'},
+                'symbol': {'type': 'string'},
+                'replacement': {'type': 'string'},
+                'expectedVersion': {'type': 'string'},
+                'verify_action': {'type': 'string', 'description': "Action name for action='verify' (e.g. click, submit)"},
+                'payload': {'type': 'object'},
+                'workspace_dir': {'type': 'string'},
+            },
+            'required': ['action'],
+        },
+    },
+    {
+        'name': 'run_helper',
+        'description': (
+            'Unified utility runner: action="sanitize" (rewrite bash/tests), "guard" (security/hygiene check), '
+            '"diff" (slice diff), "deps" (query lockfile), "web" (fetch clean MD), "expand" (unfold #hash), '
+            '"image" (downscale), or "compress" (TOCP prompt).'
+        ),
+        'annotations': {'readOnlyHint': False, 'destructiveHint': False},
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'action': {
+                    'type': 'string',
+                    'enum': ['sanitize', 'guard', 'diff', 'deps', 'web', 'expand', 'image', 'compress'],
+                },
+                'command': {'type': 'string'},
+                'code': {'type': 'string'},
+                'file_path': {'type': 'string'},
+                'diff': {'type': 'string'},
+                'max_context': {'type': 'integer'},
+                'package_name': {'type': 'string'},
+                'lockfile_path': {'type': 'string'},
+                'url': {'type': 'string'},
+                'force_refresh': {'type': 'boolean'},
+                'hash': {'type': 'string'},
+                'image_path': {'type': 'string'},
+                'max_edge': {'type': 'integer'},
+                'prompt': {'type': 'string'},
+                'cwd': {'type': 'string'},
+            },
+            'required': ['action'],
+        },
+    },
+]
 
 def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024:
@@ -1069,8 +1298,88 @@ def _tier_quota_limit_msg(quota: dict) -> str:
     return f"{tier_name} monthly limit ({limit:,} tokens) reached; optimizations paused ({cta})."
 
 
+_REPO_MAP_ACTIONS = {
+    "graph": "get_architecture_graph",
+    "api": "get_api_surface",
+    "tree": "list_dir",
+}
+_SESSION_CONTEXT_ACTIONS = {
+    "budget": "context_budget",
+    "compact": "compact_conversation",
+    "prune": "prune_superseded",
+    "mistakes": "get_mistakes",
+    "metrics": "get_token_savings_metrics",
+}
+_OUMV_ACTIONS = {
+    "status": "oumv_status",
+    "observe": "oumv_observe",
+    "understand": "oumv_understand",
+    "mutate": "oumv_mutate",
+    "verify": "oumv_verify",
+    "graph": "oumv_graph",
+}
+_HELPER_ACTIONS = {
+    "sanitize": "sanitize_command",
+    "guard": "guard_inspect",
+    "diff": "slice_diff",
+    "deps": "query_dependency",
+    "web": "read_web_page",
+    "expand": "expand_ref",
+    "image": "optimize_image",
+    "compress": "compress_prompt",
+}
+
+
 def _dispatch_tool_call(name: str, args: dict) -> dict:
     global _EPOCH_GEN
+    # Route consolidated tools to canonical internal handlers (zero logic duplication).
+    if name == "smart_read_file":
+        if args.get("targets"):
+            name = "smart_bundle"
+        elif args.get("package_name") and not (args.get("path") or args.get("file_path") or args.get("file")):
+            name = "slice_external_type"
+    elif name == "scoped_search":
+        mode = str(args.get("mode") or "").strip().lower()
+        if args.get("queries"):
+            name = "batch_search"
+        elif mode in ("glob", "fuzzy", "git"):
+            q = args.get("query") or args.get("pattern") or ""
+            args = {
+                "queries": [{"pattern": q, "type": mode, "path": args.get("path") or args.get("project_path") or "", "case_sensitive": bool(args.get("case_sensitive", False)), "max_results": int(args.get("max_results") or 25)}],
+                "cwd": args.get("cwd") or args.get("project_path") or args.get("path"),
+            }
+            name = "batch_search"
+        elif mode in ("text", "regex") and "use_regex" not in args:
+            args = dict(args, use_regex=(mode == "regex"))
+    elif name == "repo_map":
+        view = str(args.get("view") or "graph").strip().lower()
+        if view not in _REPO_MAP_ACTIONS:
+            return _fallback_error("repo_map", f"unknown view '{view}' (expected graph|api|tree)")
+        mapped = _REPO_MAP_ACTIONS[view]
+        if view == "tree" and not args.get("path"):
+            args = dict(args, path=args.get("project_path") or ".")
+        elif view in ("graph", "api") and not args.get("project_path") and args.get("path"):
+            args = dict(args, project_path=args.get("path"))
+        name = mapped
+    elif name == "session_context":
+        action = str(args.get("action") or "budget").strip().lower()
+        if action not in _SESSION_CONTEXT_ACTIONS:
+            return _fallback_error("session_context", f"unknown action '{action}'")
+        name = _SESSION_CONTEXT_ACTIONS[action]
+    elif name == "oumv":
+        action = str(args.get("action") or "status").strip().lower()
+        if action not in _OUMV_ACTIONS:
+            return _fallback_error("oumv", f"unknown action '{action}'")
+        mapped = _OUMV_ACTIONS[action]
+        if action == "verify":
+            args = dict(args, action=args.get("verify_action") or "invoke")
+        name = mapped
+    elif name == "run_helper":
+        action = str(args.get("action") or "").strip().lower()
+        if action not in _HELPER_ACTIONS:
+            return _fallback_error("run_helper", f"unknown action '{action}'")
+        name = _HELPER_ACTIONS[action]
+
     tracker = _get_safe_tracker()
     quota = LicenseManager.check_quota(tracker)
     is_quota_exceeded = bool(quota.get("is_quota_exceeded", False))
@@ -2226,7 +2535,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
     elif name == "oumv_status":
         try:
             from src.oumv_gateway import OUMVGateway
-            ws = str(args.get("workspace_dir") or "").strip() or None
+            ws = str(args.get("workspace_dir") or "").strip() or get_active_workspace() or os.getcwd()
             res = OUMVGateway.status(workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -2277,7 +2586,17 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             res = OUMVGateway.verify(target=tgt, action=act, payload=payload, runtime=rt)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
-            return _fallback_error("oumv_verify", f"failed to execute OUMV verification: {e}")
+            return _fallback_error("oumv_verify", f"failed to verify OUMV action: {e}")
+
+    elif name == "oumv_graph":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            qry = str(args.get("query") or "overview").strip()
+            tgt = str(args.get("target") or "").strip() or None
+            res = OUMVGateway.graph(query=qry, target=tgt)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_graph", f"failed to query cross-stack graph: {e}")
 
     elif name == "apply_edits":
         try:
@@ -2550,7 +2869,8 @@ def run_mcp_server():
             }
         elif method == "tools/list":
             _TOOLS_LISTED = True
-            response["result"] = {"tools": TOOLS}
+            profile = os.environ.get("TOKENSAFE_MCP_PROFILE", "").strip().lower()
+            response["result"] = {"tools": FULL_TOOLS if profile == "full" else TOOLS}
         elif method == "tools/call":
             tool_name = str(params.get("name") or "")
             raw_tool_args = params.get("arguments")

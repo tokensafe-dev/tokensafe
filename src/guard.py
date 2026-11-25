@@ -670,8 +670,8 @@ class TokenSafeGuard:
                             f"TokenSafe Protocol mandates using MCP tools to prevent context window bloat:\n"
                             f"• To search keywords, symbols, or configs: call 'tokensafe:scoped_search(query, scope)'\n"
                             f"• To inspect definitions/symbols in a file: call 'tokensafe:smart_read_file(path, symbol)'\n"
-                            f"• To locate God Nodes & architecture: call 'tokensafe:get_architecture_graph(project_path)'\n"
-                            f"• To inspect project exports & types: call 'tokensafe:get_api_surface(project_path)'"
+                            f"• To locate God Nodes & architecture: call 'tokensafe:repo_map(view=\"graph\", project_path=...)'\n"
+                            f"• To inspect project exports & types: call 'tokensafe:repo_map(view=\"api\", project_path=...)'"
                         )
 
                 elif cmd_tok == "find":
@@ -681,7 +681,7 @@ class TokenSafeGuard:
                     if has_code_ext or has_code_dir or is_root_file_crawl:
                         return (
                             f"Raw file crawl via 'find' blocked: '{sub_cmd}'. "
-                            f"Use 'tokensafe:scoped_search(query)' or 'tokensafe:get_architecture_graph(project_path)' "
+                            f"Use 'tokensafe:scoped_search(query)' or 'tokensafe:repo_map(view=\"tree\")' "
                             f"instead of scanning directory trees."
                         )
 

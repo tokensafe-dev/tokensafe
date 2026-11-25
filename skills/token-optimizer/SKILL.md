@@ -20,88 +20,63 @@ folds multi-turn conversation history, guards against secret leaks, and standard
 
 1. **ZERO RAW TERMINAL GREP / FIND (HARD-BLOCKED & REPLACED BY `scoped_search`)**:
    - Strictly NEVER run `grep`, `egrep`, `ripgrep`, or `find` in `run_command` on source code files (`.ts`, `.tsx`, `.py`, `.js`, `src/`, `views/`, `components/`).
-   - Raw code searches via bash burn thousands of context tokens and are blocked by **TokenSafe Guard** (`decision: deny`).
-   - **Mandatory Search Tool (`scoped_search`)**: ALWAYS call `tokensafe:scoped_search(query, path=".", scope="code")` to search for text, identifiers, or symbol definitions across unknown files (-90% tokens). The `path` parameter specifies the search directory or project root (e.g. `"."`, `"./src"`). The `scope` parameter filters files (`"code"`, `"config"`, `"all"`), a file extension (`"go"`, `"ts"`), or a subfolder path (`"internal/promo"`).
+   - **Mandatory Search Tool (`scoped_search`)**: Call `tokensafe:scoped_search(query, path=".", scope="code")` for single searches (`mode="auto|text|regex|glob|fuzzy|git"`), or pass `queries=[{pattern, type, path, glob}]` for up to 20 concurrent queries in <70ms.
 
-2. **SYMBOL & COMPONENT EXTRACTION (`smart_read_file`)**:
-   - When locating or reading any function, component, class, or handler (e.g. `<LuckyWheelTab>`, `areSectorEqual`, `useWallet`), ALWAYS call `tokensafe:smart_read_file` with `path` (supports relative paths, e.g. `"src/service.ts"`) and `symbol`.
-   - **1-Hop Dependency Modes (`dep_mode` & `include_deps`)**: By default (`dep_mode="signature"`), `smart_read_file` returns the full target implementation plus compact 1-line 1-hop dependency signatures and collapsed imports (-95%+ tokens). Pass `"dep_mode": "full"` when full 1-hop dependency bodies are required, or `"include_deps": false` for 0-hop surgical isolation.
-   - **Cache Pointer Recovery (`force_full`)**: When repeating an unchanged read in the same MCP session, `smart_read_file` may return a compact pointer referencing the prior output. Reuse that earlier output; only pass `"force_full": true` if your context was compacted or you are a fresh subagent lacking prior turns.
-   - **Multi-Symbol Bundles (`smart_bundle`)**: When you need 3+ related symbols across several files, call `tokensafe:smart_bundle(targets=[{path, symbol}])` ONCE instead of chained `smart_read_file` calls (max 8 targets). It merges per-file skeletons, deduplicates shared import/type lines into one block, and unifies 1-hop dependency signatures — one roundtrip instead of many.
-   - **Schema Auto-Slicing**: OpenAPI/Swagger, Prisma, GraphQL and SQL files bypass AST skeletonization. Pass the spec path (`/users/{id}`), Prisma model, GraphQL type, or SQL table as `symbol` for a targeted slice with 1-hop references; an empty `symbol` returns a compact overview (paths/models/types/tables index) instead of a 20k-50k token dump.
-   - **Result**: Preserves the exact target definition while folding surrounding inert code into clean 1-line signatures without docstrings (-85% to -98% tokens).
+2. **SYMBOL, BUNDLE & EXTERNAL TYPE EXTRACTION (`smart_read_file`)**:
+   - Call `tokensafe:smart_read_file` with `path` and `symbol` (`dep_mode="signature"` default, `"full"` for dependency bodies, `"include_deps": false` for 0-hop isolation, `"force_full": true` only after compaction or as a fresh subagent).
+   - **Multi-Symbol Bundles**: Pass `targets=[{path, symbol}]` (up to 8 targets) to merge skeletons and deduplicate shared imports in ONE call.
+   - **External `.d.ts` Types**: Pass `package_name` + `symbol` to slice 3rd-party TypeScript definitions from `node_modules` (-95% tokens).
+   - **Schema Auto-Slicing**: OpenAPI/Prisma/GraphQL/SQL files auto-slice via `symbol` (empty `symbol` returns an overview).
 
-3. **MANDATORY ARCHITECTURE GRAPH & GOD NODES FIRST (`get_architecture_graph`)**:
-   - For ANY codebase inquiry, feature design, refactoring, or multi-component investigation, your FIRST tool call MUST be `tokensafe:get_architecture_graph(project_path)` before diving into individual files or running searches. Always pass the target project's absolute path (e.g. `"/path/to/repo"`) when working across multiple workspaces or outside CWD.
-   - **Result**: Returns top architectural God Nodes, dependency hubs, and centrality rankings in < 250 tokens without file crawling.
+3. **ARCHITECTURE GRAPH, API SURFACE & DIRECTORY TREE (`repo_map`)**:
+   - First call `tokensafe:repo_map(view="graph", project_path=...)` to inspect God Nodes and dependency hubs (<250 tokens) before reading files.
+   - Use `view="api"` for exported classes/types/interfaces, and `view="tree"` (depth=2) instead of `ls -la`.
 
-4. **API SURFACE INSPECTION (`get_api_surface`)**:
-   - Call `tokensafe:get_api_surface(project_path=".")` (`project_path` defaults to active workspace) to get all exported classes, types, interfaces, and function signatures in a single compact markdown map.
+4. **SURGICAL FILE EDITS (`apply_edits` / `edit_file`) & STREAM GUARD (`sed -i` BLOCKED)**:
+   - Use `tokensafe:apply_edits(edits=[...], verify="npm test")` for >=2 hunks/files or edit + verify loops.
+   - On existing files with >= 40 lines, wholesale rewrites via `write_file` are blocked by **Output Guard**. Use `edit_file` or `apply_edits`.
+   - NEVER run `sed -i`, `perl -i`, `awk -i` on source code or suppress errors (`2>/dev/null`).
 
-5. **DIRECTORY NAVIGATION (`list_dir`)**:
-   - NEVER run `ls -la` or `ls -l` in terminal.
-   - Call `tokensafe:list_dir(path=".", depth=2)` for clean directory trees without permissions, timestamps, or lockfiles (-90% tokens). Supports relative subfolders (`path="src"`).
+5. **SECRET LEAK PREVENTION (ZERO HARDCODED FALLBACKS)**:
+   - Never hardcode real private keys, API secrets, or credentials as fallback values in `os.environ.get()` or `process.env`.
 
-6. **SURGICAL FILE EDITS (`edit_file`) & IN-PLACE STREAM MUTATION GUARD (`sed -i` HARD-BLOCKED)**:
-   - On existing files with >= 40 lines, wholesale rewrites via `write_file` are blocked by **Output Guard**. Always use `edit_file` with precise `Target` and `Replacement` blocks.
-   - Strictly NEVER run `sed -i`, `perl -i`, `awk -i`, or terminal stream editors on source files (`.ts`, `.tsx`, `.py`, `.js`, etc.) or with numeric line ranges (`'10,20d'`). Blind numeric editing causes line-drift and catastrophic accidental code deletion. These commands are hard-blocked by **TokenSafe Guard** (`decision: deny`).
-   - NEVER suppress errors with `2>/dev/null` or `&>/dev/null` on file modifications or build commands; failures must fail fast and loud.
+6. **SESSION & CONTEXT HYGIENE (`session_context`)**:
+   - `action="budget"` (`model=...`, `transcript_path=...`): check window usage and Context Quality Score (Grade S–F).
+   - `action="compact"` (`transcript_path=...`): fold past turns into a Consolidated State Ledger with a 3-line Post-Compaction Orientation Digest.
+   - `action="prune"` (`transcript_path=...`): drop superseded intermediate file reads.
+   - `action="mistakes"` (`project_root=...`): query anti-stuck memory of prior dead-ends and reverts.
+   - `action="metrics"`: cumulative savings analytics.
 
-7. **SECRET LEAK PREVENTION (ZERO HARDCODED FALLBACKS)**:
-   - Never provide real private keys, API secrets, or credentials as fallback values in `os.environ.get()` or `process.env`. Real credentials must exist strictly in environment variables.
+7. **UTILITIES (`run_helper`)**:
+   - `action="expand"` (`hash`): restore full original text of a folded `#hash` block.
+   - `action="web"` (`url`): fetch docs/pages as clean Markdown (L1/L2/L3 cached).
+   - `action="deps"` (`package_name`, `lockfile_path`): point lockfile lookup in <50 tokens.
+   - `action="sanitize"` (`command`, `cwd`): rewrite noisy shell/test commands.
+   - `action="guard"` (`command`/`code`, `file_path`): pre-flight security/hygiene audit.
+   - `action="diff"` (`diff`): slice unified diffs.
+   - `action="image"` (`image_path`, `max_edge=1024`): downscale oversized screenshots (-50-75% vision tokens).
+   - `action="compress"` (`prompt`): TOCP S-expression prompt compression.
 
-8. **CONTEXT BUDGET & HEALTH SCORE (`context_budget` → `compact_conversation`)**:
-   - Before large multi-step tasks, call `tokensafe:context_budget(model=...)` to check the window budget and Context Quality Score (Grade S/A/B/C/F, tools/history/prompts breakdown, 50/80/95% thresholds).
-   - When it reports `warning`, `critical`, or Grade C/F, call `tokensafe:compact_conversation(transcript_path=...)` to fold past turns into a Consolidated State Ledger with a 3-line Post-Compaction Orientation Digest (Active Goal, Last State, Next Focus) before continuing — resuming flow immediately without post-compaction disorientation.
-
-9. **REPEAT READ DEDUPLICATION & CACHE POINTERS**:
-   - Never repeatedly re-read the same file or symbol within an active session.
-   - When `smart_read_file` returns a pointer hit (`// [TokenSafe: Pointer Hit for ...]`), reuse earlier context; pass `"force_full": true` only if your context was compacted or you are a fresh subagent lacking prior turns.
-
-10. **ZERO-FLUFF EGRESS & SURGICAL DIFFS**:
-    - Eliminate conversational preambles, courtesy fillers, and trailing sign-offs.
-    - Never reprint full unmodified files or lengthy boilerplate; cite line ranges and provide targeted diffs.
-
-11. **COMPACT TEST EXECUTION & PIPELINE SANITIZATION**:
-    - Run unit tests with concise flags or via `tokensafe wrap '<cmd>'` or `tokensafe tests [cmd]`. Native support for `bun test`, `pytest`, `python -m unittest`, `vitest`, `jest`, `cargo test`, and `go test` collapses passing test suites into a single-line summary (`✓ PASS: ...`) rather than flooding `Messages` history with hundreds of verbose log lines. Full traceback is strictly preserved on failure.
-    - Commands like `git push` automatically strip interactive object-counting progress spam (`--no-progress`), and `git commit` is wrapped when pre-commit/husky hooks exist.
-
-12. **MULTIMODAL ISOLATION (PROMPT CACHE PROTECTION)**:
-    - Loading screenshots or images into a long (>150k-token) coding conversation triggers full KV-cache invalidation and a 3-7x TTFT cliff (40-97s/turn).
-    - ALWAYS delegate visual inspection of screenshots/mockups to a subagent that returns a concise text-only summary of findings (selectors, coordinates, values, errors); NEVER load raw images into the main coding session.
-
-13. **BATCH EDITS & SEARCH ACCELERATION (`apply_edits` & `batch_search`)**:
-    - When editing >=2 hunks/files or running an edit + verify loop, call `tokensafe:apply_edits(edits=[...], verify="npm test")` to consolidate operations into 1 turn instead of serial turns.
-    - When running >=2 searches or combining code search with git inspection, call `tokensafe:batch_search(queries=[...])` for concurrent execution in <70ms.
+8. **COMPACT TEST EXECUTION & MULTIMODAL ISOLATION**:
+   - Run unit tests via `tokensafe tests [cmd]` or `tokensafe wrap '<cmd>'` (1-line summary on pass, full traceback on failure).
+   - Never load raw screenshots into long (>150k) sessions; delegate visual inspection to a subagent returning text-only findings.
 
 ---
 
-## Core MCP Tools (`tokensafe`)
+## Core MCP Tools (`tokensafe` — 7 Consolidated Tools)
 
-The full tool table with efficiency impact, JSON workflow examples, the Guard check matrix, and the CLI reference live in `references/` — read only the file you need:
-
-- [`references/mcp-tools.md`](references/mcp-tools.md) — Core MCP Tools table + Agent Workflow JSON examples
-- [`references/guard-checks.md`](references/guard-checks.md) — Security & Hygiene Guard check matrix (deny/ask per operation)
+- [`references/mcp-tools.md`](references/mcp-tools.md) — Core MCP Tools table + JSON workflow examples
+- [`references/guard-checks.md`](references/guard-checks.md) — Security & Hygiene Guard check matrix
 - [`references/cli-reference.md`](references/cli-reference.md) — `tokensafe` CLI command reference
 
-Quick pointers:
-
-- Batch Edits + Verify: `tokensafe:apply_edits(edits=[...], best_effort=true, verify="npm test")` — atomic/best-effort multi-file edits + inline test/typecheck in 1 turn.
-- Batch Search: `tokensafe:batch_search(queries=[{pattern, type}])` — up to 20 concurrent text, regex, glob, fuzzy, or read-only git queries in 1 call.
-- Search: `tokensafe:scoped_search(query, path=".", scope="code")` — safe keyword & symbol search, never raw grep.
-- Inspect: `tokensafe:smart_read_file(path, symbol)` — definition + 1-hop deps. Auto-slices lockfiles, CSV/TSV, SQL dumps.
-- External Types: `tokensafe:slice_external_type(package_name, type_name)` — extracts 3rd-party TypeScript definitions from `node_modules` without file crawling (-95% tokens, L1/L2/L3 synced).
-- Query Dependencies: `tokensafe:query_dependency(lockfile_path, package_name)` — point lookups in npm/bun/pnpm/cargo/poetry lockfiles in <50 tokens.
-- Expand Stash: `tokensafe:expand_ref(hash)` — restore full raw content of any folded block by its 8-char hash (e.g. 'a1b2c3d4').
-- Web Reading: `tokensafe:read_web_page(url, force_refresh=false)` — fetch documentation/articles as clean Markdown without HTML/script junk, backed by 3-tier L1/L2/L3 team cache.
-- Bundle: `tokensafe:smart_bundle(targets=[{path, symbol}])` — 3-8 related symbols across files in one call, shared imports deduplicated.
-- Navigate: `tokensafe:get_architecture_graph(project_path)` / `tokensafe:get_api_surface(project_path)`.
-- Directory: `tokensafe:list_dir(path, depth=2)` — clean tree, never verbose `ls -la`.
-- Terminal: `tokensafe:sanitize_command(command, cwd)` or run via `tokensafe wrap '<cmd>'` — rewrites git push (--no-progress), wraps git commit hooks, and folds test suites (bun, python unittest/pytest, vitest, jest, cargo, go) to 1-line summaries.
-- Context: `tokensafe:compact_conversation(transcript_path)` / `tokensafe:context_budget`.
-- Vision: `tokensafe:optimize_image(image_path, max_edge=1024)` — downscale images >1024px (-50-75% vision tokens).
-- Prune Reads: `tokensafe:prune_superseded(transcript_path)` — drops obsolete intermediate file reads (-30-40% context).
-- Anti-Stuck: `tokensafe:get_mistakes(project_root)` — persistent memory of prior dead-ends and git reverts, backed by 2-tier hybrid escalation (>2 identical failures in 30m = `force_ask`, else advisory) and team broadcast.
+Quick reference:
+- `tokensafe:smart_read_file(path, symbol)` / `(targets=[...])` / `(package_name, symbol)`
+- `tokensafe:scoped_search(query, path=".", scope="code")` / `(queries=[...])`
+- `tokensafe:apply_edits(edits=[...], verify="...")`
+- `tokensafe:repo_map(view="graph"|"api"|"tree", project_path=".")`
+- `tokensafe:session_context(action="budget"|"compact"|"prune"|"mistakes"|"metrics", ...)`
+- `tokensafe:oumv(action="status"|"observe"|"understand"|"verify"|"mutate"|"graph", ...)`
+- `tokensafe:run_helper(action="sanitize"|"guard"|"diff"|"deps"|"web"|"expand"|"image"|"compress", ...)`
 
 ---
 
@@ -137,10 +112,10 @@ TokenSafe actively maximizes provider KV-cache hit rates alongside token compres
 
 TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to inspect, reason about, edit, and verify running Frontend (`tokensafe-ui`, React 18/19 with Zustand/Redux/Context/useReducer, Vue 3) and Backend (FastAPI, Go, Node.js) services in real time without heavy headless browsers or unconstrained shell curls:
 
-1. **LIVE RUNTIME HEALTH (`oumv_status`)**:
-   - Call `tokensafe:oumv_status()` to inspect connection status and capabilities of running DevServers (Frontend ports 5173/3000, Backend ports 8080/8000).
+1. **LIVE RUNTIME HEALTH (`oumv(action="status")`)**:
+   - Call `tokensafe:oumv(action="status")` to inspect connection status and capabilities of running DevServers (Frontend ports 5173/3000, Backend ports 8080/8000).
 
-2. **PROGRESSIVE CONTEXT OBSERVATION (`oumv_observe`)**:
+2. **PROGRESSIVE CONTEXT OBSERVATION (`oumv(action="observe")`)**:
    - Never dump raw HTML or giant JSON payloads. Observe progressively across native components, React, Vue, or backend APIs:
      - **L0 (Page Pulse ~20 tokens)**: Status, active route, mounted components/roots, error counts (`level="L0"`).
      - **L1 (Surface ~150 tokens)**: Interactive map of endpoints, models, buttons, and ARIA roles (`level="L1"`).
@@ -148,18 +123,18 @@ TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to i
      - **L3 (Source)**: Targeted symbol source with line mapping and OCC version hash token.
      - **L4 (Traces)**: Event stream, signal mutations, store subscriptions (Zustand/Redux/Context updates), and state snapshot diffs.
 
-3. **RUNTIME CAUSALITY & WHY-STATE (`oumv_understand`)**:
+3. **RUNTIME CAUSALITY & WHY-STATE (`oumv(action="understand")`)**:
    - Never guess state flows or assume dependencies.
-   - Call `tokensafe:oumv_understand(query="causality", target="POST /api/orders")` to query live dependencies:
+   - Call `tokensafe:oumv(action="understand", query="causality", target="POST /api/orders")` to query live dependencies:
      `Route ➔ Handler ➔ ValidatesWith ➔ Model ➔ DB Table` or `Signal ➔ Computed ➔ Effect ➔ DOM Binding`.
-   - Call `tokensafe:oumv_understand(query="impact", target="cart")` before refactoring to know exactly what breaks.
+   - Call `tokensafe:oumv(action="understand", query="impact", target="cart")` before refactoring to know exactly what breaks. Use `action="graph"` for the cross-stack graph.
 
-4. **SANDBOXED ACTION VERIFICATION (`oumv_verify`)**:
+4. **SANDBOXED ACTION VERIFICATION (`oumv(action="verify")`)**:
    - Sub-millisecond to low-millisecond local action verification inside transactional sandbox.
-   - **For backend endpoints**: call `tokensafe:oumv_verify(target="POST /api/products", payload={...})` — executes the request in-memory with automatic database rollback (`rolledBack: true`) and returns structured state diffs (`diff`) and HTTP status code.
-   - **For frontend UI**: call `tokensafe:oumv_verify(target="cart", action="addItem", payload={...})` — executes synthetic events, component actions, Zustand/Redux actions, or reducer dispatches in memory, returning structured `stateDiff` and `surfaceDiff` without spawning heavy browser automation.
+   - **For backend endpoints**: call `tokensafe:oumv(action="verify", target="POST /api/products", payload={...})` — executes in-memory with automatic DB rollback (`rolledBack: true`).
+   - **For frontend UI**: call `tokensafe:oumv(action="verify", target="cart", verify_action="addItem", payload={...})` — executes synthetic events/store actions in memory without browser automation.
 
-5. **OPTIMISTIC CONCURRENCY MUTATIONS (`oumv_mutate`)**:
+5. **OPTIMISTIC CONCURRENCY MUTATIONS (`oumv(action="mutate")`)**:
    - Submits surgical edits verified against `expectedVersion` with built-in Babel AST TSX/JSX syntax guards and security leak prevention.
 
 ---

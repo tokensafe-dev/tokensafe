@@ -26,14 +26,14 @@ class TestContextCoupling(unittest.TestCase):
 
     def test_directives_mention_hud_and_compact(self):
         from src.adapter_core import TOKENSAFE_DIRECTIVES
-        self.assertIn("context_budget", TOKENSAFE_DIRECTIVES)
-        self.assertIn("compact_conversation", TOKENSAFE_DIRECTIVES)
+        self.assertIn("session_context", TOKENSAFE_DIRECTIVES)
+        self.assertIn("compact", TOKENSAFE_DIRECTIVES)
 
     def test_rules_mention_hud_and_compact(self):
         with open(os.path.join(PROJECT_ROOT, "rules", "AGENTS.md"), encoding="utf-8") as f:
             rules = f.read()
-        self.assertIn("context_budget", rules)
-        self.assertIn("compact_conversation", rules)
+        self.assertIn("session_context", rules)
+        self.assertIn("compact", rules)
 
     def test_measure_transcript_counts_content(self):
         from src.history_compactor import HistoryCompactor

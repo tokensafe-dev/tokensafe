@@ -261,7 +261,7 @@ def _handle(payload: dict) -> dict:
             already = tracker.get_last_event(conversation_id, "BUDGET_WARNING")
             if not already:
                 if transcript_path:
-                    action = (f"Call tokensafe:compact_conversation(transcript_path='{transcript_path}') "
+                    action = (f"Call tokensafe:session_context(action='compact', transcript_path='{transcript_path}') "
                               f"now to fold past turns before continuing.")
                 else:
                     action = budget["recommendation"]

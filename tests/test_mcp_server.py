@@ -3,27 +3,62 @@ import json
 import io
 import time
 from unittest.mock import patch
-from src.mcp_server import handle_tool_call, _execute_with_timeout, run_mcp_server, TOOLS
+from src.mcp_server import handle_tool_call, _execute_with_timeout, run_mcp_server, TOOLS, FULL_TOOLS
 
 class TestMCPServer(unittest.TestCase):
     def test_tools_list_has_all_schemas(self):
         tool_names = [t["name"] for t in TOOLS]
         expected_tools = [
-            "smart_read_file", "smart_bundle", "get_architecture_graph", "get_api_surface",
-            "compress_prompt", "context_budget", "compact_conversation", "sanitize_command",
-            "slice_diff", "get_token_savings_metrics", "guard_inspect", "list_dir",
-            "scoped_search", "read_web_page", "expand_ref", "optimize_image",
-            "prune_superseded", "get_mistakes", "query_dependency", "slice_external_type",
-            "oumv_status", "oumv_observe", "oumv_understand", "oumv_mutate", "oumv_verify",
-            "apply_edits", "batch_search"
+            "smart_read_file", "scoped_search", "apply_edits",
+            "repo_map", "session_context", "oumv", "run_helper",
         ]
-        self.assertEqual(len(tool_names), 27)
+        self.assertEqual(len(tool_names), 7)
         for t in expected_tools:
             self.assertIn(t, tool_names)
-            # Verify each tool schema has name, description, inputSchema
             matching = [s for s in TOOLS if s["name"] == t][0]
             self.assertTrue(len(matching["description"]) > 10)
             self.assertEqual(matching["inputSchema"]["type"], "object")
+        self.assertEqual(len(FULL_TOOLS), 28)
+
+    def test_consolidated_tools_routing_and_legacy_aliases(self):
+        # 1. repo_map -> tree/graph/api
+        tree_res = handle_tool_call("repo_map", {"view": "tree", "path": "src", "depth": 2})
+        self.assertNotIn("isError", tree_res)
+        self.assertIn("skeletonizer.py", tree_res["content"][0]["text"])
+
+        # 2. run_helper -> compress/guard/sanitize
+        comp_res = handle_tool_call("run_helper", {"action": "compress", "prompt": "Слушай, перепиши функцию get_balance в wallet.ts"})
+        self.assertNotIn("isError", comp_res)
+        self.assertIn("compact_text", json.loads(comp_res["content"][0]["text"]))
+
+        guard_res = handle_tool_call("run_helper", {"action": "guard", "command": "git add .env"})
+        self.assertTrue(json.loads(guard_res["content"][0]["text"]).get("blocked"))
+
+        # 3. session_context -> metrics / budget
+        met_res = handle_tool_call("session_context", {"action": "metrics"})
+        self.assertNotIn("isError", met_res)
+        bud_res = handle_tool_call("session_context", {"action": "budget", "model": "claude-sonnet-4"})
+        self.assertNotIn("isError", bud_res)
+
+        # 4. oumv -> status
+        oumv_res = handle_tool_call("oumv", {"action": "status"})
+        self.assertNotIn("isError", oumv_res)
+
+        # 5. scoped_search batch mode
+        batch_res = handle_tool_call("scoped_search", {"queries": [{"pattern": "def handle_tool_call", "type": "text", "path": "src"}]})
+        self.assertNotIn("isError", batch_res)
+        self.assertIn("mcp_server.py", batch_res["content"][0]["text"])
+
+        # 6. tools/list full profile opt-in
+        import os
+        stdin_data = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"
+        fake_out = io.StringIO()
+        with patch.dict(os.environ, {"TOKENSAFE_MCP_PROFILE": "full"}), \
+             patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", fake_out):
+            run_mcp_server()
+        resp = json.loads(fake_out.getvalue().strip())
+        self.assertEqual(len(resp["result"]["tools"]), 28)
 
     def test_compress_prompt_mcp(self):
         res = handle_tool_call("compress_prompt", {"prompt": "Слушай, перепиши функцию get_balance в wallet.ts"})

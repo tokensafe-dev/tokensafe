@@ -111,7 +111,7 @@ def main():
                     f"{directives}\n\n"
                     f"{banner}\n"
                     "⚡ Core God Nodes and dependency hubs mapped above. "
-                    "Call 'tokensafe:get_architecture_graph(project_path)' for full dependency trees."
+                    "Call 'tokensafe:repo_map(view=\"graph\", project_path=...)' for full dependency trees."
                 )
     except Exception:
         pass

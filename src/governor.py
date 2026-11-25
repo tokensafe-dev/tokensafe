@@ -379,12 +379,12 @@ class ContextBudget:
         pct = round(used / window * 100.0, 1) if window > 0 else 0.0
         if pct >= 95:
             threshold, recommendation = "critical", (
-                "Context nearly exhausted. Call tokensafe:compact_conversation on the "
+                "Context nearly exhausted. Call tokensafe:session_context(action='compact', ...) on the "
                 "session transcript now, or start a fresh session carrying the ledger.")
         elif pct >= 80:
             threshold, recommendation = "warning", (
                 "Context is heavy. Prefer tokensafe:smart_read_file with symbol= for "
-                "further reads and consider tokensafe:compact_conversation.")
+                "further reads and consider tokensafe:session_context(action='compact', ...).")
         elif pct >= 50:
             threshold, recommendation = "notice", (
                 "Half the estimated window is used. Keep reads surgical (symbol=, include_deps=false).")
