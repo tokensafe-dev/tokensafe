@@ -15,9 +15,11 @@ Key capabilities:
 
 import os
 import re
+import stat
 import difflib
 import shlex
 import subprocess
+import tempfile
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -220,6 +222,39 @@ def _find_closest_line_hint(target: str, content: str, max_lines_preview: int = 
     return "Target string not found anywhere in file."
 
 
+def _dominant_newline(text: str) -> str:
+    """Returns the newline style used most often in `text` (defaults to LF)."""
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
+def _normalize_eol(text: str, newline: str) -> str:
+    """Rewrites every line ending in `text` to `newline`."""
+    if "\n" not in text:
+        return text
+    return text.replace("\r\n", "\n").replace("\n", newline)
+
+
+def _write_atomic(abs_path: str, content: str, mode: Optional[int]) -> None:
+    """Writes through a same-directory temp file + os.replace, so a failed write
+    never leaves a truncated target. Preserves `mode` when provided."""
+    directory = os.path.dirname(abs_path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".tokensafe_edit_", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        if mode is not None:
+            os.chmod(tmp_path, stat.S_IMODE(mode))
+        os.replace(tmp_path, abs_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _apply_hunk_to_text(
     content: str,
     target: str,
@@ -228,52 +263,68 @@ def _apply_hunk_to_text(
     end_line: Optional[int] = None,
     replace_all: bool = False
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Applies a single hunk to text in-memory, preserving CRLF endings. Returns (new_text, error_message)."""
+    """Applies a single hunk to text in-memory, preserving the region's line endings.
+    Returns (new_text, error_message)."""
     if not target:
         return None, "Target string cannot be empty."
 
+    if start_line is not None and start_line < 1:
+        return None, f"start_line must be a positive integer (got {start_line})."
+    if end_line is not None and end_line < 1:
+        return None, f"end_line must be a positive integer (got {end_line})."
+
     lines = content.splitlines(keepends=True)
-    has_crlf = "\r\n" in content
-    if has_crlf:
-        if target not in content and "\r\n" not in target and "\n" in target:
-            crlf_target = target.replace("\n", "\r\n")
-            if crlf_target in content:
-                target = crlf_target
-        if "\n" in replacement:
-            replacement = replacement.replace("\r\n", "\n").replace("\n", "\r\n")
+
+    def _prepare_match(region: str) -> Tuple[str, str]:
+        """Resolves the target spelling present in `region` and the newline to emit."""
+        matched = target
+        if matched not in region:
+            alt = _normalize_eol(matched, _dominant_newline(region))
+            if alt in region:
+                matched = alt
+        nl = _dominant_newline(matched) if "\n" in matched else _dominant_newline(region)
+        return matched, nl
 
     # Line-bounded search if start_line or end_line is specified
     if start_line is not None or end_line is not None:
-        s_idx = max(0, (start_line - 1)) if start_line is not None else 0
-        e_idx = min(len(lines), end_line) if end_line is not None else len(lines)
-        if s_idx >= len(lines) or s_idx >= e_idx:
-            return None, f"Specified line range [{start_line}, {end_line}] is outside file length ({len(lines)} lines)."
+        s_idx = start_line - 1 if start_line is not None else 0
+        e_idx = end_line if end_line is not None else len(lines)
+        if s_idx >= len(lines):
+            return None, f"start_line {start_line} is outside file length ({len(lines)} lines)."
+        if e_idx > len(lines):
+            return None, f"end_line {end_line} is outside file length ({len(lines)} lines)."
+        if s_idx >= e_idx:
+            return None, f"Inverted line range: start_line {start_line} must be <= end_line {end_line}."
         sub_text = "".join(lines[s_idx:e_idx])
-        if target not in sub_text:
+        match_target, nl = _prepare_match(sub_text)
+        if match_target not in sub_text:
             hint = _find_closest_line_hint(target, sub_text)
             return None, f"Target not found in lines {s_idx+1}..{e_idx}: {hint}"
-        count = sub_text.count(target)
+        count = sub_text.count(match_target)
         if count > 1 and not replace_all:
             return None, f"Target occurs {count} times within lines {s_idx+1}..{e_idx}. Specify replace_all=True or narrow the range."
-        new_sub = sub_text.replace(target, replacement) if replace_all else sub_text.replace(target, replacement, 1)
+        prepared_replacement = _normalize_eol(replacement, nl)
+        new_sub = sub_text.replace(match_target, prepared_replacement) if replace_all else sub_text.replace(match_target, prepared_replacement, 1)
         new_lines = lines[:s_idx] + [new_sub] + lines[e_idx:]
         return "".join(new_lines), None
 
-    if target not in content:
+    match_target, nl = _prepare_match(content)
+    if match_target not in content:
         hint = _find_closest_line_hint(target, content)
         return None, f"Target not found: {hint}"
 
-    count = content.count(target)
+    count = content.count(match_target)
     if count > 1 and not replace_all:
         # Find line numbers of occurrences
         occ_lines = []
         for i, l in enumerate(lines):
-            if target in l:
+            if match_target in l:
                 occ_lines.append(str(i + 1))
         locs = f"lines {', '.join(occ_lines[:5])}" if occ_lines else "multiple locations"
         return None, f"Target occurs {count} times (near {locs}). Specify replace_all=True or pass start_line/end_line."
 
-    new_content = content.replace(target, replacement) if replace_all else content.replace(target, replacement, 1)
+    prepared_replacement = _normalize_eol(replacement, nl)
+    new_content = content.replace(match_target, prepared_replacement) if replace_all else content.replace(match_target, prepared_replacement, 1)
     return new_content, None
 
 
@@ -379,7 +430,11 @@ def execute_batch_edits(
                 failed_files.append({"path": rel_path, "error": f"TokenSafe Security Guard blocked edit: {leak_reason}"})
                 continue
 
-            if (os.path.exists(abs_path) or abs_path in prepared_files) and not overwrite:
+            if abs_path in prepared_files:
+                failed_files.append({"path": rel_path, "error": f"Path '{rel_path}' already has hunk edits in this batch. Cannot also 'create' it."})
+                continue
+
+            if os.path.exists(abs_path) and not overwrite:
                 failed_files.append({"path": rel_path, "error": f"File '{rel_path}' already exists. Set 'overwrite: true' to overwrite."})
                 continue
 
@@ -387,7 +442,9 @@ def execute_batch_edits(
                 "rel_path": rel_path,
                 "new_content": create_content,
                 "is_create": not os.path.exists(abs_path),
+                "allow_overwrite": overwrite,
                 "hunk_count": 0,
+                "noop_hunks": 0,
             }
             continue
 
@@ -400,6 +457,7 @@ def execute_batch_edits(
         if prior_prepared is not None:
             current_text = prior_prepared["new_content"]
             prev_hunk_count = prior_prepared["hunk_count"]
+            prev_noop_count = prior_prepared.get("noop_hunks", 0)
             is_create = prior_prepared["is_create"]
         else:
             if not os.path.exists(abs_path):
@@ -407,16 +465,25 @@ def execute_batch_edits(
                 continue
 
             try:
-                with open(abs_path, "r", encoding="utf-8", errors="replace", newline="") as f:
-                    current_text = f.read()
+                with open(abs_path, "rb") as f:
+                    current_text = f.read().decode("utf-8")
+            except UnicodeDecodeError:
+                failed_files.append({
+                    "path": rel_path,
+                    "error": "File is not valid UTF-8 (possibly cp1251/latin-1/UTF-16 or binary). "
+                             "Convert it explicitly before editing; apply_edits never rewrites non-UTF-8 bytes.",
+                })
+                continue
             except Exception as e:
                 failed_files.append({"path": rel_path, "error": f"Failed to read file: {e}"})
                 continue
             prev_hunk_count = 0
+            prev_noop_count = 0
             is_create = False
 
         file_failed = False
         applied_hunk_count = 0
+        noop_hunk_count = prev_noop_count
 
         for hunk_idx, hunk in enumerate(hunks):
             if not isinstance(hunk, dict):
@@ -442,12 +509,20 @@ def execute_batch_edits(
                 file_failed = True
                 break
 
+            try:
+                s_val = int(start_line) if start_line is not None else None
+                e_val = int(end_line) if end_line is not None else None
+            except (TypeError, ValueError):
+                failed_files.append({"path": rel_path, "error": f"Hunk #{hunk_idx+1}: start_line/end_line must be integers."})
+                file_failed = True
+                break
+
             new_text, err = _apply_hunk_to_text(
                 current_text,
                 target=str(target),
                 replacement=str(replacement),
-                start_line=int(start_line) if start_line is not None else None,
-                end_line=int(end_line) if end_line is not None else None,
+                start_line=s_val,
+                end_line=e_val,
                 replace_all=replace_all
             )
 
@@ -455,6 +530,10 @@ def execute_batch_edits(
                 failed_files.append({"path": rel_path, "error": f"Hunk #{hunk_idx+1} failed: {err}"})
                 file_failed = True
                 break
+
+            if new_text == current_text:
+                noop_hunk_count += 1
+                continue
 
             current_text = new_text
             applied_hunk_count += 1
@@ -465,6 +544,7 @@ def execute_batch_edits(
                 "new_content": current_text,
                 "is_create": is_create,
                 "hunk_count": prev_hunk_count + applied_hunk_count,
+                "noop_hunks": noop_hunk_count,
             }
 
     # Atomic enforcement: if any file failed and not best_effort, reject all
@@ -480,25 +560,50 @@ def execute_batch_edits(
         }
 
     applied_files_info: List[Dict[str, Any]] = []
+    # Restore points for atomic rollback: registered BEFORE a file can be truncated.
+    backups: List[Tuple[str, Optional[bytes]]] = []
+    rolled_back = False
 
-    # Write files to disk if not dry_run (with atomic rollback on write failure when best_effort=False)
+    def _restore_backups() -> None:
+        for b_path, b_bytes in reversed(backups):
+            try:
+                if b_bytes is None:
+                    if os.path.exists(b_path):
+                        os.remove(b_path)
+                else:
+                    with open(b_path, "wb") as rf:
+                        rf.write(b_bytes)
+            except OSError:
+                pass
+        backups.clear()
+
+    # Write files to disk if not dry_run (atomic rollback on write/verify failure when best_effort=False)
     if not dry_run:
-        backups: List[Tuple[str, Optional[bytes]]] = []
         write_aborted = False
         for abs_p, p_info in prepared_files.items():
             try:
+                existed = os.path.exists(abs_p)
                 orig_bytes: Optional[bytes] = None
-                if os.path.exists(abs_p):
+                orig_mode: Optional[int] = None
+                if existed:
                     with open(abs_p, "rb") as bf:
                         orig_bytes = bf.read()
-                os.makedirs(os.path.dirname(abs_p), exist_ok=True)
-                with open(abs_p, "w", encoding="utf-8", newline="") as f:
-                    f.write(p_info["new_content"])
+                    orig_mode = os.stat(abs_p).st_mode
+                # TOCTOU: a file that appeared after validation must not be clobbered.
+                if p_info.get("is_create") and existed and not p_info.get("allow_overwrite"):
+                    raise FileExistsError(
+                        f"File '{p_info['rel_path']}' appeared on disk after validation; "
+                        "refusing to overwrite without 'overwrite: true'."
+                    )
+                # Register the restore point before any byte of this file changes.
                 backups.append((abs_p, orig_bytes))
+                os.makedirs(os.path.dirname(abs_p), exist_ok=True)
+                _write_atomic(abs_p, p_info["new_content"], orig_mode)
                 applied_files_info.append({
                     "path": p_info["rel_path"],
                     "hunks": p_info["hunk_count"],
-                    "is_create": p_info["is_create"]
+                    "noop_hunks": p_info.get("noop_hunks", 0),
+                    "is_create": not existed,
                 })
             except Exception as e:
                 failed_files.append({"path": p_info["rel_path"], "error": f"Disk write failed: {e}"})
@@ -506,22 +611,15 @@ def execute_batch_edits(
                     write_aborted = True
                     break
         if write_aborted:
-            for b_path, b_bytes in reversed(backups):
-                try:
-                    if b_bytes is None:
-                        if os.path.exists(b_path):
-                            os.remove(b_path)
-                    else:
-                        with open(b_path, "wb") as rf:
-                            rf.write(b_bytes)
-                except OSError:
-                    pass
+            _restore_backups()
+            rolled_back = True
             applied_files_info = []
     else:
         for abs_p, p_info in prepared_files.items():
             applied_files_info.append({
                 "path": p_info["rel_path"],
                 "hunks": p_info["hunk_count"],
+                "noop_hunks": p_info.get("noop_hunks", 0),
                 "is_create": p_info["is_create"],
                 "dry_run": True
             })
@@ -532,8 +630,23 @@ def execute_batch_edits(
         "applied_files": applied_files_info,
         "failed_count": len(failed_files),
         "failed_files": failed_files,
-        "dry_run": dry_run
+        "dry_run": dry_run,
+        "rolled_back": rolled_back,
     }
+
+    def _rollback_after_verify_failure() -> None:
+        """Atomic mode means atomic including the verification step: keep the tree consistent."""
+        nonlocal rolled_back
+        if best_effort:
+            return
+        _restore_backups()
+        rolled_back = True
+        result["rolled_back"] = True
+        result["applied_count"] = 0
+        result["applied_files"] = []
+        result["edits_kept"] = False
+        if isinstance(result.get("verify"), dict):
+            result["verify"]["rolled_back"] = True
 
     # Execute inline verify command if requested and files were modified (shell=False, allowlisted argv)
     if verified_argv and applied_files_info and not dry_run:
@@ -573,6 +686,7 @@ def execute_batch_edits(
             }
             if proc.returncode != 0:
                 result["success"] = False
+                _rollback_after_verify_failure()
         except subprocess.TimeoutExpired:
             result["verify"] = {
                 "command": cmd_str,
@@ -581,6 +695,7 @@ def execute_batch_edits(
                 "error": f"Verification command timed out after {verify_timeout_sec}s"
             }
             result["success"] = False
+            _rollback_after_verify_failure()
         except Exception as e:
             result["verify"] = {
                 "command": cmd_str,
@@ -589,5 +704,9 @@ def execute_batch_edits(
                 "error": f"Failed to execute verify command: {e}"
             }
             result["success"] = False
+            _rollback_after_verify_failure()
+
+    if best_effort and applied_files_info:
+        result.setdefault("edits_kept", True)
 
     return result

@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import shutil
+import stat
 import tempfile
 import unittest
 
@@ -241,6 +242,134 @@ class TestAcceleratorFeatures(unittest.TestCase):
         with open(crlf_file, "rb") as f:
             raw = f.read()
         self.assertEqual(raw, b"line1 = 10\r\nline1b = 15\r\nline2 = 20\r\n")
+
+    def test_batch_editor_lone_surrogate_does_not_truncate_file(self):
+        """Regression: a JSON-RPC lone surrogate must not leave a truncated file."""
+        target = os.path.join(self.tmp_dir, "surrogate.py")
+        original = "value = 1\nsecond = 2\n"
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        res = execute_batch_edits(edits=[{
+            "path": "surrogate.py",
+            "hunks": [{"target": "value = 1", "replacement": "value = " + "\ud800"}],
+        }], cwd=self.tmp_dir)
+
+        self.assertFalse(res["success"])
+        with open(target, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), original)
+
+    def test_batch_editor_rejects_non_utf8_file(self):
+        """Regression: non-UTF-8 bytes must never be silently rewritten as U+FFFD."""
+        target = os.path.join(self.tmp_dir, "legacy.txt")
+        original = "привет мир\n".encode("cp1251")
+        with open(target, "wb") as f:
+            f.write(original)
+
+        res = execute_batch_edits(edits=[{
+            "path": "legacy.txt",
+            "hunks": [{"target": "hello", "replacement": "bye"}],
+        }], cwd=self.tmp_dir)
+
+        self.assertFalse(res["success"])
+        self.assertIn("not valid UTF-8", res["failed_files"][0]["error"])
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), original)
+
+    def test_batch_editor_eol_matches_file_not_replacement(self):
+        """Regression: an LF file must not receive CRLF from the replacement text."""
+        lf_file = os.path.join(self.tmp_dir, "unix.py")
+        with open(lf_file, "wb") as f:
+            f.write(b"first = 1\nsecond = 2\n")
+
+        res = execute_batch_edits(edits=[{
+            "path": "unix.py",
+            "hunks": [{
+                "target": "first = 1\nsecond = 2",
+                "replacement": "first = 10\r\nsecond = 20",
+            }],
+        }], cwd=self.tmp_dir)
+
+        self.assertTrue(res["success"], res)
+        with open(lf_file, "rb") as f:
+            self.assertEqual(f.read(), b"first = 10\nsecond = 20\n")
+
+    def test_batch_editor_noop_hunk_and_invalid_bounds(self):
+        """Regression: no-op hunks are not counted; invalid bounds fail per-file, not as a crash."""
+        target = os.path.join(self.tmp_dir, "noop.py")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("a = 1\nb = 2\n")
+
+        noop = execute_batch_edits(edits=[{
+            "path": "noop.py",
+            "hunks": [{"target": "a = 1", "replacement": "a = 1"}],
+        }], cwd=self.tmp_dir)
+        self.assertTrue(noop["success"])
+        self.assertEqual(noop["applied_files"][0]["hunks"], 0)
+        self.assertEqual(noop["applied_files"][0]["noop_hunks"], 1)
+
+        for bad in ({"start_line": 0}, {"end_line": -1}, {"start_line": "abc"}, {"end_line": 99}):
+            hunk = {"target": "a = 1", "replacement": "a = 2"}
+            hunk.update(bad)
+            res = execute_batch_edits(edits=[{"path": "noop.py", "hunks": [hunk]}], cwd=self.tmp_dir)
+            self.assertFalse(res["success"], bad)
+            self.assertTrue(res["failed_files"], bad)
+
+    def test_batch_editor_create_conflicts_with_hunks(self):
+        """Regression: 'create' must not silently discard hunks already applied to the same path."""
+        target = os.path.join(self.tmp_dir, "mixed.py")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+
+        res = execute_batch_edits(edits=[
+            {"path": "mixed.py", "hunks": [{"target": "x = 1", "replacement": "x = 2"}]},
+            {"path": "mixed.py", "create": "x = 3\n", "overwrite": True},
+        ], cwd=self.tmp_dir)
+
+        self.assertFalse(res["success"])
+        self.assertTrue(any("Cannot also 'create'" in e["error"] for e in res["failed_files"]))
+        with open(target, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "x = 1\n")
+
+    def test_batch_editor_verify_failure_rolls_back(self):
+        """Atomic mode means the verify step cannot leave half-applied edits behind."""
+        target = os.path.join(self.tmp_dir, "rollback.py")
+        original = "val = 1\n"
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        edits = [{"path": "rollback.py", "hunks": [{"target": "val = 1", "replacement": "val = 2"}]}]
+        failing_verify = "python3 -m py_compile does_not_exist_xyz.py"
+
+        res = execute_batch_edits(edits=edits, verify=failing_verify, cwd=self.tmp_dir)
+        self.assertFalse(res["success"])
+        self.assertTrue(res.get("rolled_back"))
+        self.assertEqual(res["applied_count"], 0)
+        with open(target, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), original)
+
+        # best_effort keeps the edits and says so
+        res_be = execute_batch_edits(edits=edits, verify=failing_verify, best_effort=True, cwd=self.tmp_dir)
+        self.assertFalse(res_be["success"])
+        self.assertFalse(res_be.get("rolled_back"))
+        self.assertTrue(res_be.get("edits_kept"))
+        with open(target, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "val = 2\n")
+
+    def test_batch_editor_preserves_file_mode(self):
+        """Regression: rewriting a file must keep its permission bits."""
+        target = os.path.join(self.tmp_dir, "script.sh")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\necho one\n")
+        os.chmod(target, 0o750)
+
+        res = execute_batch_edits(edits=[{
+            "path": "script.sh",
+            "hunks": [{"target": "echo one", "replacement": "echo two"}],
+        }], cwd=self.tmp_dir)
+
+        self.assertTrue(res["success"], res)
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o750)
 
     def test_batch_search_queries(self):
         """Tests concurrent batch search across files."""
