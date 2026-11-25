@@ -238,10 +238,60 @@ class OUMVGateway:
                 "framework": stack_info.get("backend", {}).get("framework", "None") if stack_info.get("backend") else "None",
                 "tip": "Static AST analysis active. When backend DevServer starts (port 8080/8000), live OUMV auto-connects."
             },
+            "adapters": cls._adapter_lifecycle(stack_info, fe, be),
             "staticIntelligence": "ACTIVE (L0/L1/L2 AST observation & cross-stack linking ready)",
             "detectedStack": stack_info,
             "workspace": ws,
         }
+
+    @staticmethod
+    def _adapter_lifecycle(stack_info: Dict[str, Any], fe: Optional[Dict[str, Any]], be: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Per-adapter lifecycle + health per the OUMV Adapter Contract (schemas/adapter.json)."""
+        adapters: List[Dict[str, Any]] = []
+        fe_detected = bool(stack_info.get("frontend"))
+        be_detected = bool(stack_info.get("backend"))
+        if not fe_detected and not be_detected:
+            return adapters
+
+        try:
+            from src.retrofit import get_adapters_catalog
+            catalog = get_adapters_catalog()
+        except Exception:
+            catalog = []
+
+        def _find_adapter(profile: str, provider: Optional[str]) -> Dict[str, Any]:
+            if provider:
+                for a in catalog:
+                    if a.get("id") == f"{profile}/{provider}" and a.get("status") == "ready":
+                        return a
+            for a in catalog:
+                if a.get("profile") == profile and a.get("status") == "ready":
+                    return a
+            return {}
+
+        def _entry(profile: str, connected: Optional[Dict[str, Any]], detected: bool, provider: Optional[str] = None) -> Dict[str, Any]:
+            adapter = _find_adapter(profile, provider)
+            if connected:
+                state, health, detail = "ACTIVE", "healthy", f"Live runtime: {connected.get('name', 'unknown')}"
+            elif detected:
+                state, health, detail = "HANDSHAKE", "degraded", "Detected statically; runtime offline — hybrid static fallback active"
+            else:
+                state, health, detail = "DISCOVER", "unavailable", "Not detected in this workspace"
+            return {
+                "profile": profile,
+                "adapter": adapter.get("id", f"{profile}/unknown"),
+                "technology": adapter.get("technology"),
+                "capabilities": adapter.get("capabilities"),
+                "lifecycle": {"state": state, "health": {"status": health, "detail": detail}},
+                "security": {
+                    "productionFailClosed": True,
+                    "workspaceBoundary": True,
+                },
+            }
+
+        adapters.append(_entry("frontend", fe, fe_detected, (stack_info.get("frontend") or {}).get("provider")))
+        adapters.append(_entry("backend", be, be_detected, (stack_info.get("backend") or {}).get("provider")))
+        return adapters
 
     # 2. Tool: oumv_observe
     @classmethod
@@ -471,9 +521,47 @@ class OUMVGateway:
     @classmethod
     def verify(cls, target: str, action: str = "invoke", payload: Optional[dict] = None, runtime: str = "auto") -> Any:
         url = cls._resolve_client_url(runtime=runtime, target=target)
-        return cls._rpc_call(url, "oumv/verify", {
+        res = cls._rpc_call(url, "oumv/verify", {
             "target": target,
             "componentId": target,
             "action": action,
             "payload": payload or {},
         })
+        # Honest verification scope (spec §13): state exactly what was verified.
+        if isinstance(res, dict):
+            scope = res.setdefault("scope", {})
+            checked = scope.setdefault("checked", [])
+            checked_entry = "in-memory dispatch against live runtime"
+            if checked_entry not in checked:
+                checked.append(checked_entry)
+            scope.setdefault("notExecuted", [
+                "end-to-end browser flow",
+                "production behavior",
+                "full test suite",
+            ])
+        return res
+
+    # 6. Tool: oumv_graph — unified cross-stack intelligence graph (spec §11)
+    @classmethod
+    def graph(cls, query: str = "overview", target: Optional[str] = None, workspace_dir: Optional[str] = None) -> Any:
+        """Unified graph over static + runtime evidence, with §11.4-style queries."""
+        fe, be = cls.get_endpoints()
+        from src.cross_stack import build_unified_graph, who_depends_on, impact_from_graph
+
+        ws = workspace_dir or get_active_workspace()
+
+        q = (query or "overview").strip()
+        if q == "who_depends_on":
+            full = build_unified_graph(workspace_dir=ws, fe=fe, be=be, rpc_call=cls._rpc_call)
+            return who_depends_on(target or "", full)
+        if q == "impact":
+            full = build_unified_graph(workspace_dir=ws, fe=fe, be=be, rpc_call=cls._rpc_call)
+            return impact_from_graph(target or "", full)
+
+        g = build_unified_graph(workspace_dir=ws, fe=fe, be=be, rpc_call=cls._rpc_call)
+        if target:
+            t = target.lower()
+            g["nodes"] = [n for n in g["nodes"] if t in str(n).lower()][:50]
+            g["edges"] = [e for e in g["edges"] if t in (e["source"] + e["target"]).lower()][:50]
+            g["filteredBy"] = target
+        return g

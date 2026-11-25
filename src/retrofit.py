@@ -197,57 +197,130 @@ def generate_config(
 
 
 def get_adapters_catalog() -> List[Dict[str, Any]]:
-    """Lists available OUMV adapters in the consolidated architecture."""
+    """Lists available OUMV adapters in the consolidated architecture.
+
+    Each entry follows the language-neutral OUMV Adapter Contract
+    (agent-oumv/schemas/adapter.json): identity, technology/package,
+    profiles, and baseline capabilities with constraints.
+    """
     return [
         {
             "id": "frontend/react",
             "name": "React Adapter (Zustand, Redux, Context, useReducer)",
             "profile": "frontend",
+            "profiles": ["frontend"],
             "repo": "tokensafe-ui",
             "mode": "hybrid",
             "status": "ready",
             "description": "Progressive AST component discovery + runtime action/state inspection",
+            "technology": {
+                "language": "typescript",
+                "framework": "react",
+                "package": {"manager": "npm", "name": "tokensafe-ui", "install": "npm install tokensafe-ui"},
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "observe.runtime_state", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.impact", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.runtime_behavior", "constraints": {"readOnly": True, "developmentOnly": True}},
+            ],
         },
         {
             "id": "frontend/solid",
             "name": "SolidJS / TokenSafe UI Native Adapter",
             "profile": "frontend",
+            "profiles": ["frontend"],
             "repo": "tokensafe-ui",
             "mode": "hybrid",
             "status": "ready",
             "description": "Fine-grained reactive signals causality + virtual DOM observer",
+            "technology": {
+                "language": "typescript",
+                "framework": "solidjs",
+                "package": {"manager": "npm", "name": "tokensafe-ui", "install": "npm install tokensafe-ui"},
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "observe.runtime_state", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.impact", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.runtime_behavior", "constraints": {"readOnly": True, "developmentOnly": True}},
+            ],
         },
         {
             "id": "frontend/vue",
             "name": "Vue 3 Adapter (Composition API, Pinia)",
             "profile": "frontend",
+            "profiles": ["frontend"],
             "repo": "tokensafe-ui",
             "mode": "hybrid",
             "status": "ready",
             "description": "Vue component hierarchy and store snapshot observer",
+            "technology": {
+                "language": "typescript",
+                "framework": "vue",
+                "package": {"manager": "npm", "name": "tokensafe-ui", "install": "npm install tokensafe-ui"},
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "observe.runtime_state", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+            ],
         },
         {
             "id": "backend/go",
             "name": "Go Backend Adapter (Gin, Chi, net/http)",
             "profile": "backend",
+            "profiles": ["backend"],
             "repo": "tokensafe-backend/go",
             "mode": "hybrid",
             "status": "ready",
             "description": "Go AST pre-flight compiler guard + transactional DB sandbox with rollback",
+            "technology": {
+                "language": "go",
+                "framework": "gin/chi/net-http",
+                "package": {
+                    "manager": "go",
+                    "name": "github.com/tokensafe-dev/tokensafe-backend/go",
+                    "install": "go get github.com/tokensafe-dev/tokensafe-backend/go",
+                },
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "observe.runtime_state", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": False, "limitations": ["requires observed request traces (TraceHandler or oumv/verify)"]}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.runtime_behavior", "constraints": {"readOnly": True, "developmentOnly": False}},
+            ],
         },
         {
             "id": "backend/fastapi",
             "name": "Python FastAPI Adapter (Starlette, Pydantic)",
             "profile": "backend",
+            "profiles": ["backend"],
             "repo": "tokensafe-backend/python",
             "mode": "hybrid",
             "status": "ready",
             "description": "FastAPI automatic route & schema introspection + SQLAlchemy dry-run sandbox",
+            "technology": {
+                "language": "python",
+                "framework": "fastapi",
+                "package": {"manager": "pip", "name": "tokensafe-python", "install": "pip install tokensafe-python"},
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.runtime_behavior", "constraints": {"readOnly": True, "developmentOnly": False}},
+            ],
         },
         {
             "id": "backend/node",
             "name": "Node.js Backend Adapter (Express, Fastify)",
             "profile": "backend",
+            "profiles": ["backend"],
             "repo": "tokensafe-backend/node",
             "mode": "hybrid",
             "status": "planned",

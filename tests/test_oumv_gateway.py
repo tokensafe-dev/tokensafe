@@ -30,6 +30,36 @@ class TestOUMVGateway(unittest.TestCase):
         self.assertIn("backend", status)
         self.assertEqual(status["frontend"]["status"], "DISCONNECTED")
         self.assertEqual(status["backend"]["status"], "DISCONNECTED")
+        # No detected stack -> no adapter lifecycle entries (honest empty list)
+        self.assertEqual(status.get("adapters"), [])
+
+    def test_status_reports_adapter_lifecycle_when_stack_detected(self):
+        package_json = {"dependencies": {"react": "^18.2.0"}, "devDependencies": {"vite": "^5.0.0"}}
+        with open(os.path.join(self.test_dir, "package.json"), "w", encoding="utf-8") as f:
+            json.dump(package_json, f)
+        with open(os.path.join(self.test_dir, "pyproject.toml"), "w", encoding="utf-8") as f:
+            f.write("[project]\nname = 'svc'\ndependencies = ['fastapi']\n")
+
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            OUMVGateway._last_scan_time = 9999999999.0
+            OUMVGateway._cached_fe = None
+            OUMVGateway._cached_be = None
+            status = OUMVGateway.status(workspace_dir=self.test_dir)
+
+        adapters = status.get("adapters", [])
+        self.assertEqual(len(adapters), 2)
+        by_profile = {a["profile"]: a for a in adapters}
+        # Detected statically, runtime offline -> HANDSHAKE / degraded
+        fe_adapter = by_profile["frontend"]
+        self.assertEqual(fe_adapter["lifecycle"]["state"], "HANDSHAKE")
+        self.assertEqual(fe_adapter["lifecycle"]["health"]["status"], "degraded")
+        self.assertEqual(fe_adapter["adapter"], "frontend/react")
+        be_adapter = by_profile["backend"]
+        self.assertEqual(be_adapter["lifecycle"]["state"], "HANDSHAKE")
+        self.assertEqual(be_adapter["adapter"], "backend/fastapi")
+        # Adapter Contract fields present
+        self.assertTrue(fe_adapter["capabilities"])
+        self.assertEqual(fe_adapter["security"]["workspaceBoundary"], True)
 
     def test_discovery_from_runtime_json(self):
         oumv_dir = os.path.join(self.test_dir, ".oumv")

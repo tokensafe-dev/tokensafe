@@ -103,6 +103,33 @@ dependencies = [
         self.assertIn("backend/go", adapter_ids)
         self.assertIn("backend/fastapi", adapter_ids)
 
+    def test_adapters_catalog_follows_adapter_contract(self):
+        # Language-neutral OUMV Adapter Contract (agent-oumv/schemas/adapter.json)
+        catalog = get_adapters_catalog()
+        ready = [a for a in catalog if a.get("status") == "ready"]
+        self.assertGreaterEqual(len(ready), 5)
+        for adapter in ready:
+            for field in ("id", "name", "profiles", "repo", "mode", "status"):
+                self.assertIn(field, adapter, f"{adapter.get('id')}: missing {field}")
+            tech = adapter.get("technology", {})
+            self.assertIn("language", tech, f"{adapter['id']}: missing technology.language")
+            package = tech.get("package", {})
+            self.assertIn("manager", package, f"{adapter['id']}: missing package.manager")
+            self.assertIn(package["manager"], ("npm", "pip", "go", "binary"))
+            self.assertTrue(package.get("install"), f"{adapter['id']}: missing install command")
+            # Baseline capabilities with constraints (Decision 12: no unguarded claims)
+            caps = adapter.get("capabilities", [])
+            self.assertTrue(caps, f"{adapter['id']}: must declare capabilities")
+            for cap in caps:
+                self.assertIn("name", cap)
+                self.assertIn("constraints", cap)
+                self.assertIn("readOnly", cap["constraints"])
+            # Mutations must declare a permission constraint
+            mutators = [c for c in caps if c["name"].startswith("mutate.")]
+            self.assertTrue(mutators, f"{adapter['id']}: mutating adapters must declare mutate capabilities")
+            for cap in mutators:
+                self.assertTrue(cap["constraints"].get("requiresPermission"))
+
     def test_project_context_resolver(self):
         pkg = {"dependencies": {"react": "^18.0.0"}}
         with open(os.path.join(self.test_dir, "package.json"), "w", encoding="utf-8") as f:
