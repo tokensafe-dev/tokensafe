@@ -53,7 +53,7 @@ class TestMCPServer(unittest.TestCase):
         # 1. repo_map -> tree/graph/api
         tree_res = handle_tool_call("repo_map", {"view": "tree", "path": "src", "depth": 2})
         self.assertNotIn("isError", tree_res)
-        self.assertIn("skeletonizer.py", tree_res["content"][0]["text"])
+        self.assertIn("adapter_core.py", tree_res["content"][0]["text"])
 
         # 2. run_helper -> compress/guard/sanitize
         comp_res = handle_tool_call("run_helper", {"action": "compress", "prompt": "Слушай, перепиши функцию get_balance в wallet.ts"})
@@ -155,7 +155,7 @@ class TestMCPServer(unittest.TestCase):
         self.assertNotIn("isError", res)
         text = res["content"][0]["text"]
         self.assertIn("📁 **src/**", text)
-        self.assertIn("skeletonizer.py", text)
+        self.assertIn("adapter_core.py", text)
         self.assertIn("command_sanitizer.py", text)
 
     def test_tool_exception_returns_fallback_guidance(self):
