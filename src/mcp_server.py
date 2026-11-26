@@ -39,6 +39,7 @@ from src.guard import TokenSafeGuard
 from src.scoped_search import ScopedSearch
 from src.license_manager import LicenseManager
 from src.paths import get_active_workspace, is_plugin_or_system_dir
+from src.session_context import current_root, current_session_id
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
@@ -65,7 +66,23 @@ def _set_mcp_client(name: str):
 
 
 def _mcp_session_id() -> str:
+    """Metrics key for the current call.
+
+    An explicit session scope (ACP agent server, in-process loop, tests) wins:
+    one process can own several sessions, and mixing their metrics or pointer
+    caches together is what the legacy global client name did."""
+    scoped = current_session_id()
+    if scoped:
+        return scoped
     return f"mcp:{_MCP_CLIENT_NAME}" if _MCP_CLIENT_NAME else "mcp_session"
+
+
+def _workspace_root() -> Optional[str]:
+    """Project root for relative-path resolution.
+
+    Session scope first, then the machine-wide marker written by lifecycle
+    hooks. Never returns scratch space (``get_active_workspace`` filters it)."""
+    return current_root() or get_active_workspace()
 
 
 def _client_supports_pointers() -> bool:
@@ -981,7 +998,7 @@ def _resolve_project_root(args: dict) -> Tuple[Optional[str], Optional[str]]:
     Safely resolves the target project root without falling back to system root dirs or plugin dirs.
     """
     target = args.get("project_path") or args.get("root_dir") or args.get("path") or args.get("directory")
-    active_ws = get_active_workspace()
+    active_ws = _workspace_root()
 
     if target:
         if not os.path.isabs(target):
@@ -1265,7 +1282,7 @@ def handle_tool_call(name: str, args: dict) -> dict:
                 or ("monthly limit (" in text_out and "optimizations paused" in text_out)
             )
             if text_out and path and not is_ranged and not is_quota_truncated:
-                active_ws = get_active_workspace()
+                active_ws = _workspace_root()
                 if not os.path.isabs(path) and active_ws and os.path.exists(os.path.join(active_ws, path)):
                     abs_path = os.path.abspath(os.path.join(active_ws, path))
                 else:
@@ -1356,6 +1373,21 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         elif args.get("package_name") and not (args.get("path") or args.get("file_path") or args.get("file")):
             name = "slice_external_type"
     elif name == "scoped_search":
+        # Schema contract: `path` is "Directory path (default project root)",
+        # while `queries[].path` is a sub-scope. When the caller passes an
+        # absolute directory and no explicit root, promote it to the root.
+        # Without this, batch_search validated the path against the machine-wide
+        # active-workspace marker (which may belong to another repo or a stale
+        # temp dir) and rejected a path that is demonstrably inside the project.
+        _raw_path = args.get("path")
+        if (
+            _raw_path
+            and not (args.get("cwd") or args.get("project_path"))
+            and os.path.isabs(str(_raw_path))
+            and os.path.isdir(str(_raw_path))
+        ):
+            args = dict(args, project_path=str(_raw_path))
+            args.pop("path", None)
         mode = str(args.get("mode") or "").strip().lower()
         if args.get("queries"):
             name = "batch_search"
@@ -1444,7 +1476,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         if start_line is not None:
             start_line = max(1, start_line)
 
-        active_ws = get_active_workspace()
+        active_ws = _workspace_root()
         if path and not os.path.isabs(path):
             if active_ws and os.path.exists(os.path.join(active_ws, path)):
                 path = os.path.abspath(os.path.join(active_ws, path))
@@ -1770,7 +1802,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         inc_deps, _eff_dep_mode = _resolve_dep_mode(args)
         max_tokens = _safe_int(os.environ.get("TOKENSAFE_BUNDLE_MAX_TOKENS"), 6000, lo=1000, hi=50000)
 
-        active_ws = get_active_workspace()
+        active_ws = _workspace_root()
         by_file: Dict[str, List[str]] = {}
         for t in targets:
             if not isinstance(t, dict) or not str(t.get("path") or "").strip():
@@ -2283,7 +2315,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             return _fallback_error("list_dir", "missing required 'path' argument")
 
         # Resolve path relative to active workspace, cwd, or absolute
-        active_ws = get_active_workspace()
+        active_ws = _workspace_root()
         if not os.path.isabs(path):
             if active_ws and os.path.isdir(os.path.join(active_ws, path)):
                 abs_path = os.path.abspath(os.path.join(active_ws, path))
@@ -2323,7 +2355,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
 
         raw_scope = str(args.get("scope") or "all").strip()
         raw_path = args.get("project_path") or args.get("path") or args.get("root_dir") or args.get("directory")
-        active_ws = get_active_workspace()
+        active_ws = _workspace_root()
 
         # 1. Resolve base directory safely without scanning plugin or system roots
         if raw_path:
@@ -2459,7 +2491,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         pkg = str(args.get("package_name") or args.get("package") or "").strip()
         lock_p = str(args.get("lockfile_path") or args.get("path") or "").strip() or None
         if lock_p and not os.path.isabs(lock_p):
-            active_ws = get_active_workspace()
+            active_ws = _workspace_root()
             if active_ws and os.path.exists(os.path.join(active_ws, lock_p)):
                 lock_p = os.path.abspath(os.path.join(active_ws, lock_p))
         if not pkg:
@@ -2467,7 +2499,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         try:
             from src.format_parsers.lockfiles import LockfileReducer
             if not lock_p:
-                active_ws = get_active_workspace()
+                active_ws = _workspace_root()
                 if active_ws and hasattr(LockfileReducer, "find_lockfile"):
                     orig_cwd = os.getcwd()
                     try:
@@ -2672,7 +2704,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             verify = args.get("verify")
             verify_timeout = int(args.get("verify_timeout_sec") or 30)
             raw_cwd = args.get("cwd")
-            active_ws = get_active_workspace()
+            active_ws = _workspace_root()
             if raw_cwd:
                 if not os.path.isabs(str(raw_cwd)) and active_ws and os.path.isdir(os.path.join(active_ws, str(raw_cwd))):
                     cwd = os.path.abspath(os.path.join(active_ws, str(raw_cwd)))
@@ -2792,7 +2824,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 return _fallback_error("batch_search", "missing required 'queries' list")
 
             raw_cwd = args.get("cwd") or args.get("project_path") or args.get("path")
-            active_ws = get_active_workspace()
+            active_ws = _workspace_root()
             if raw_cwd:
                 if not os.path.isabs(raw_cwd) and active_ws and os.path.isdir(os.path.join(active_ws, raw_cwd)):
                     cwd = os.path.abspath(os.path.join(active_ws, raw_cwd))
@@ -2815,12 +2847,23 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 sub_p = q_copy.get("path")
                 if sub_p:
                     sub_abs = os.path.realpath(os.path.normpath(os.path.join(cwd, str(sub_p))))
+                    if is_plugin_or_system_dir(sub_abs):
+                        return _fallback_error(
+                            "batch_search",
+                            f"refusing subquery path in a system/plugin dir '{sub_abs}' "
+                            f"(project root '{real_cwd}')",
+                        )
                     try:
                         inside = os.path.commonpath([real_cwd, sub_abs]) == real_cwd
                     except ValueError:
                         inside = False
-                    if not inside or is_plugin_or_system_dir(sub_abs):
-                        return _fallback_error("batch_search", f"refusing subquery path outside project root '{sub_p}'")
+                    if not inside:
+                        return _fallback_error(
+                            "batch_search",
+                            f"subquery path '{sub_p}' resolves to '{sub_abs}', outside project root "
+                            f"'{real_cwd}'. Pass the repo root as project_path and a repo-relative "
+                            f"path, or omit path entirely.",
+                        )
                 if is_quota_exceeded:
                     q_copy["max_results"] = min(_safe_int(q_copy.get("max_results"), 3, lo=1, hi=100), 3)
                 safe_queries.append(q_copy)

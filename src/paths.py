@@ -127,11 +127,46 @@ def is_plugin_or_system_dir(path: str) -> bool:
     return False
 
 
+_TRANSIENT_ROOTS = ("/tmp", "/var/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+
+
+def is_transient_dir(path: str) -> bool:
+    """True for OS scratch space (tempfile/TMPDIR, /tmp, /var/folders).
+
+    A temp directory is a legitimate workspace for a test process, but it must
+    never become the machine-wide active-project marker: every other agent
+    session would then validate real repo paths against a directory that is
+    about to disappear, and reject them as "outside project root".
+    """
+    if not path:
+        return True
+    real = os.path.realpath(os.path.abspath(path))
+    roots = [os.path.realpath(p) for p in _TRANSIENT_ROOTS]
+    try:
+        import tempfile
+        roots.append(os.path.realpath(tempfile.gettempdir()))
+    except Exception:
+        pass
+    for root in roots:
+        if not root or root == os.sep:
+            continue
+        if real == root:
+            return True
+        try:
+            if os.path.commonpath([real, root]) == root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def save_active_workspace(path: str) -> None:
     """Records the active user workspace directory observed by lifecycle hooks."""
     if not path or not os.path.isabs(path) or not os.path.isdir(path):
         return
     if is_plugin_or_system_dir(path):
+        return
+    if is_transient_dir(path):
         return
     try:
         import threading
@@ -147,7 +182,11 @@ def save_active_workspace(path: str) -> None:
 
 
 def get_active_workspace() -> Optional[str]:
-    """Retrieves the last known active user workspace directory."""
+    """Retrieves the last known active user workspace directory.
+
+    A marker pointing at scratch space (already-poisoned installs, test
+    leftovers) is ignored rather than returned: it is never a usable project
+    root for a search or a read."""
     try:
         data_dir = resolve_data_dir()
         marker = os.path.join(data_dir, ".active_workspace")
@@ -155,7 +194,7 @@ def get_active_workspace() -> Optional[str]:
             with open(marker, "r", encoding="utf-8") as f:
                 path = f.read().strip()
                 if path and os.path.isabs(path) and os.path.isdir(path):
-                    if not is_plugin_or_system_dir(path):
+                    if not is_plugin_or_system_dir(path) and not is_transient_dir(path):
                         return path
     except Exception:
         pass

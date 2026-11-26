@@ -347,27 +347,27 @@ class TestMCPServer(unittest.TestCase):
     def test_smart_read_file_relative_path_with_active_workspace(self):
         import os
         import tempfile
-        from src.paths import save_active_workspace
+        from src.session_context import session_scope
         with tempfile.TemporaryDirectory() as tmpdir:
             fpath = os.path.join(tmpdir, "service.py")
             with open(fpath, "w", encoding="utf-8") as f:
                 f.write("def helper():\n    return 42\n")
-            save_active_workspace(tmpdir)
-            res = handle_tool_call("smart_read_file", {"path": "service.py", "symbol": "helper"})
+            with session_scope(root=tmpdir, session_id="test:smart_read"):
+                res = handle_tool_call("smart_read_file", {"path": "service.py", "symbol": "helper"})
             self.assertNotIn("isError", res)
             self.assertIn("def helper", res["content"][0]["text"])
 
     def test_list_dir_relative_path_with_active_workspace(self):
         import os
         import tempfile
-        from src.paths import save_active_workspace
+        from src.session_context import session_scope
         with tempfile.TemporaryDirectory() as tmpdir:
             subdir = os.path.join(tmpdir, "sub")
             os.makedirs(subdir)
             with open(os.path.join(subdir, "file.txt"), "w") as f:
                 f.write("hello")
-            save_active_workspace(tmpdir)
-            res = handle_tool_call("list_dir", {"path": "sub"})
+            with session_scope(root=tmpdir, session_id="test:list_dir"):
+                res = handle_tool_call("list_dir", {"path": "sub"})
             self.assertNotIn("isError", res)
             self.assertIn("file.txt", res["content"][0]["text"])
 
