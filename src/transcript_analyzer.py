@@ -145,7 +145,9 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
     tool_counts: Dict[str, int] = {}
     disk_spills = 0
     tokensafe_calls = 0
-    schema_matched = False
+    # Only branches that positively recognise a schema set this. The Antigravity
+    # catch-all matches any {"type": ...} line, so it must not count as recognition.
+    explicit_matched = False
     seen_claude_messages = set()
 
     timestamps: List[datetime.datetime] = []
@@ -196,7 +198,7 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
 
                 # ZCode model-io schema
                 if step.get("type") == "model_io" or ("request" in step and "response" in step and "model" in step):
-                    schema_matched = True
+                    explicit_matched = True
                     if detected_agent in ("antigravity", "unknown"):
                         detected_agent = "zcode"
                     llm_turns += 1
@@ -255,7 +257,7 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
                 # Claude Code / Kimi JSONL schema
                 msg = step.get("message") if isinstance(step.get("message"), dict) else None
                 if msg is not None:
-                    schema_matched = True
+                    explicit_matched = True
                     # Claude Code writes one JSONL line per content block, all sharing
                     # the same message.id and repeating the identical usage object.
                     # Count the turn and its tokens once per message id.
@@ -299,7 +301,7 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
                 # Codex event schema
                 payload = step.get("payload") if isinstance(step.get("payload"), dict) else {}
                 if step.get("type") == "event_msg" and payload.get("type") == "token_count":
-                    schema_matched = True
+                    explicit_matched = True
                     last_u = (payload.get("info") or {}).get("last_token_usage") or {}
                     if isinstance(last_u, dict) and last_u:
                         _track_ts(_parse_iso_ts(step.get("timestamp")))
@@ -318,8 +320,8 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
                 s_type = step.get("type")
                 tool_calls = step.get("tool_calls") or []
                 if s_type or tool_calls or "created_at" in step:
-                    schema_matched = True
                     if s_type == "PLANNER_RESPONSE" or tool_calls:
+                        explicit_matched = explicit_matched or s_type == "PLANNER_RESPONSE"
                         llm_turns += 1
                         # Timestamps only on real turns: status/heartbeat steps would
                         # otherwise fabricate "gaps" during long tool executions.
@@ -361,7 +363,7 @@ def analyze_transcript(file_path: str, agent_type: str = "antigravity") -> Dict[
     })
 
     schema_warning = None
-    if not schema_matched:
+    if not explicit_matched and llm_turns == 0 and total_input == 0 and total_output == 0:
         schema_warning = "no recognized transcript schema matched; all metrics are zero"
         if detected_agent in ("auto", "", "antigravity"):
             detected_agent = "unknown"
@@ -398,8 +400,10 @@ def compare_transcripts(before_path: str, after_path: str) -> Dict[str, Any]:
     """
     Compares two transcripts (A/B testing before vs after TokenSafe optimization).
     """
-    a = analyze_transcript(before_path)
-    b = analyze_transcript(after_path)
+    # "auto" lets path-based agent detection decide; the old default label
+    # ("antigravity") mislabelled every Claude/Codex/ZCode transcript.
+    a = analyze_transcript(before_path, agent_type="auto")
+    b = analyze_transcript(after_path, agent_type="auto")
 
     if "error" in a:
         return {"error": f"Before transcript error: {a['error']}"}

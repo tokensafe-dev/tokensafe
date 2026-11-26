@@ -604,6 +604,17 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertTrue(unknown.get("schema_warning"))
         self.assertEqual(unknown["llm_turns"], 0)
 
+        # A line that HAS an unrecognised "type" used to count as a matched schema
+        # (the Antigravity catch-all), hiding the warning behind all-zero metrics.
+        typed_file = os.path.join(self.tmp_dir, "typed_unknown.jsonl")
+        with open(typed_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "SOMETHING_UNKNOWN", "foo": 1}) + "\n")
+            f.write(json.dumps({"type": "ANOTHER_UNKNOWN", "created_at": "2026-11-24T12:00:00Z"}) + "\n")
+        typed = analyze_transcript(typed_file, agent_type="auto")
+        self.assertEqual(typed["agent"], "unknown")
+        self.assertTrue(typed.get("schema_warning"))
+        self.assertEqual(typed["llm_turns"], 0)
+
         # An explicitly requested label must not be silently rewritten
         custom = analyze_transcript(claude_file, agent_type="custom")
         self.assertEqual(custom["agent"], "custom")
