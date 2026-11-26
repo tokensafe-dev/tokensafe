@@ -57,10 +57,19 @@ MCP server's `initialize.instructions` receive a short routing brief:
 
 ```
 [TokenSafe OUMV routing brief]
+- scope: per-root verdicts below; for any unlisted repo call tokensafe:oumv(action='status', workspace_dir='<repo>').
 - frontend react/react: OUMV live via `tokensafe dev` ... Call tokensafe:oumv(...)
 - backend fastapi/fastapi: OUMV auto-mounts via `tokensafe run-backend uvicorn ...`
+- other workspace roots:
+- /abs/tokensafe-site: frontend react/react — OUMV ready; tokensafe:oumv(workspace_dir='/abs/tokensafe-site') for status/observe/mutate.
 - mutations: enabled with guardrails (OCC version, path jail, syntax pre-flight, backups)
 ```
+
+Every open folder is classified separately: hosts that report several roots (ZCode
+`workspacePaths`) and `TOKENSAFE_WORKSPACES` are routed one by one, and a single-root
+brief states its scope explicitly. A verdict for one repository never describes another —
+an agent that edits a repo outside the listed roots must call
+`tokensafe:oumv(action='status', workspace_dir='<repo>')` first.
 
 Cursor and Codex have no injectable hook — they receive the same text through MCP
 instructions. Nothing is committed to the repository for the brief.

@@ -123,9 +123,15 @@ def main():
             except Exception:
                 pass
             # Routing brief: what goes through OUMV, what goes through TokenSafe tools.
+            # Every open folder is routed: the first path is the session root, the
+            # rest are additional working directories the agent may edit.
             try:
-                from src.session_brief import build_workspace_brief
-                routing = build_workspace_brief(workspace_root, include_live=True)
+                from src.session_brief import build_workspace_brief, workspace_roots_from_env
+                routing = build_workspace_brief(
+                    workspace_root,
+                    include_live=True,
+                    extra_workspaces=workspace_paths[1:] + workspace_roots_from_env(),
+                )
                 if routing:
                     extra.append(routing)
             except Exception:

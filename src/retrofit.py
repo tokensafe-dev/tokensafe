@@ -833,7 +833,13 @@ def format_oumv_workspace_brief(workspace_dir: str, include_live: bool = False) 
         except Exception:
             pass
 
-    return "[TokenSafe OUMV Workspace Matrix | " + " | ".join(parts) + "]"
+    return (
+        "[TokenSafe OUMV Workspace Matrix @ "
+        + (os.path.basename(os.path.abspath(workspace_dir)) or workspace_dir)
+        + " | "
+        + " | ".join(parts)
+        + "]"
+    )
 
 
 _STACK_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}

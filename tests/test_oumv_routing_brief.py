@@ -89,6 +89,56 @@ class TestOumvRoutingBrief(unittest.TestCase):
         self.assertIn("[TokenSafe OUMV routing brief]", text)
         self.assertIn("tokensafe dev", text)
 
+    def _go_repo(self):
+        other = tempfile.mkdtemp(prefix="tokensafe_brief_go_")
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        open(os.path.join(other, ".git"), "w").close()
+        with open(os.path.join(other, "go.mod"), "w", encoding="utf-8") as f:
+            f.write("module example.com/api\n\ngo 1.21\n")
+        with open(os.path.join(other, "main.go"), "w", encoding="utf-8") as f:
+            f.write('package main\n\nimport "github.com/gin-gonic/gin"\n\nfunc main() {\n\tr := gin.Default()\n\t_ = r\n}\n')
+        return other
+
+    def test_each_extra_root_is_routed_with_its_own_workspace_dir(self):
+        # The primary root is unsupported-ish (vue); the second root is Go and
+        # must be routed on its own instead of inheriting the primary verdict.
+        self._write("package.json", json.dumps({"dependencies": {"vue": "^3.5.0", "vite": "^6.0.0"}}))
+        other = self._go_repo()
+        brief = build_workspace_brief(self.tmp, extra_workspaces=[other])
+        self.assertIn("no OUMV adapter yet", brief)          # primary verdict stays
+        self.assertIn(other, brief)                          # extra root is named
+        self.assertIn("backend go", brief)                   # with its own stack
+        self.assertIn(f"workspace_dir='{other}'", brief)     # exact call to make
+
+    def test_scope_sentence_is_always_present(self):
+        self._write("package.json", json.dumps({"dependencies": {"vue": "^3.5.0", "vite": "^6.0.0"}}))
+        brief = build_workspace_brief(self.tmp)
+        self.assertIn("scope:", brief)
+        self.assertIn("workspace_dir=", brief)
+
+    def test_workspace_roots_helpers(self):
+        from src.session_brief import workspace_roots_from_env, workspace_roots_from_payload
+
+        payload = {"workspacePaths": [self.tmp, "/b"]}
+        self.assertEqual(workspace_roots_from_payload(payload), [self.tmp, "/b"])
+        self.assertEqual(workspace_roots_from_payload({"cwd": self.tmp}), [])
+        env = {"TOKENSAFE_WORKSPACES": f"/x{os.pathsep}/y"}
+        self.assertEqual(workspace_roots_from_env(env), ["/x", "/y"])
+
+    def test_second_workspace_path_reaches_the_hook_brief(self):
+        self._write("package.json", json.dumps({"dependencies": {"react": "^18.3.1", "vite": "^5.4.0"}}))
+        other = self._go_repo()
+        from hooks.claude_code_hook import handle
+
+        out = handle(
+            "SessionStart",
+            {"cwd": self.tmp, "session_id": "s-multi", "workspacePaths": [self.tmp, other]},
+            agent="claude-code",
+        )
+        text = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(other, text)
+        self.assertIn(f"workspace_dir='{other}'", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -55,12 +55,21 @@ def handle(event: str, payload: dict) -> dict:
                 extra = f"{extra}\n\n{guard}"
         except Exception:
             pass
+        # Routing brief: every open folder is classified, not only cwd.
         try:
             from src.paths import is_project_root as _is_project_root
-            from src.session_brief import build_workspace_brief
+            from src.session_brief import (
+                build_workspace_brief,
+                workspace_roots_from_env,
+                workspace_roots_from_payload,
+            )
             kimi_cwd = str(payload.get("cwd") or os.getcwd())
             if _is_project_root(kimi_cwd):
-                routing = build_workspace_brief(kimi_cwd, include_live=True)
+                routing = build_workspace_brief(
+                    kimi_cwd,
+                    include_live=True,
+                    extra_workspaces=workspace_roots_from_payload(payload) + workspace_roots_from_env(),
+                )
                 if routing:
                     extra = f"{extra}\n\n{routing}"
         except Exception:
@@ -126,16 +135,9 @@ def handle(event: str, payload: dict) -> dict:
                 f"(TokenSafe: compacted ~{meta['saved_tokens']} prompt tokens, "
                 f"-{meta.get('reduction_pct', 0)}% — original intent preserved.)"
             )
-        try:
-            from src.paths import is_project_root as _is_project_root
-            from src.session_brief import build_workspace_brief
-            kimi_cwd = str(payload.get("cwd") or os.getcwd())
-            if _is_project_root(kimi_cwd):
-                routing = build_workspace_brief(kimi_cwd, include_live=True)
-                if routing:
-                    extra = f"{extra}\n\n{routing}"
-        except Exception:
-            pass
+        # Routing brief is session-scoped (SessionStart + MCP instructions); the
+        # per-turn copy here targeted an undefined `extra` and died in its own
+        # except. It stays dead: re-sending ~1 KB every prompt is pure tax.
         try:
             from src.burn_monitor import get_burn_warnings
             burn_warn = get_burn_warnings(

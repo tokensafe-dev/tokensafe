@@ -3434,10 +3434,17 @@ def run_mcp_server():
                 "serverInfo": SERVER_INFO
             }
             # Routing brief (MCP `instructions`): which stacks this workspace
-            # works through OUMV and which through the TokenSafe tools.
+            # works through OUMV and which through the TokenSafe tools. The
+            # server usually runs from the plugin dir, so prefer the session
+            # workspace marker; extra roots (TOKENSAFE_WORKSPACES) are
+            # classified one by one so a single-root verdict is never global.
             try:
-                from src.session_brief import build_workspace_brief
-                brief = build_workspace_brief(os.getcwd(), include_live=False)
+                from src.session_brief import build_workspace_brief, workspace_roots_from_env
+                brief = build_workspace_brief(
+                    _workspace_root() or os.getcwd(),
+                    include_live=False,
+                    extra_workspaces=workspace_roots_from_env(),
+                )
                 if brief:
                     response["result"]["instructions"] = brief
             except Exception:

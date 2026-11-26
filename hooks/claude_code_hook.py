@@ -74,12 +74,21 @@ def handle(event: str, payload: dict, agent: str = AGENT) -> dict:
         except Exception:
             pass
         # Routing brief: which stack is worked through OUMV vs TokenSafe tools.
+        # Hosts that report several roots get all of them classified, not just cwd.
         try:
             from src.paths import is_project_root as _is_project_root
-            from src.session_brief import build_workspace_brief
+            from src.session_brief import (
+                build_workspace_brief,
+                workspace_roots_from_env,
+                workspace_roots_from_payload,
+            )
             cwd_for_brief = str(payload.get("cwd") or os.getcwd())
             if _is_project_root(cwd_for_brief):
-                routing = build_workspace_brief(cwd_for_brief, include_live=True)
+                routing = build_workspace_brief(
+                    cwd_for_brief,
+                    include_live=True,
+                    extra_workspaces=workspace_roots_from_payload(payload) + workspace_roots_from_env(),
+                )
                 if routing:
                     extra = f"{extra}\n\n{routing}"
         except Exception:
@@ -147,17 +156,10 @@ def handle(event: str, payload: dict, agent: str = AGENT) -> dict:
             )
 
         transcript_path = str(payload.get("transcript_path") or "")
-        # Routing brief: which stack is worked through OUMV vs TokenSafe tools.
-        try:
-            from src.paths import is_project_root as _is_project_root
-            from src.session_brief import build_workspace_brief
-            cwd_for_brief = str(payload.get("cwd") or os.getcwd())
-            if _is_project_root(cwd_for_brief):
-                routing = build_workspace_brief(cwd_for_brief, include_live=True)
-                if routing:
-                    extra = f"{extra}\n\n{routing}"
-        except Exception:
-            pass
+        # Routing brief is a session-level injection (SessionStart + MCP
+        # instructions). The per-turn copy that used to live here wrote to an
+        # undefined `extra` and was swallowed by its own except: reviving it
+        # would re-send ~1 KB on every prompt, so it stays out.
         try:
             from src.burn_monitor import get_burn_warnings
             burn_warn = get_burn_warnings(
