@@ -246,23 +246,40 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
         """An OUMV nudge must never ride on permissionDecision:"allow" for edits.
 
         "allow" bypasses the host permission prompt, so an advisory would silently
-        auto-approve every edit inside a supported stack.
+        auto-approve every edit inside a supported stack. The nudge is delivered via
+        additionalContext alone, which keeps the normal permission flow intact.
         """
         web_dir, _ = self._create_react_plus_node_monorepo()
         tsx_path = os.path.join(web_dir, "src", "App.tsx")
+        payload = {
+            "tool_name": "Edit",
+            "tool_input": {"file_path": tsx_path, "old_string": "Save", "new_string": "Store"},
+            "cwd": self.test_dir,
+            "session_id": "s1",
+        }
         with patch.dict(os.environ, {"TOKENSAFE_HOME": self.tmp_home, "TOKENSAFE_DATA_DIR": self.tmp_data}):
             with patch("src.adapter_core.get_oumv_read_edit_advisory", return_value="[TokenSafe OUMV]: nudge"):
-                res = evaluate_cc_pre_tool_use(
-                    {
-                        "tool_name": "Edit",
-                        "tool_input": {"file_path": tsx_path, "old_string": "Save", "new_string": "Store"},
-                        "cwd": self.test_dir,
-                        "session_id": "s1",
-                    },
-                    agent="claude_code",
-                )
-        self.assertEqual(res, {})
-        self.assertNotIn("permissionDecision", str(res))
+                res = evaluate_cc_pre_tool_use(dict(payload), agent="claude_code")
+        self.assertNotIn("permissionDecision", res.get("hookSpecificOutput", {}))
+        self.assertIn("TokenSafe OUMV", res["hookSpecificOutput"]["additionalContext"])
+
+        # Kill switch
+        with patch.dict(os.environ, {
+            "TOKENSAFE_HOME": self.tmp_home,
+            "TOKENSAFE_DATA_DIR": self.tmp_data,
+            "TOKENSAFE_OUMV_EDIT_NUDGE": "0",
+        }):
+            with patch("src.adapter_core.get_oumv_read_edit_advisory", return_value="[TokenSafe OUMV]: nudge"):
+                off = evaluate_cc_pre_tool_use(dict(payload), agent="claude_code")
+        self.assertEqual(off, {})
+
+        # Hosts without a documented additionalContext contract stay silent on edit.
+        zcode_payload = dict(payload)
+        zcode_payload["session_id"] = "s_zcode"  # separate session: avoid the loop detector
+        with patch.dict(os.environ, {"TOKENSAFE_HOME": self.tmp_home, "TOKENSAFE_DATA_DIR": self.tmp_data}):
+            with patch("src.adapter_core.get_oumv_read_edit_advisory", return_value="[TokenSafe OUMV]: nudge"):
+                zcode = evaluate_cc_pre_tool_use(zcode_payload, agent="zcode")
+        self.assertEqual(zcode, {})
 
     def test_installer_ensures_tokensafe_ui_global_and_updates_rules(self):
         fake_npm = "/usr/local/bin/npm"

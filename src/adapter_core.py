@@ -459,6 +459,15 @@ def _extract_path(tool_input: Dict[str, Any]) -> str:
 
 _NUDGE_GC_AGE_SEC = 7 * 86400
 
+# Hosts whose PreToolUse schema documents additionalContext, so an edit-time nudge
+# can be delivered without a permissionDecision. ZCode/Kimi keep read-only nudges.
+_OUMV_EDIT_NUDGE_AGENTS = ("claude_code", "claude")
+
+
+def _oumv_edit_nudge_enabled() -> bool:
+    """Default-on, opt-out in the FileState style: TOKENSAFE_OUMV_EDIT_NUDGE=0."""
+    return os.environ.get("TOKENSAFE_OUMV_EDIT_NUDGE", "").strip().lower() not in ("0", "false", "no", "off")
+
 
 def _gc_oumv_markers(data_dir: str) -> None:
     """Drops one-shot OUMV markers older than a week: one accrues per session forever."""
@@ -680,9 +689,19 @@ def evaluate_cc_pre_tool_use(payload: Dict[str, Any], agent: str) -> Dict[str, A
                     )
         except Exception:
             pass
-        # No OUMV advisory on edit: PreToolUse could only deliver it by returning an
-        # explicit permissionDecision, and "allow" auto-approves the edit (bypassing the
-        # user's permission prompt). The read branch already delivers the same nudge.
+        # Advisory only, and only for hosts whose PreToolUse schema documents
+        # additionalContext (Claude Code): omitting permissionDecision keeps the
+        # normal permission flow, while returning "allow" used to auto-approve edits.
+        # Kill switch: TOKENSAFE_OUMV_EDIT_NUDGE=0.
+        if agent in _OUMV_EDIT_NUDGE_AGENTS and _oumv_edit_nudge_enabled():
+            note = get_oumv_read_edit_advisory(cwd, file_path, session_id)
+            if note:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": note,
+                    }
+                }
         return {}
 
     if canon == "read":
