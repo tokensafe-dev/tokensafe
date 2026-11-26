@@ -164,6 +164,22 @@ class TestGoTargetBreaks(unittest.TestCase):
         finally:
             ws.cleanup()
 
+    def test_build_arm_supplies_prompt_schemas_and_dispatcher_for_every_arm(self):
+        """A schema the model sees must always be a tool the dispatcher can run — the
+        first version shadowed the `registry` helper and only the tokensafe arm worked."""
+        from src.bench import go_target as g
+        ws = g.GoWorkspace("product-create-status")
+        try:
+            for arm in ("baseline", "tokensafe", "oumv"):
+                system, tools, dispatcher = g.build_arm(ws, arm)
+                self.assertGreater(len(system), 100)
+                self.assertTrue(tools)
+                seen = {t["function"]["name"] for t in tools}
+                missing = seen - set(dispatcher)
+                self.assertFalse(missing, f"{arm}: {missing} advertised but not dispatchable")
+        finally:
+            ws.cleanup()
+
     def test_each_run_gets_its_own_mcp_session(self):
         """A constant clientInfo.name made run 2 inherit run 1's dedup/pointer state."""
         from pathlib import Path

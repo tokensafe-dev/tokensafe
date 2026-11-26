@@ -540,7 +540,7 @@ def build_arm(ws: GoWorkspace, arm: str) -> Tuple[str, List[Dict[str, Any]], Dic
     if arm == "tokensafe":
         live = ws.tokensafe_tool_schemas()
         tools = BASE_TOOLS + (live if live else TOKENSAFE_TOOLS[len(BASE_TOOLS):])
-        registry: Dict[str, Any] = {
+        dispatcher: Dict[str, Any] = {
             "list_files": ws.list_files,
             "read_file": ws.read_file,
             "write_file": ws.write_file,
@@ -551,8 +551,8 @@ def build_arm(ws: GoWorkspace, arm: str) -> Tuple[str, List[Dict[str, Any]], Dic
         for tool in tools[len(BASE_TOOLS):]:
             alias = tool["function"]["name"]
             real = reverse.get(alias, alias)
-            registry[alias] = (lambda r: lambda **kwargs: ws.tokensafe(r, kwargs))(real)
-        return SYSTEM_TOKENSAFE, tools, registry
+            dispatcher[alias] = (lambda r: lambda **kwargs: ws.tokensafe(r, kwargs))(real)
+        return SYSTEM_TOKENSAFE, tools, dispatcher
     if arm == "oumv":
         return SYSTEM_OUMV, OUMV_TOOLS, registry(ws, arm)
     return SYSTEM_BASELINE, BASE_TOOLS, registry(ws, arm)
