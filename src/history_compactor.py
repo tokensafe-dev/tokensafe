@@ -10,10 +10,97 @@ from typing import Dict, Any, Optional, List, Tuple
 from src.tokenizer import count_tokens
 
 
+def _block_text(content: Any) -> str:
+    """Plain text of a message content (plain string or typed block list)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = str(block.get("type") or "")
+        if btype in ("text", "thinking", "reasoning"):
+            text = block.get("text") or block.get("thinking")
+            if isinstance(text, str) and text:
+                parts.append(text)
+        elif btype == "tool_result":
+            nested = _block_text(block.get("content"))
+            if nested:
+                parts.append(nested)
+    return " ".join(parts)
+
+
+def _model_io_parts(step: dict) -> Tuple[str, List[Tuple[str, dict]], str]:
+    """Normalize a ZCode `model_io` record into (text, tool_calls, user_prompt).
+
+    One record is one provider call: `request.messages` carries either only the
+    new messages (`messagesKind: "delta"`) or a window ending with the newest
+    message, while `response` holds that call's assistant output. Only the newest
+    message is new state, so folding stays linear instead of re-counting the
+    cumulative conversation once per record. `user_prompt` is non-empty when the
+    record sits on a turn boundary (the digest's active goal).
+    """
+    request = step.get("request") if isinstance(step.get("request"), dict) else {}
+    response = step.get("response") if isinstance(step.get("response"), dict) else {}
+
+    messages = request.get("messages") if isinstance(request.get("messages"), list) else []
+    newest: dict = messages[-1] if messages and isinstance(messages[-1], dict) else {}
+    newest_role = str(newest.get("role") or "")
+    newest_text = _block_text(newest.get("content"))
+
+    user_prompt = ""
+    if newest_role == "user":
+        candidate = newest_text.strip()
+        if candidate and not _is_injected_prompt(candidate):
+            user_prompt = candidate
+    if not user_prompt and request.get("messagesKind") in ("full", "delta"):
+        # Complete (or purely new) windows: the newest user message is this
+        # turn's prompt even when trailing tool results follow it.
+        for item in reversed(messages):
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            candidate = _block_text(item.get("content")).strip()
+            if candidate and not _is_injected_prompt(candidate):
+                user_prompt = candidate
+                break
+
+    assistant_text = response.get("text")
+    if not isinstance(assistant_text, str):
+        assistant_text = ""
+    reasoning_text = response.get("reasoningText")
+    if not isinstance(reasoning_text, str):
+        reasoning_text = ""
+
+    parts: List[str] = []
+    if newest_role == "user" and newest_text.strip():
+        parts.append(newest_text)  # the prompt itself leads the step
+    elif user_prompt:
+        parts.append(user_prompt)  # prompt recovered from deeper in the window
+    if assistant_text.strip():
+        parts.append(assistant_text)
+    if reasoning_text.strip():
+        parts.append(reasoning_text)
+    if newest_role != "user" and newest_text.strip():
+        parts.append(newest_text)
+
+    calls: List[Tuple[str, dict]] = []
+    for call in response.get("toolCalls") or []:
+        if not isinstance(call, dict):
+            continue
+        args = call.get("input")
+        calls.append((str(call.get("name") or ""), args if isinstance(args, dict) else {}))
+
+    return "\n".join(part for part in parts if part), calls, user_prompt
+
+
 def _extract_step_text(step: dict) -> str:
     """Step text in any supported transcript format (Antigravity string/list, Claude Code text/thinking/tool_result)."""
     if not isinstance(step, dict):
         return ""
+    if step.get("type") == "model_io":
+        return _model_io_parts(step)[0]
     content = step.get("content")
     if isinstance(content, str) and content:
         return content
@@ -45,6 +132,38 @@ def _extract_step_text(step: dict) -> str:
             text = pinput.get("text") or pinput.get("prompt")
             if isinstance(text, str) and text:
                 return text
+
+    # ZCode model-io log: {request:{body:{messages}}, response:{body:{choices}}}
+    response = step.get("response")
+    if isinstance(response, dict):
+        try:
+            msg = response["body"]["choices"][0]["message"]
+        except Exception:
+            msg = None
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                return content
+            if isinstance(content, list):
+                joined = " ".join(
+                    str(b.get("text") or "")
+                    for b in content
+                    if isinstance(b, dict)
+                ).strip()
+                if joined:
+                    return joined
+    request = step.get("request")
+    if isinstance(request, dict):
+        try:
+            messages = request["body"]["messages"]
+        except Exception:
+            messages = None
+        if isinstance(messages, list):
+            for item in reversed(messages):
+                if isinstance(item, dict) and item.get("role") == "user":
+                    content = item.get("content")
+                    if isinstance(content, str) and content:
+                        return content
 
     message = step.get("message")
     if not isinstance(message, dict):
@@ -103,12 +222,35 @@ def _extract_step_tool_calls(step: dict) -> List[Tuple[str, dict]]:
     calls: List[Tuple[str, dict]] = []
     if not isinstance(step, dict):
         return calls
+    if step.get("type") == "model_io":
+        return _model_io_parts(step)[1]
     tc_list = step.get("tool_calls")
     if isinstance(tc_list, list):
         for tc in tc_list:
             if isinstance(tc, dict):
                 args = tc.get("args")
                 calls.append((str(tc.get("name", "")), args if isinstance(args, dict) else {}))
+    response = step.get("response")
+    if isinstance(response, dict):
+        try:
+            message = response["body"]["choices"][0]["message"]
+        except Exception:
+            message = None
+        if isinstance(message, dict):
+            for tc in message.get("tool_calls") or []:
+                fn = (tc or {}).get("function") or {}
+                name = str(fn.get("name") or "")
+                raw_args = fn.get("arguments")
+                args = {}
+                if isinstance(raw_args, str):
+                    try:
+                        args = json.loads(raw_args)
+                    except Exception:
+                        args = {}
+                elif isinstance(raw_args, dict):
+                    args = raw_args
+                calls.append((name, args if isinstance(args, dict) else {}))
+
     payload = step.get("payload")
     if isinstance(payload, dict) and step.get("type") == "tool_call_scheduled":
         args = payload.get("input")
@@ -123,6 +265,21 @@ def _extract_step_tool_calls(step: dict) -> List[Tuple[str, dict]]:
                     inp = block.get("input")
                     calls.append((str(block.get("name", "")), inp if isinstance(inp, dict) else {}))
     return calls
+
+_INJECTED_PROMPT_MARKERS = (
+    "<system-reminder",
+    "critical: respond with text",
+    "respond with text only",
+    "[tokensafe",
+    "[oumv",
+)
+
+
+def _is_injected_prompt(text: str) -> bool:
+    """True for harness-injected reminders that arrive as user-role messages."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _INJECTED_PROMPT_MARKERS)
+
 
 def _clean_goal_text(text: str) -> str:
     """Extracts a clean, single-sentence goal from raw user text or prompt."""
@@ -171,6 +328,8 @@ class HistoryCompactor:
 
             if source == "USER_EXPLICIT" or stype == "USER_INPUT" or role == "user":
                 raw_txt = _extract_step_text(step)
+                if _is_injected_prompt(raw_txt):
+                    continue
                 cleaned = _clean_goal_text(raw_txt)
                 if cleaned:
                     active_goal = cleaned
@@ -180,6 +339,8 @@ class HistoryCompactor:
             # Fallback to key turns if any
             for step in steps:
                 raw_txt = _extract_step_text(step)
+                if _is_injected_prompt(raw_txt):
+                    continue
                 cleaned = _clean_goal_text(raw_txt)
                 if cleaned and len(cleaned) > 15:
                     active_goal = cleaned
@@ -289,9 +450,18 @@ class HistoryCompactor:
                     line = line.strip()
                     if line:
                         try:
-                            steps.append(json.loads(line))
+                            parsed = json.loads(line)
                         except Exception:
-                            pass
+                            continue
+                        # A model-io record whose newest message is the user's
+                        # prompt is the turn boundary the digest looks for.
+                        if (
+                            isinstance(parsed, dict)
+                            and parsed.get("type") == "model_io"
+                            and _model_io_parts(parsed)[2]
+                        ):
+                            parsed["role"] = "user"
+                        steps.append(parsed)
         except Exception:
             return None, 0, 0, {}
 
