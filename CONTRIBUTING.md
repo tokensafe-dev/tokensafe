@@ -4,6 +4,18 @@ Thank you for your interest in contributing to TokenSafe! We welcome contributio
 
 ---
 
+## ✍️ Sign-off (DCO)
+
+This project uses the **Developer Certificate of Origin 1.1** ([DCO](DCO)). Sign every commit:
+
+```bash
+git commit -s -m "fix(search): ..."
+```
+
+The sign-off adds `Signed-off-by: Your Name <you@example.com>`; PRs without it are asked to amend. There is no separate CLA. The engine is Apache-2.0 from 4.7.0 (releases ≤4.6.4 stay MIT), and contributions are accepted under the same terms.
+
+---
+
 ## 🎯 Core Philosophy & Guidelines
 
 1. **Minimal Runtime Dependencies (`cryptography>=42.0` + stdlib)**:
