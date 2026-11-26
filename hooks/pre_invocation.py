@@ -21,12 +21,10 @@ PROJECT_ROOT = os.path.dirname(HOOK_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.compactor import PromptCompactor
-from src.history_compactor import HistoryCompactor
-from src.metrics import MetricsTracker
-from src.governor import ContextBudget
-from src.license_manager import LicenseManager
+from src.agent import context as kernel
 from src.adapter_core import TOKENSAFE_DIRECTIVES as PROTOCOL_DIRECTIVES, resolve_event_model
+from src.license_manager import LicenseManager
+from src.metrics import MetricsTracker
 from src.paths import resolve_data_dir
 
 def _model_name(payload: dict) -> str:
@@ -102,7 +100,7 @@ def _handle(payload: dict) -> dict:
                 }
             })
     elif last_user_input and len(last_user_input.strip()) >= 5 and not _proxy_is_active():
-        compaction = PromptCompactor.compact(last_user_input, enable_distill=True)
+        compaction = kernel.compact_prompt(last_user_input)
         saved_tokens = compaction["saved_tokens"]
         reduction_pct = compaction["reduction_pct"]
 
@@ -160,7 +158,7 @@ def _handle(payload: dict) -> dict:
     fresh_fold = False
     orig_hist_tokens = 0
     if not is_quota_exceeded and invocation_num >= 3 and transcript_path:
-        folded_text, orig_hist_tokens, folded_tokens, stats = HistoryCompactor.fold_transcript(
+        folded_text, orig_hist_tokens, folded_tokens, stats = kernel.fold_history(
             transcript_path, invocation_num
         )
         if folded_text and stats.get("saved_tokens", 0) > 0:
@@ -207,10 +205,7 @@ def _handle(payload: dict) -> dict:
     if folded_text is not None:
         history_mass = orig_hist_tokens
     elif transcript_path:
-        try:
-            history_mass = HistoryCompactor.measure_transcript(transcript_path)
-        except Exception:
-            history_mass = 0
+        history_mass = kernel.measure_transcript(transcript_path)
 
     # 4. Adaptive Protocol Enforcement Reminder (Guard-triggered or fresh fold only)
     recent_guard = tracker.get_last_event(conversation_id, "GUARD_RAW_CODE_SEARCH")
@@ -251,7 +246,7 @@ def _handle(payload: dict) -> dict:
 
     # 5. Context Budget HUD warning
     try:
-        budget = ContextBudget.estimate(
+        budget = kernel.estimate_budget(
             tracker, session_id=conversation_id,
             model=_model_name(payload),
             history_tokens=history_mass,

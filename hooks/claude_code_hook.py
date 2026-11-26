@@ -171,13 +171,13 @@ def handle(event: str, payload: dict, agent: str = AGENT) -> dict:
             pass
         if transcript_path:
             try:
-                from src.history_compactor import HistoryCompactor
+                from src.agent import context as kernel
                 from src.metrics import MetricsTracker
                 turn = 0
                 with open(transcript_path, "r", encoding="utf-8", errors="replace") as tf:
                     turn = sum(1 for ln in tf if ln.strip())
                 if turn >= 3:
-                    folded, orig_hist, folded_tok, stats = HistoryCompactor.fold_transcript(
+                    folded, orig_hist, folded_tok, stats = kernel.fold_history(
                         transcript_path, turn
                     )
                     if folded and stats.get("saved_tokens", 0) > 0:
