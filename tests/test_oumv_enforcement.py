@@ -3,7 +3,9 @@
 import json
 import os
 import shutil
+import socket
 import tempfile
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -28,9 +30,28 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
     def tearDown(self):
         OUMVGateway._cached_fe = None
         OUMVGateway._cached_be = None
+        OUMVGateway._last_scan_time = 0.0
+        OUMVGateway._port_liveness.clear()
         shutil.rmtree(self.test_dir, ignore_errors=True)
         shutil.rmtree(self.tmp_home, ignore_errors=True)
         shutil.rmtree(self.tmp_data, ignore_errors=True)
+
+    def _start_listener(self):
+        """Binds a real TCP listener on an ephemeral port (needed for liveness checks)."""
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        self.addCleanup(srv.close)
+        return srv.getsockname()[1]
+
+    def _dead_port(self):
+        """Returns a port that was just bound and released, so nothing listens on it."""
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.close()
+        return port
 
     def _create_react_plus_node_monorepo(self):
         web_dir = os.path.join(self.test_dir, "apps", "web")
@@ -112,21 +133,62 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
             self.assertIsNone(skipped)
 
     def test_guard_blocks_raw_localhost_curl_when_live_oumv_active(self):
+        port = self._start_listener()
         with patch.dict(os.environ, {"TOKENSAFE_HOME": self.tmp_home}):
             rt = OUMVGateway.global_runtime_file(self.test_dir)
             os.makedirs(os.path.dirname(rt), exist_ok=True)
             with open(rt, "w", encoding="utf-8") as f:
-                json.dump({"frontend": {"name": "react", "url": "http://localhost:5179/__oumv/rpc"}}, f)
+                json.dump({"frontend": {"name": "react", "url": f"http://127.0.0.1:{port}/__oumv/rpc"}}, f)
 
-            blocked = TokenSafeGuard.inspect_command("curl http://localhost:5179/api/users", cwd=self.test_dir)
+            blocked = TokenSafeGuard.inspect_command(f"curl http://127.0.0.1:{port}/api/users", cwd=self.test_dir)
             self.assertTrue(blocked.blocked)
             self.assertEqual(blocked.check_name, "OUMV_BYPASS")
 
             # Health checks and unrelated ports stay allowed
-            ok_health = TokenSafeGuard.inspect_command("curl http://localhost:5179/health", cwd=self.test_dir)
+            ok_health = TokenSafeGuard.inspect_command(f"curl http://127.0.0.1:{port}/health", cwd=self.test_dir)
             self.assertFalse(ok_health.blocked)
             ok_other = TokenSafeGuard.inspect_command("curl http://localhost:9999/test", cwd=self.test_dir)
             self.assertFalse(ok_other.blocked)
+
+            # Kill switch
+            with patch.dict(os.environ, {"TOKENSAFE_OUMV_CURL_GUARD": "0"}):
+                bypass = TokenSafeGuard.inspect_command(f"curl http://127.0.0.1:{port}/api/users", cwd=self.test_dir)
+                self.assertFalse(bypass.blocked)
+
+    def test_stale_runtime_descriptor_does_not_block_or_report_connected(self):
+        dead_port = self._dead_port()
+        with patch.dict(os.environ, {"TOKENSAFE_HOME": self.tmp_home, "TOKENSAFE_DATA_DIR": self.tmp_data}):
+            rt = OUMVGateway.global_runtime_file(self.test_dir)
+            os.makedirs(os.path.dirname(rt), exist_ok=True)
+            with open(rt, "w", encoding="utf-8") as f:
+                json.dump({"frontend": {"name": "dead", "url": f"http://127.0.0.1:{dead_port}/__oumv/rpc"}}, f)
+
+            # A descriptor pointing at a closed port is not a live runtime
+            self.assertEqual(OUMVGateway.get_live_ports(self.test_dir), [])
+            self.assertFalse(
+                TokenSafeGuard.inspect_command(f"curl http://127.0.0.1:{dead_port}/api/users", cwd=self.test_dir).blocked
+            )
+
+            with patch.object(OUMVGateway, "_probe_candidates", return_value=None):
+                st = OUMVGateway.status(workspace_dir=self.test_dir)
+            self.assertNotEqual(st["frontend"].get("status", ""), "CONNECTED")
+            self.assertIsNone(OUMVGateway._cached_fe)
+            self.assertTrue(st.get("staleRuntimes"))
+
+    def test_expired_runtime_descriptor_is_ignored(self):
+        port = self._start_listener()
+        with patch.dict(os.environ, {"TOKENSAFE_HOME": self.tmp_home}):
+            rt = OUMVGateway.global_runtime_file(self.test_dir)
+            os.makedirs(os.path.dirname(rt), exist_ok=True)
+            with open(rt, "w", encoding="utf-8") as f:
+                json.dump({"frontend": {"name": "react", "url": f"http://127.0.0.1:{port}/__oumv/rpc"}}, f)
+            old = time.time() - (OUMVGateway._DESCRIPTOR_MAX_AGE_SEC + 60)
+            os.utime(rt, (old, old))
+
+            self.assertEqual(OUMVGateway.get_live_ports(self.test_dir), [])
+            self.assertFalse(
+                TokenSafeGuard.inspect_command(f"curl http://127.0.0.1:{port}/api/users", cwd=self.test_dir).blocked
+            )
 
     def test_read_edit_advisory_fires_once_for_supported_stack_only(self):
         web_dir, api_dir = self._create_react_plus_node_monorepo()

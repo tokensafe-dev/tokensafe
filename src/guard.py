@@ -599,9 +599,20 @@ class TokenSafeGuard:
         return GuardResult(blocked=False)
 
     @classmethod
+    def _oumv_curl_guard_enabled(cls) -> bool:
+        """Kill switch in the FileState style: TOKENSAFE_OUMV_CURL_GUARD=0/false/no/off."""
+        return os.environ.get("TOKENSAFE_OUMV_CURL_GUARD", "").strip().lower() not in ("0", "false", "no", "off")
+
+    @classmethod
     def _check_live_oumv_curl(cls, stages: List[str], cwd: str = "") -> Optional[str]:
-        """Blocks raw curl/wget against localhost ports managed by a live OUMV runtime."""
+        """Blocks raw curl/wget against localhost ports managed by a live OUMV runtime.
+
+        get_live_ports() only returns ports that are fresh and actually listening, so a
+        stale descriptor (crashed dev server, port reused) can never hard-block curl.
+        """
         if not cwd or not os.path.isdir(cwd):
+            return None
+        if not cls._oumv_curl_guard_enabled():
             return None
         try:
             from src.oumv_gateway import OUMVGateway

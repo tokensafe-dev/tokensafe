@@ -4,6 +4,7 @@ Unit tests for OUMVGateway inside TokenSafe.
 
 import unittest
 import json
+import socket
 import tempfile
 import os
 import shutil
@@ -21,9 +22,19 @@ class TestOUMVGateway(unittest.TestCase):
         OUMVGateway._cached_fe = None
         OUMVGateway._cached_be = None
         OUMVGateway._last_scan_time = 0.0
+        OUMVGateway._port_liveness.clear()
 
     def tearDown(self):
+        OUMVGateway._port_liveness.clear()
         shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _listener_port(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        self.addCleanup(srv.close)
+        return srv.getsockname()[1]
 
     @patch.object(OUMVGateway, "_probe_candidates", return_value=None)
     def test_status_disconnected_default(self, _mock_probe):
@@ -64,6 +75,9 @@ class TestOUMVGateway(unittest.TestCase):
         self.assertEqual(fe_adapter["security"]["workspaceBoundary"], True)
 
     def test_discovery_from_runtime_json(self):
+        # Descriptor adoption now requires the advertised port to be listening.
+        fe_port = self._listener_port()
+        be_port = self._listener_port()
         oumv_dir = os.path.join(self.test_dir, ".oumv")
         os.makedirs(oumv_dir, exist_ok=True)
         runtime_file = os.path.join(oumv_dir, "runtime.json")
@@ -73,19 +87,36 @@ class TestOUMVGateway(unittest.TestCase):
                 "frontend": {
                     "name": "tokensafe-ui",
                     "version": "1.0.0",
-                    "url": "http://localhost:5173/__oumv/rpc"
+                    "url": f"http://127.0.0.1:{fe_port}/__oumv/rpc"
                 },
                 "backend": {
                     "name": "tokensafe-python",
                     "version": "0.1.0",
-                    "url": "http://localhost:8000/__oumv/rpc"
+                    "url": f"http://127.0.0.1:{be_port}/__oumv/rpc"
                 }
             }, f)
 
         status = OUMVGateway.status(workspace_dir=self.test_dir)
         self.assertEqual(status["frontend"]["name"], "tokensafe-ui")
         self.assertEqual(status["backend"]["name"], "tokensafe-python")
-        self.assertEqual(status["backend"]["url"], "http://localhost:8000/__oumv/rpc")
+        self.assertEqual(status["backend"]["url"], f"http://127.0.0.1:{be_port}/__oumv/rpc")
+        self.assertNotIn("staleRuntimes", status)
+
+    def test_descriptor_with_closed_port_is_not_adopted(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        dead_port = srv.getsockname()[1]
+        srv.close()
+
+        oumv_dir = os.path.join(self.test_dir, ".oumv")
+        os.makedirs(oumv_dir, exist_ok=True)
+        with open(os.path.join(oumv_dir, "runtime.json"), "w", encoding="utf-8") as f:
+            json.dump({"frontend": {"name": "dead", "url": f"http://127.0.0.1:{dead_port}/__oumv/rpc"}}, f)
+
+        with patch.object(OUMVGateway, "_probe_candidates", return_value=None):
+            status = OUMVGateway.status(workspace_dir=self.test_dir)
+        self.assertEqual(status["frontend"]["status"], "DISCONNECTED")
+        self.assertTrue(status.get("staleRuntimes"))
 
     @patch.object(OUMVGateway, "_rpc_call")
     def test_observe_fullstack_pulse(self, mock_rpc):

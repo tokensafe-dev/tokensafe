@@ -7,9 +7,11 @@ Connects AI coding agents to live Frontend (tokensafe-ui, Vite, React) and Backe
 import os
 import json
 import time
+import socket
 import hashlib
 import urllib.request
 import urllib.error
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, Tuple, List
 from src.paths import get_active_workspace
@@ -43,6 +45,65 @@ class OUMVGateway:
     _cached_be: Optional[Dict[str, Any]] = None
     _last_scan_time: float = 0.0
     _SCAN_INTERVAL_SEC: float = 5.0
+    # Liveness cache for descriptor-derived ports: the bash guard runs per command,
+    # so a TCP probe must be memoized instead of blocking every invocation.
+    _port_liveness: Dict[Tuple[str, int], Tuple[float, bool]] = {}
+    _PORT_TTL_SEC: float = 8.0
+    _PORT_PROBE_TIMEOUT: float = 0.05
+    # Descriptors left behind by a crashed dev server must not stay authoritative forever.
+    _DESCRIPTOR_MAX_AGE_SEC: float = 12 * 3600.0
+
+    @classmethod
+    def _is_port_open(cls, host: str, port: int, timeout: Optional[float] = None, use_cache: bool = True) -> bool:
+        """Cheap TCP liveness check with a short TTL cache (never raises)."""
+        key = (host or "127.0.0.1", int(port))
+        now = time.time()
+        if use_cache:
+            hit = cls._port_liveness.get(key)
+            if hit and (now - hit[0]) < cls._PORT_TTL_SEC:
+                return hit[1]
+        alive = False
+        try:
+            with socket.create_connection(key, timeout=timeout or cls._PORT_PROBE_TIMEOUT):
+                alive = True
+        except OSError:
+            alive = False
+        cls._port_liveness[key] = (now, alive)
+        return alive
+
+    @classmethod
+    def _is_url_live(cls, url: Optional[str]) -> bool:
+        """True when a runtime URL's port accepts connections (port-less URLs are trusted)."""
+        if not url:
+            return False
+        try:
+            parsed = urllib.parse.urlparse(url)
+            port = parsed.port
+        except ValueError:
+            return False
+        except Exception:
+            return True
+        if not port:
+            return True
+        return cls._is_port_open(parsed.hostname or "127.0.0.1", int(port))
+
+    @classmethod
+    def _drop_stale_descriptor_endpoints(cls) -> List[Dict[str, Any]]:
+        """Clears descriptor-sourced endpoints whose port no longer listens.
+
+        A descriptor is a hint written by the dev server; after a crash it keeps
+        pointing at a dead (or reused) port and every consumer would report CONNECTED.
+        Returns the dropped entries so callers can explain the downgrade.
+        """
+        dropped: List[Dict[str, Any]] = []
+        for attr in ("_cached_fe", "_cached_be"):
+            entry = getattr(cls, attr)
+            if entry and entry.get("source") == "descriptor":
+                url = entry.get("url")
+                if url and not cls._is_url_live(url):
+                    dropped.append(entry)
+                    setattr(cls, attr, None)
+        return dropped
 
     @classmethod
     def get_endpoints(cls, workspace_dir: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -50,6 +111,7 @@ class OUMVGateway:
         now = time.time()
         if (now - cls._last_scan_time > cls._SCAN_INTERVAL_SEC) or (not cls._cached_fe and not cls._cached_be):
             cls.scan(workspace_dir=workspace_dir)
+        cls._drop_stale_descriptor_endpoints()
         return cls._cached_fe, cls._cached_be
 
     @classmethod
@@ -128,6 +190,7 @@ class OUMVGateway:
                             "url": fe_info["url"],
                             "sessionToken": fe_info.get("sessionToken"),
                             "healthy": True,
+                            "source": "descriptor",
                             "capabilities": fe_info.get("capabilities", {}),
                         }
                     be_info = data.get("backend")
@@ -139,6 +202,7 @@ class OUMVGateway:
                             "url": be_info["url"],
                             "sessionToken": be_info.get("session_token") or be_info.get("sessionToken"),
                             "healthy": True,
+                            "source": "descriptor",
                             "capabilities": be_info.get("capabilities", {}),
                         }
                 except Exception:
@@ -302,9 +366,14 @@ class OUMVGateway:
 
     @classmethod
     def get_live_ports(cls, workspace_dir: Optional[str] = None) -> List[int]:
-        """Returns localhost ports from active workspace/global OUMV runtime descriptors without blocking scans."""
-        import urllib.parse
+        """Ports from OUMV runtime descriptors that are fresh AND actually listening.
+
+        Guards that hard-block raw curl rely on this list, so a descriptor left behind
+        by a crashed dev server (or a port later reused by another process) must not
+        count as a live runtime.
+        """
         ws = workspace_dir or get_active_workspace()
+        now = time.time()
         ports: List[int] = []
         for lp in (
             cls.global_runtime_file(ws),
@@ -314,14 +383,22 @@ class OUMVGateway:
             if not os.path.isfile(lp):
                 continue
             try:
+                if (now - os.path.getmtime(lp)) > cls._DESCRIPTOR_MAX_AGE_SEC:
+                    continue
                 with open(lp, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 for sec in ("frontend", "backend"):
                     url = (data.get(sec) or {}).get("url")
-                    if url:
-                        parsed = urllib.parse.urlparse(url)
-                        if parsed.port and parsed.port not in ports:
-                            ports.append(int(parsed.port))
+                    if not url:
+                        continue
+                    parsed = urllib.parse.urlparse(url)
+                    if not parsed.port:
+                        continue
+                    port = int(parsed.port)
+                    if port in ports:
+                        continue
+                    if cls._is_port_open(parsed.hostname or "127.0.0.1", port):
+                        ports.append(port)
             except Exception:
                 pass
         return ports
@@ -331,6 +408,8 @@ class OUMVGateway:
     def status(cls, workspace_dir: Optional[str] = None) -> Dict[str, Any]:
         cls.mark_oumv_used(workspace_dir)
         cls.scan(workspace_dir=workspace_dir)
+        # A descriptor whose port is closed must not be reported as a live runtime.
+        dropped = cls._drop_stale_descriptor_endpoints()
         fe, be = cls._cached_fe, cls._cached_be
         ws = workspace_dir or get_active_workspace()
 
@@ -345,7 +424,7 @@ class OUMVGateway:
         be_stack = stack_info.get("backend") or {}
         be_unsupported = bool(be_stack) and not be_stack.get("oumv_supported", True) and not be
 
-        return {
+        result: Dict[str, Any] = {
             "mode": "OUT_OF_THE_BOX_HYBRID",
             "frontend": fe or {
                 "status": "DISCONNECTED",
@@ -367,6 +446,16 @@ class OUMVGateway:
             "detectedStack": stack_info,
             "workspace": ws,
         }
+        if dropped:
+            result["staleRuntimes"] = [
+                {
+                    "kind": d.get("kind"),
+                    "url": d.get("url"),
+                    "reason": "runtime descriptor present but its port is closed (crashed dev server?)",
+                }
+                for d in dropped
+            ]
+        return result
 
     @staticmethod
     def _adapter_lifecycle(stack_info: Dict[str, Any], fe: Optional[Dict[str, Any]], be: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
