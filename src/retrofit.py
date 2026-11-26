@@ -10,119 +10,260 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 
+def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[str]]:
+    """Inspects a single package.json for frontend or Node.js backend stack."""
+    fe_out: Optional[Dict[str, Any]] = None
+    be_out: Optional[Dict[str, Any]] = None
+    managers: List[str] = []
+    try:
+        with open(pkg_json_path, "r", encoding="utf-8") as f:
+            pkg_data = json.load(f)
+        deps = {
+            **pkg_data.get("dependencies", {}),
+            **pkg_data.get("devDependencies", {}),
+        }
+
+        state_managers = []
+        if "zustand" in deps:
+            state_managers.append("zustand")
+        if "redux" in deps or "@reduxjs/toolkit" in deps:
+            state_managers.append("redux")
+        if "pinia" in deps:
+            state_managers.append("pinia")
+        if "jotai" in deps:
+            state_managers.append("jotai")
+
+        fe_info: Dict[str, Any] = {
+            "state_managers": state_managers,
+            "orm": "prisma" if "@prisma/client" in deps or "prisma" in deps else ("drizzle" if "drizzle-orm" in deps else None),
+            "vite": "vite" in deps,
+            "root": rel_dir,
+        }
+
+        if "next" in deps:
+            fe_info.update({"framework": "nextjs", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("next"), "oumv_supported": True, "status": "ready"})
+        elif "react" in deps:
+            fe_info.update({"framework": "react", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("react"), "oumv_supported": True, "status": "ready"})
+        elif "vue" in deps:
+            fe_info.update({"framework": "vue", "provider": "vue", "adapter": "tokensafe-ui/oumv/vue", "version": deps.get("vue"), "oumv_supported": True, "status": "ready"})
+        elif "solid-js" in deps or "@tokensafe-ui/core" in deps:
+            fe_info.update({"framework": "solid", "provider": "solid", "adapter": "tokensafe-ui/core", "version": deps.get("solid-js") or deps.get("@tokensafe-ui/core"), "oumv_supported": True, "status": "ready"})
+        elif "svelte" in deps:
+            fe_info.update({"framework": "svelte", "provider": "svelte", "adapter": "tokensafe-ui/core", "version": deps.get("svelte"), "oumv_supported": True, "status": "ready"})
+
+        if "framework" in fe_info:
+            fe_out = fe_info
+
+        # Node.js backend frameworks (adapter status: planned / unsupported yet)
+        node_fw = None
+        if "@nestjs/core" in deps:
+            node_fw = "nestjs"
+        elif "fastify" in deps:
+            node_fw = "fastify"
+        elif "express" in deps:
+            node_fw = "express"
+        elif "hono" in deps:
+            node_fw = "hono"
+        elif "koa" in deps:
+            node_fw = "koa"
+
+        if node_fw:
+            be_out = {
+                "framework": node_fw,
+                "provider": "node",
+                "adapter": "tokensafe-backend/node",
+                "language": "node",
+                "root": rel_dir,
+                "oumv_supported": False,
+                "status": "planned",
+            }
+
+        if isinstance(pkg_data.get("workspaces"), (list, dict)):
+            managers.append("workspaces")
+    except Exception:
+        pass
+    return fe_out, be_out, managers
+
+
+def _iter_monorepo_package_dirs(workspace_dir: str) -> List[str]:
+    """Returns shallow package subdirectories (depth <= 2) for monorepo stack discovery."""
+    skip = {"node_modules", ".git", "dist", "build", ".next", ".venv", "venv", "__pycache__", ".tokensafe"}
+    candidates: List[str] = []
+    container_names = {"apps", "packages", "services", "frontend", "web", "client", "ui", "backend", "api", "server", "go", "python"}
+    try:
+        for entry in sorted(os.listdir(workspace_dir)):
+            if entry in skip or entry.startswith("."):
+                continue
+            full = os.path.join(workspace_dir, entry)
+            if not os.path.isdir(full):
+                continue
+            if entry in container_names or os.path.isfile(os.path.join(full, "package.json")) or os.path.isfile(os.path.join(full, "go.mod")) or os.path.isfile(os.path.join(full, "pyproject.toml")):
+                candidates.append(full)
+                if entry in ("apps", "packages", "services"):
+                    try:
+                        for sub in sorted(os.listdir(full)):
+                            if sub in skip or sub.startswith("."):
+                                continue
+                            sub_full = os.path.join(full, sub)
+                            if os.path.isdir(sub_full):
+                                candidates.append(sub_full)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return candidates
+
+
 def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
-    """Inspects workspace manifests to detect frontend and backend frameworks."""
+    """Inspects workspace and monorepo manifests to detect frontend and backend frameworks."""
     stack: Dict[str, Any] = {
         "workspace": workspace_dir,
         "frontend": None,
         "backend": None,
         "package_managers": [],
         "detected_files": [],
+        "packages": [],
     }
 
-    # 1. Frontend detection (package.json)
-    pkg_json_path = os.path.join(workspace_dir, "package.json")
-    if os.path.isfile(pkg_json_path):
-        stack["detected_files"].append("package.json")
-        try:
-            with open(pkg_json_path, "r", encoding="utf-8") as f:
-                pkg_data = json.load(f)
-            deps = {
-                **pkg_data.get("dependencies", {}),
-                **pkg_data.get("devDependencies", {}),
-            }
-
-            state_managers = []
-            if "zustand" in deps:
-                state_managers.append("zustand")
-            if "redux" in deps or "@reduxjs/toolkit" in deps:
-                state_managers.append("redux")
-            if "pinia" in deps:
-                state_managers.append("pinia")
-            if "jotai" in deps:
-                state_managers.append("jotai")
-
-            fe_info: Dict[str, Any] = {
-                "state_managers": state_managers,
-                "orm": "prisma" if "@prisma/client" in deps or "prisma" in deps else ("drizzle" if "drizzle-orm" in deps else None),
-            }
-
-            if "next" in deps:
-                fe_info.update({"framework": "nextjs", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("next")})
-            elif "react" in deps:
-                fe_info.update({"framework": "react", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("react")})
-            elif "vue" in deps:
-                fe_info.update({"framework": "vue", "provider": "vue", "adapter": "tokensafe-ui/oumv/vue", "version": deps.get("vue")})
-            elif "solid-js" in deps or "@tokensafe-ui/core" in deps:
-                fe_info.update({"framework": "solid", "provider": "solid", "adapter": "tokensafe-ui/core", "version": deps.get("solid-js") or deps.get("@tokensafe-ui/core")})
-            elif "svelte" in deps:
-                fe_info.update({"framework": "svelte", "provider": "svelte", "adapter": "tokensafe-ui/core", "version": deps.get("svelte")})
-
-            if "framework" in fe_info:
-                stack["frontend"] = fe_info
-        except Exception:
-            pass
-
-    # Lockfiles
-    for lock, pm in [("pnpm-lock.yaml", "pnpm"), ("bun.lockb", "bun"), ("bun.lock", "bun"), ("yarn.lock", "yarn"), ("package-lock.json", "npm")]:
-        if os.path.isfile(os.path.join(workspace_dir, lock)):
-            stack["package_managers"].append(pm)
-            stack["detected_files"].append(lock)
-
-    # 2. Go Backend detection (go.mod)
-    go_mod_path = os.path.join(workspace_dir, "go.mod")
-    if not os.path.isfile(go_mod_path) and os.path.isfile(os.path.join(workspace_dir, "go", "go.mod")):
-        go_mod_path = os.path.join(workspace_dir, "go", "go.mod")
-
-    if os.path.isfile(go_mod_path):
-        stack["detected_files"].append(os.path.relpath(go_mod_path, workspace_dir))
-        stack["package_managers"].append("go")
-        framework = "net/http"
-        try:
-            with open(go_mod_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            if "github.com/gin-gonic/gin" in content:
-                framework = "gin"
-            elif "github.com/go-chi/chi" in content:
-                framework = "chi"
-            elif "github.com/labstack/echo" in content:
-                framework = "echo"
-            stack["backend"] = {"framework": framework, "provider": "go", "adapter": "tokensafe-backend/go", "language": "go"}
-        except Exception:
-            stack["backend"] = {"framework": "go", "provider": "go", "adapter": "tokensafe-backend/go", "language": "go"}
-
-    # 3. Python Backend detection (pyproject.toml, requirements.txt, setup.py)
-    py_files = [
-        os.path.join(workspace_dir, "pyproject.toml"),
-        os.path.join(workspace_dir, "python", "pyproject.toml"),
-        os.path.join(workspace_dir, "requirements.txt"),
-    ]
-    for pf in py_files:
-        if os.path.isfile(pf):
-            stack["detected_files"].append(os.path.relpath(pf, workspace_dir))
-            stack["package_managers"].append("pip/python")
-            try:
-                with open(pf, "r", encoding="utf-8") as f:
-                    c = f.read().lower()
-                framework = "python"
-                if "fastapi" in c:
-                    framework = "fastapi"
-                elif "django" in c:
-                    framework = "django"
-                elif "flask" in c:
-                    framework = "flask"
-                elif "starlette" in c:
-                    framework = "starlette"
+    def _scan_dir(target_dir: str):
+        rel = os.path.relpath(target_dir, workspace_dir) or "."
+        pkg_json_path = os.path.join(target_dir, "package.json")
+        if os.path.isfile(pkg_json_path):
+            stack["detected_files"].append(os.path.relpath(pkg_json_path, workspace_dir))
+            fe_info, be_info, _ = _detect_package_json_entry(pkg_json_path, rel_dir=rel)
+            if fe_info:
+                if not stack["frontend"]:
+                    stack["frontend"] = fe_info
+                stack["packages"].append({
+                    "role": "frontend",
+                    "path": rel,
+                    "framework": fe_info["framework"],
+                    "provider": fe_info["provider"],
+                    "adapter": fe_info["adapter"],
+                    "vite": fe_info.get("vite", False),
+                    "oumvSupported": bool(fe_info.get("oumv_supported", True)),
+                    "status": fe_info.get("status", "ready"),
+                })
+            if be_info:
                 if not stack["backend"]:
-                    stack["backend"] = {
+                    stack["backend"] = be_info
+                stack["packages"].append({
+                    "role": "backend",
+                    "path": rel,
+                    "framework": be_info["framework"],
+                    "provider": be_info["provider"],
+                    "adapter": be_info["adapter"],
+                    "oumvSupported": bool(be_info.get("oumv_supported", False)),
+                    "status": be_info.get("status", "planned"),
+                })
+
+        # Go Backend detection
+        go_mod_path = os.path.join(target_dir, "go.mod")
+        if rel == "." and not os.path.isfile(go_mod_path) and os.path.isfile(os.path.join(target_dir, "go", "go.mod")):
+            go_mod_path = os.path.join(target_dir, "go", "go.mod")
+        if os.path.isfile(go_mod_path):
+            rel_mod = os.path.relpath(go_mod_path, workspace_dir)
+            if rel_mod not in stack["detected_files"]:
+                stack["detected_files"].append(rel_mod)
+            if "go" not in stack["package_managers"]:
+                stack["package_managers"].append("go")
+            framework = "net/http"
+            try:
+                with open(go_mod_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if "github.com/gin-gonic/gin" in content:
+                    framework = "gin"
+                elif "github.com/go-chi/chi" in content:
+                    framework = "chi"
+                elif "github.com/labstack/echo" in content:
+                    framework = "echo"
+            except Exception:
+                pass
+            go_entry = {
+                "framework": framework,
+                "provider": "go",
+                "adapter": "tokensafe-backend/go",
+                "language": "go",
+                "root": os.path.dirname(rel_mod) or ".",
+                "oumv_supported": True,
+                "status": "ready",
+            }
+            if not stack["backend"] or not stack["backend"].get("oumv_supported", False):
+                stack["backend"] = go_entry
+            stack["packages"].append({
+                "role": "backend",
+                "path": go_entry["root"],
+                "framework": framework,
+                "provider": "go",
+                "adapter": "tokensafe-backend/go",
+                "oumvSupported": True,
+                "status": "ready",
+            })
+
+        # Python Backend detection
+        py_files = [
+            os.path.join(target_dir, "pyproject.toml"),
+            os.path.join(target_dir, "requirements.txt"),
+        ]
+        if rel == ".":
+            py_files.insert(1, os.path.join(target_dir, "python", "pyproject.toml"))
+        for pf in py_files:
+            if os.path.isfile(pf):
+                rel_pf = os.path.relpath(pf, workspace_dir)
+                if rel_pf not in stack["detected_files"]:
+                    stack["detected_files"].append(rel_pf)
+                if "pip/python" not in stack["package_managers"]:
+                    stack["package_managers"].append("pip/python")
+                try:
+                    with open(pf, "r", encoding="utf-8") as f:
+                        c = f.read().lower()
+                    framework = "python"
+                    if "fastapi" in c:
+                        framework = "fastapi"
+                    elif "django" in c:
+                        framework = "django"
+                    elif "flask" in c:
+                        framework = "flask"
+                    elif "starlette" in c:
+                        framework = "starlette"
+                    supported = framework in ("fastapi", "starlette")
+                    py_entry = {
                         "framework": framework,
                         "provider": "fastapi" if framework == "fastapi" else "python",
                         "adapter": "tokensafe-backend/python",
                         "language": "python",
+                        "root": os.path.dirname(rel_pf) or ".",
+                        "oumv_supported": supported,
+                        "status": "ready" if supported else "planned",
                     }
-            except Exception:
-                pass
-            break
+                    if not stack["backend"]:
+                        stack["backend"] = py_entry
+                    stack["packages"].append({
+                        "role": "backend",
+                        "path": py_entry["root"],
+                        "framework": framework,
+                        "provider": py_entry["provider"],
+                        "adapter": "tokensafe-backend/python",
+                        "oumvSupported": supported,
+                        "status": py_entry["status"],
+                    })
+                except Exception:
+                    pass
+                break
+
+    _scan_dir(workspace_dir)
+    if os.path.isfile(os.path.join(workspace_dir, "pnpm-workspace.yaml")):
+        stack["detected_files"].append("pnpm-workspace.yaml")
+
+    for lock, pm in [("pnpm-lock.yaml", "pnpm"), ("bun.lockb", "bun"), ("bun.lock", "bun"), ("yarn.lock", "yarn"), ("package-lock.json", "npm")]:
+        if os.path.isfile(os.path.join(workspace_dir, lock)):
+            if pm not in stack["package_managers"]:
+                stack["package_managers"].append(pm)
+            if lock not in stack["detected_files"]:
+                stack["detected_files"].append(lock)
+
+    for sub_dir in _iter_monorepo_package_dirs(workspace_dir):
+        _scan_dir(sub_dir)
 
     return stack
 
@@ -483,3 +624,86 @@ def resolve_zero_footprint_vite_command(
 
     npx_bin = shutil.which("npx") or "npx"
     return ([npx_bin, "--yes", "tokensafe-ui", "dev", ws, *cli_flags], "npx tokensafe-ui")
+
+
+def format_oumv_workspace_brief(workspace_dir: str, include_live: bool = False) -> str:
+    """Builds a compact OUMV capability matrix banner for SessionStart and tokensafe-proxy.
+
+    Explicitly separates supported profiles (React+Vite, Vue, Solid, Go, FastAPI)
+    from unsupported stacks (e.g. Node.js express/fastify/nest in a monorepo), so agents
+    use OUMV where available without wasting turns probing unsupported subprojects.
+    """
+    if not workspace_dir or not os.path.isdir(workspace_dir):
+        return ""
+    stack = detect_project_stack(workspace_dir)
+    packages = stack.get("packages") or []
+    parts: List[str] = []
+    seen_labels = set()
+
+    for pkg in packages:
+        loc = f" ({pkg['path']})" if pkg.get("path") and pkg["path"] != "." else ""
+        label = f"{pkg.get('provider')}/{pkg.get('framework')}{loc}"
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        if pkg.get("oumvSupported"):
+            run_hint = "; start live bridge via 'tokensafe dev'" if pkg.get("vite") else ""
+            parts.append(
+                f"{label}: OUMV SUPPORTED (use tokensafe:oumv observe/understand/mutate{run_hint})"
+            )
+        else:
+            parts.append(
+                f"{label}: OUMV UNSUPPORTED yet (planned — use repo_map/smart_read_file/scoped_search instead of oumv)"
+            )
+
+    if not parts:
+        return ""
+
+    if include_live:
+        try:
+            from src.oumv_gateway import OUMVGateway
+            fe, be = OUMVGateway.get_endpoints(workspace_dir=workspace_dir)
+            live_bits = []
+            if fe:
+                live_bits.append(f"FE LIVE {fe.get('url')}")
+            if be:
+                live_bits.append(f"BE LIVE {be.get('url')}")
+            if live_bits:
+                parts.append("LIVE RUNTIMES: " + ", ".join(live_bits) + " -> MUST inspect/verify via tokensafe:oumv")
+        except Exception:
+            pass
+
+    return "[TokenSafe OUMV Workspace Matrix | " + " | ".join(parts) + "]"
+
+
+def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str) -> Optional[Dict[str, Any]]:
+    """Returns the supported stack entry owning `file_path`, or None if unsupported (e.g. backend/node)."""
+    if not workspace_dir or not file_path:
+        return None
+    ws_abs = os.path.realpath(os.path.abspath(workspace_dir))
+    f_abs = os.path.realpath(os.path.abspath(file_path if os.path.isabs(file_path) else os.path.join(ws_abs, file_path)))
+    if not (f_abs == ws_abs or f_abs.startswith(ws_abs + os.sep)):
+        return None
+
+    rel = os.path.relpath(f_abs, ws_abs).replace(os.sep, "/")
+    stack = detect_project_stack(ws_abs)
+    packages = stack.get("packages") or []
+    # Match most specific package path first
+    sorted_pkgs = sorted(
+        packages,
+        key=lambda p: (0 if p.get("path", ".") == "." else len(str(p.get("path", ".")))),
+        reverse=True,
+    )
+    for pkg in sorted_pkgs:
+        p_rel = str(pkg.get("path") or ".").replace(os.sep, "/").strip("/")
+        if p_rel == "." or rel == p_rel or rel.startswith(p_rel + "/"):
+            if not pkg.get("oumvSupported"):
+                return None
+            ext = os.path.splitext(f_abs)[1].lower()
+            role = pkg.get("role")
+            if role == "frontend" and ext in (".tsx", ".jsx", ".vue", ".ts", ".js"):
+                return pkg
+            if role == "backend" and ext in (".go", ".py"):
+                return pkg
+            return None
+    return None

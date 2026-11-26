@@ -45,7 +45,7 @@ Execute the specified action directly based on these extracted parameters.
    - `"diff"` (`diff`): slice unified git diffs
    - `"image"` (`image_path`, `max_edge=1024`): downscale screenshots (-50-75% vision tokens)
    - `"compress"` (`prompt`): TOCP S-expression compression
-7. **Universal OUMV Protocol (`oumv`)**: For live Frontend (ports 5173/3000) and Backend (ports 8080/8000) runtimes, call `tokensafe:oumv(action="status"|"observe"|"understand"|"verify"|"mutate"|"graph", ...)` instead of headless browsers or blind shell curls.
+7. **Universal OUMV Protocol (`oumv` — Mandatory When Supported)**: When a project uses an OUMV-supported stack (`frontend/react` Vite, `frontend/vue`, `frontend/solid`, `backend/go`, `backend/fastapi`), ALWAYS prefer `tokensafe:oumv(action="status"|"observe"|"understand"|"verify"|"mutate"|"graph", ...)` BEFORE full file crawls, raw `curl`, or headless browsers — even for read/edit tasks (static AST OUMV works offline without running dev/build). For Vite+React, use `tokensafe dev` to start live OUMV with zero repository footprint. In mixed monorepos (e.g. React + Node.js), inspect `oumv(action="status")` / `[TokenSafe OUMV Workspace Matrix]`: use `oumv` on supported profiles and fall back to `repo_map` + `smart_read_file` + `scoped_search` for unsupported stacks (`backend/node`).
 8. **Bounded Reads & Styles**: Never call raw `read_file` without `StartLine`/`EndLine` on files > 100 lines. `smart_read_file` preserves CSS/SCSS/Tailwind design tokens (`:root`, `@theme`) in full.
 
 ### 4. Turn Token Savings Footer (Proof-of-Savings — always in English)

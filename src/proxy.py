@@ -1286,19 +1286,26 @@ class TokenSafeProxyHandler(BaseHTTPRequestHandler):
                         pass
                 target_symbol = compaction.get("symbol")
 
-        # 3. Automatic Architecture Awareness (God Nodes Injection — deterministic
+        # 3. Automatic Architecture Awareness & OUMV Capability Matrix (deterministic
         #    across turns for the active workspace so KV-cache prefixes stay identical).
         if messages and not is_quota_exceeded:
             try:
                 from src.paths import get_active_workspace
+                from src.retrofit import format_oumv_workspace_brief
                 ws_root = get_active_workspace()
                 if ws_root:
                     graph = GraphEngine.get_instance(ws_root)
                     banner = graph.format_topology_banner()
+                    oumv_brief = format_oumv_workspace_brief(ws_root, include_live=False)
                     first_msg = messages[0]
-                    if banner and isinstance(first_msg.get("content"), str) and "[TokenSafe Architecture" not in first_msg["content"]:
-                        if first_msg.get("role") == "system":
-                            first_msg["content"] = f"{banner}\n{first_msg['content']}"
+                    if isinstance(first_msg.get("content"), str) and first_msg.get("role") == "system":
+                        blocks = []
+                        if banner and "[TokenSafe Architecture" not in first_msg["content"]:
+                            blocks.append(banner)
+                        if oumv_brief and "[TokenSafe OUMV Workspace Matrix" not in first_msg["content"]:
+                            blocks.append(oumv_brief)
+                        if blocks:
+                            first_msg["content"] = "\n".join(blocks) + "\n" + first_msg["content"]
             except Exception:
                 pass
 

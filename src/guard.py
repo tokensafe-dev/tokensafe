@@ -587,7 +587,43 @@ class TokenSafeGuard:
                 reason=code_search_err
             )
 
+        # 6. Live OUMV Localhost Curl Guard (use tokensafe:oumv instead of raw curl against active OUMV ports)
+        oumv_curl_err = cls._check_live_oumv_curl(stages, cwd)
+        if oumv_curl_err:
+            return GuardResult(
+                blocked=True,
+                check_name="OUMV_BYPASS",
+                reason=oumv_curl_err,
+            )
+
         return GuardResult(blocked=False)
+
+    @classmethod
+    def _check_live_oumv_curl(cls, stages: List[str], cwd: str = "") -> Optional[str]:
+        """Blocks raw curl/wget against localhost ports managed by a live OUMV runtime."""
+        if not cwd or not os.path.isdir(cwd):
+            return None
+        try:
+            from src.oumv_gateway import OUMVGateway
+            live_ports = OUMVGateway.get_live_ports(cwd)
+        except Exception:
+            live_ports = []
+        if not live_ports:
+            return None
+
+        for stage in stages:
+            cmd_tok, _ = cls._stage_cmd_tokens(stage)
+            if cmd_tok not in ("curl", "wget", "http", "https"):
+                continue
+            for m in re.finditer(r"https?://(?:localhost|127\.0\.0\.1):(\d+)(/[^\s\"']*)?", stage, re.IGNORECASE):
+                port = int(m.group(1))
+                url_path = m.group(2) or "/"
+                if port in live_ports and not url_path.startswith(("/health", "/__oumv/", "/__tokensafe_ui/", "/__agent_dom/")):
+                    return (
+                        f"Live OUMV runtime is active on localhost:{port}. "
+                        f"Use tokensafe:oumv(action='observe'|'understand'|'verify') instead of raw '{cmd_tok}'."
+                    )
+        return None
 
     @classmethod
     def _has_code_target_in_args(cls, cmd_tok: str, cmd_args: List[str]) -> bool:

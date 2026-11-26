@@ -44,7 +44,8 @@ TOKENSAFE_DIRECTIVES = (
     "• Before large multi-step tasks: call 'tokensafe:session_context(action=\"budget\", model=...)' to check context headroom and Quality Score (Grade S-F).\n"
     "• When context budget reports warning/critical or Grade C/F: call 'tokensafe:session_context(action=\"compact\", transcript_path=...)' to fold history before continuing.\n"
     "• Prohibited File Edits: NEVER use 'sed -i', 'perl -i', or stream editors to modify source files; ALWAYS use 'edit_file' with exact string targets. NEVER suppress errors with '2>/dev/null'.\n"
-    "• Prefer 'edit_file' over 'write_file' for existing files."
+    "• Prefer 'edit_file' over 'write_file' for existing files.\n"
+    "• Universal OUMV Protocol (Mandatory When Supported): If the workspace reports an OUMV-supported stack (React+Vite, Vue, Solid, Go, FastAPI), ALWAYS prefer the 'oumv' MCP tool (status/observe/understand/verify) before full file crawls, raw curl, or browser checks — even when only reading/editing files (static AST OUMV works offline; use 'tokensafe dev' for zero-footprint live Vite+React). Check capability boundaries in mixed monorepos (for unsupported stacks like backend/node Express/Fastify/Nest, use repo_map/smart_read_file/scoped_search)."
 )
 
 # High-precision deny patterns: secrets and irreversible destruction only.
@@ -456,6 +457,53 @@ def _extract_path(tool_input: Dict[str, Any]) -> str:
     return ""
 
 
+def get_oumv_read_edit_advisory(workspace_dir: str, file_path: str, session_id: str = "") -> Optional[str]:
+    """One-shot per-session advisory when reading/editing files inside an OUMV-supported stack
+    (React+Vite, Vue, Solid, Go, FastAPI) without having called `tokensafe:oumv` recently.
+
+    Returns None immediately for unsupported stacks in mixed monorepos (e.g. backend/node),
+    when OUMV was already used in this workspace, or if already nudged in this session.
+    """
+    if not file_path:
+        return None
+    try:
+        from src.paths import get_active_workspace, resolve_data_dir
+        from src.retrofit import is_path_in_supported_oumv_scope
+        from src.oumv_gateway import OUMVGateway
+        import hashlib
+
+        ws = workspace_dir or get_active_workspace()
+        if not ws or not os.path.isdir(ws):
+            return None
+        pkg = is_path_in_supported_oumv_scope(ws, file_path)
+        if not pkg:
+            return None
+        if OUMVGateway.was_recently_used(ws):
+            return None
+
+        sess_key = hashlib.sha256(f"{session_id or 'default'}:{os.path.realpath(ws)}".encode("utf-8")).hexdigest()[:16]
+        marker = os.path.join(resolve_data_dir(), f".oumv_nudge_{sess_key}")
+        if os.path.isfile(marker):
+            return None
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+
+        live_ports = OUMVGateway.get_live_ports(ws)
+        if live_ports:
+            return (
+                f"[TokenSafe OUMV]: Live {pkg.get('provider')}/{pkg.get('framework')} OUMV runtime is active (port {live_ports[0]}). "
+                f"Prefer tokensafe:oumv(action='observe'|'understand'|'verify') for live DOM/state/causality instead of manual file crawling."
+            )
+        vite_tip = "; run 'tokensafe dev' for zero-footprint live Vite+React RPC" if pkg.get("vite") else ""
+        return (
+            f"[TokenSafe OUMV]: '{os.path.basename(file_path)}' belongs to an OUMV-supported {pkg.get('provider')}/{pkg.get('framework')} stack. "
+            f"Use tokensafe:oumv(action='observe', level='L1') or oumv(action='understand', query='impact') first (works statically offline{vite_tip})."
+        )
+    except Exception:
+        return None
+
+
 def _large_read_advisory(file_path: str, tool_input: Dict[str, Any]) -> Optional[str]:
     """Non-blocking advisory when an agent reads an entire large code file unbounded."""
     if not file_path or not os.path.isfile(file_path):
@@ -609,6 +657,15 @@ def evaluate_cc_pre_tool_use(payload: Dict[str, Any], agent: str) -> Dict[str, A
                     )
         except Exception:
             pass
+        oumv_note = get_oumv_read_edit_advisory(cwd, file_path, session_id)
+        if oumv_note:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "additionalContext": oumv_note,
+                }
+            }
         return {}
 
     if canon == "read":
@@ -616,13 +673,18 @@ def evaluate_cc_pre_tool_use(payload: Dict[str, Any], agent: str) -> Dict[str, A
         verdict = guard_read(file_path, agent, session_id, transcript_path=tp)
         if verdict["decision"] == "deny":
             return _cc_decision("deny", verdict["reason"])
-        advisory = _large_read_advisory(file_path, tool_input)
-        if advisory:
+        advisories = [
+            msg for msg in (
+                _large_read_advisory(file_path, tool_input),
+                get_oumv_read_edit_advisory(cwd, file_path, session_id),
+            ) if msg
+        ]
+        if advisories:
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "allow",
-                    "additionalContext": advisory,
+                    "additionalContext": "\n".join(advisories),
                 }
             }
         return {}

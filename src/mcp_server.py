@@ -1285,6 +1285,13 @@ def handle_tool_call(name: str, args: dict) -> dict:
                         )
                     except Exception:
                         pass
+                try:
+                    from src.adapter_core import get_oumv_read_edit_advisory
+                    oumv_note = get_oumv_read_edit_advisory(active_ws or os.path.dirname(abs_path), abs_path, _mcp_session_id())
+                    if oumv_note and content_parts and isinstance(content_parts[-1], dict):
+                        content_parts[-1]["text"] = f"{content_parts[-1].get('text', '')}\n\n{oumv_note}"
+                except Exception:
+                    pass
         return result
     except Exception as e:
         return _fallback_error(name, f"{type(e).__name__}: {str(e)}")

@@ -228,9 +228,63 @@ class OUMVGateway:
             return fe["url"]
         raise RuntimeError("No live OUMV runtime (Frontend or Backend) detected in workspace.")
 
+    @classmethod
+    def _runtime_marker_path(cls, workspace_dir: Optional[str] = None) -> str:
+        from src.paths import resolve_data_dir
+        ws = os.path.realpath(os.path.abspath(workspace_dir or get_active_workspace()))
+        ws_id = hashlib.sha256(ws.encode("utf-8")).hexdigest()[:16]
+        return os.path.join(resolve_data_dir(), f".oumv_used_{ws_id}")
+
+    @classmethod
+    def mark_oumv_used(cls, workspace_dir: Optional[str] = None) -> None:
+        try:
+            marker = cls._runtime_marker_path(workspace_dir)
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+
+    @classmethod
+    def was_recently_used(cls, workspace_dir: Optional[str] = None, max_age_sec: float = 1800.0) -> bool:
+        try:
+            marker = cls._runtime_marker_path(workspace_dir)
+            if not os.path.isfile(marker):
+                return False
+            return (time.time() - os.path.getmtime(marker)) < max_age_sec
+        except Exception:
+            return False
+
+    @classmethod
+    def get_live_ports(cls, workspace_dir: Optional[str] = None) -> List[int]:
+        """Returns localhost ports from active workspace/global OUMV runtime descriptors without blocking scans."""
+        import urllib.parse
+        ws = workspace_dir or get_active_workspace()
+        ports: List[int] = []
+        for lp in (
+            cls.global_runtime_file(ws),
+            os.path.join(ws, ".tokensafe", "runtime.json"),
+            os.path.join(ws, ".oumv", "runtime.json"),
+        ):
+            if not os.path.isfile(lp):
+                continue
+            try:
+                with open(lp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for sec in ("frontend", "backend"):
+                    url = (data.get(sec) or {}).get("url")
+                    if url:
+                        parsed = urllib.parse.urlparse(url)
+                        if parsed.port and parsed.port not in ports:
+                            ports.append(int(parsed.port))
+            except Exception:
+                pass
+        return ports
+
     # 1. Tool: oumv_status
     @classmethod
     def status(cls, workspace_dir: Optional[str] = None) -> Dict[str, Any]:
+        cls.mark_oumv_used(workspace_dir)
         cls.scan(workspace_dir=workspace_dir)
         fe, be = cls._cached_fe, cls._cached_be
         ws = workspace_dir or get_active_workspace()
@@ -243,18 +297,26 @@ class OUMVGateway:
         except Exception:
             pass
 
+        be_stack = stack_info.get("backend") or {}
+        be_unsupported = bool(be_stack) and not be_stack.get("oumv_supported", True) and not be
+
         return {
             "mode": "OUT_OF_THE_BOX_HYBRID",
             "frontend": fe or {
                 "status": "DISCONNECTED",
-                "framework": stack_info.get("frontend", {}).get("framework", "None") if stack_info.get("frontend") else "None",
-                "tip": "Static AST analysis active. When frontend DevServer starts (port 5173/3000), live OUMV auto-connects."
+                "framework": (stack_info.get("frontend") or {}).get("framework", "None"),
+                "tip": "Static AST analysis active. Run 'tokensafe dev' (zero repo footprint) for live Vite+React OUMV.",
             },
-            "backend": be or {
+            "backend": be or ({
+                "status": "UNSUPPORTED",
+                "framework": be_stack.get("framework", "node"),
+                "provider": be_stack.get("provider", "node"),
+                "tip": f"No OUMV runtime adapter for {be_stack.get('framework', 'Node.js')} yet (planned). Use repo_map, smart_read_file, and scoped_search for backend code.",
+            } if be_unsupported else {
                 "status": "DISCONNECTED",
-                "framework": stack_info.get("backend", {}).get("framework", "None") if stack_info.get("backend") else "None",
-                "tip": "Static AST analysis active. When backend DevServer starts (port 8080/8000), live OUMV auto-connects."
-            },
+                "framework": be_stack.get("framework", "None"),
+                "tip": "Static AST analysis active. When backend DevServer starts (port 8080/8000), live OUMV auto-connects.",
+            }),
             "adapters": cls._adapter_lifecycle(stack_info, fe, be),
             "staticIntelligence": "ACTIVE (L0/L1/L2 AST observation & cross-stack linking ready)",
             "detectedStack": stack_info,
@@ -265,8 +327,10 @@ class OUMVGateway:
     def _adapter_lifecycle(stack_info: Dict[str, Any], fe: Optional[Dict[str, Any]], be: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Per-adapter lifecycle + health per the OUMV Adapter Contract (schemas/adapter.json)."""
         adapters: List[Dict[str, Any]] = []
-        fe_detected = bool(stack_info.get("frontend"))
-        be_detected = bool(stack_info.get("backend"))
+        fe_info = stack_info.get("frontend") or {}
+        be_info = stack_info.get("backend") or {}
+        fe_detected = bool(fe_info)
+        be_detected = bool(be_info)
         if not fe_detected and not be_detected:
             return adapters
 
@@ -279,17 +343,26 @@ class OUMVGateway:
         def _find_adapter(profile: str, provider: Optional[str]) -> Dict[str, Any]:
             if provider:
                 for a in catalog:
-                    if a.get("id") == f"{profile}/{provider}" and a.get("status") == "ready":
+                    if a.get("id") == f"{profile}/{provider}":
                         return a
             for a in catalog:
                 if a.get("profile") == profile and a.get("status") == "ready":
                     return a
             return {}
 
-        def _entry(profile: str, connected: Optional[Dict[str, Any]], detected: bool, provider: Optional[str] = None) -> Dict[str, Any]:
+        def _entry(profile: str, connected: Optional[Dict[str, Any]], detected: bool, info: Dict[str, Any]) -> Dict[str, Any]:
+            provider = info.get("provider")
             adapter = _find_adapter(profile, provider)
+            is_planned = detected and (info.get("status") == "planned" or info.get("oumv_supported") is False or adapter.get("status") == "planned")
             if connected:
                 state, health, detail = "ACTIVE", "healthy", f"Live runtime: {connected.get('name', 'unknown')}"
+            elif is_planned:
+                state = "UNSUPPORTED"
+                health = "unsupported"
+                detail = (
+                    f"{adapter.get('id', f'{profile}/{provider}')} is not implemented yet (planned). "
+                    "Do not use tokensafe:oumv for this profile — use repo_map, smart_read_file, and scoped_search instead."
+                )
             elif detected:
                 state, health, detail = "HANDSHAKE", "degraded", "Detected statically; runtime offline — hybrid static fallback active"
             else:
@@ -297,6 +370,7 @@ class OUMVGateway:
             return {
                 "profile": profile,
                 "adapter": adapter.get("id", f"{profile}/unknown"),
+                "status": adapter.get("status", "unknown"),
                 "technology": adapter.get("technology"),
                 "capabilities": adapter.get("capabilities"),
                 "lifecycle": {"state": state, "health": {"status": health, "detail": detail}},
@@ -306,14 +380,49 @@ class OUMVGateway:
                 },
             }
 
-        adapters.append(_entry("frontend", fe, fe_detected, (stack_info.get("frontend") or {}).get("provider")))
-        adapters.append(_entry("backend", be, be_detected, (stack_info.get("backend") or {}).get("provider")))
+        adapters.append(_entry("frontend", fe, fe_detected, fe_info))
+        adapters.append(_entry("backend", be, be_detected, be_info))
         return adapters
+
+    @staticmethod
+    def _unsupported_backend_notice(workspace_dir: Optional[str], runtime: str) -> Optional[Dict[str, Any]]:
+        if runtime != "backend":
+            return None
+        ws = workspace_dir or get_active_workspace()
+        try:
+            from src.retrofit import detect_project_stack
+            stack = detect_project_stack(ws)
+            be = stack.get("backend") or {}
+            if be and not be.get("oumv_supported", True):
+                fe = stack.get("frontend")
+                supported = [f"frontend/{fe['provider']}"] if fe and fe.get("oumv_supported", True) else []
+                return {
+                    "unsupportedRuntime": f"backend/{be.get('provider', 'node')}",
+                    "framework": be.get("framework"),
+                    "supportedProfiles": supported,
+                    "guidance": (
+                        f"OUMV runtime adapter for {be.get('framework', 'Node.js')} is not available yet (planned). "
+                        "Use tokensafe:repo_map, tokensafe:smart_read_file, and tokensafe:scoped_search for this backend; "
+                        + ("keep using tokensafe:oumv(runtime='frontend') for UI." if supported else "use standard tests for verification.")
+                    ),
+                }
+        except Exception:
+            pass
+        return None
 
     # 2. Tool: oumv_observe
     @classmethod
     def observe(cls, level: str = "L0", target: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        cls.mark_oumv_used(workspace_dir)
         fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
+        if runtime == "backend" and not be:
+            notice = cls._unsupported_backend_notice(workspace_dir, runtime)
+            if notice:
+                from src.graph_engine import GraphEngine
+                ws = workspace_dir or get_active_workspace()
+                res = GraphEngine.get_instance(ws).get_static_oumv_slice(level=level, target=target)
+                res.update(notice)
+                return res
 
         # Consolidated fullstack L0 pulse (~30 tokens)
         if level.upper() == "L0" and (not target or target == "fullstack") and (runtime in ("auto", "")):
@@ -360,7 +469,12 @@ class OUMVGateway:
     # 3. Tool: oumv_understand
     @classmethod
     def understand(cls, query: str = "causality", target: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        cls.mark_oumv_used(workspace_dir)
         fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
+        if runtime == "backend" and not be:
+            notice = cls._unsupported_backend_notice(workspace_dir, runtime)
+            if notice:
+                return notice
 
         from src.graph_engine import GraphEngine
         ws = workspace_dir or get_active_workspace()
@@ -539,6 +653,13 @@ class OUMVGateway:
     # 5. Tool: oumv_verify
     @classmethod
     def verify(cls, target: str, action: str = "invoke", payload: Optional[dict] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        cls.mark_oumv_used(workspace_dir)
+        if runtime == "backend":
+            _, be = cls.get_endpoints(workspace_dir=workspace_dir)
+            if not be:
+                notice = cls._unsupported_backend_notice(workspace_dir, runtime)
+                if notice:
+                    return {"status": "unsupported", **notice}
         url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
         res = cls._rpc_call(url, "oumv/verify", {
             "target": target,

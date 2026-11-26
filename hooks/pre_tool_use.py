@@ -174,6 +174,15 @@ def _handle(payload: dict) -> dict:
         except Exception:
             pass
 
+        if canon_tool == "edit" and not response.get("reason"):
+            try:
+                from src.adapter_core import get_oumv_read_edit_advisory
+                oumv_note = get_oumv_read_edit_advisory(hook_cwd, path or raw_path, conversation_id)
+                if oumv_note:
+                    response["reason"] = oumv_note
+            except Exception:
+                pass
+
     # 3. Output Guard (shared guard_write, v3.0.0): deny wholesale overwrite of
     #    large existing files to enforce edit_file; ask on small-delta writes.
     if canon_tool == "write":
@@ -268,6 +277,14 @@ def _handle(payload: dict) -> dict:
 
         # Step 3A: If model explicitly specified line range, respect it
         if start_line is not None and end_line is not None:
+            if not response.get("reason"):
+                try:
+                    from src.adapter_core import get_oumv_read_edit_advisory
+                    oumv_note = get_oumv_read_edit_advisory(hook_cwd, path or raw_path, conversation_id)
+                    if oumv_note:
+                        response["reason"] = oumv_note
+                except Exception:
+                    pass
             return response
 
         # Step 3B: If a specific symbol/function is targeted in user prompt, check graph-guided skeleton first
@@ -340,6 +357,15 @@ def _handle(payload: dict) -> dict:
                     }
                 )
                 return response
+
+        if not response.get("reason"):
+            try:
+                from src.adapter_core import get_oumv_read_edit_advisory
+                oumv_note = get_oumv_read_edit_advisory(hook_cwd, path or raw_path, conversation_id)
+                if oumv_note:
+                    response["reason"] = oumv_note
+            except Exception:
+                pass
 
     # 4. run_command Optimization & TokenSafe Guard
     elif canon_tool == "bash":

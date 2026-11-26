@@ -60,7 +60,10 @@ UNIFIED_TOKENSAFE_RULE = (
     "`🛡️ **TokenSafe Security Guard**: Prevented secret / private key leak into git (<target_file>: <details>)`\n"
     "11. **Proof-of-Savings Turn Footer (strictly English)**: Append on tool-using turns:\n"
     "`⚡ **TokenSafe Turn Savings**: +<tokens> tokens saved on this turn (<breakdown in English>) | Cumulative Total: <total> tokens (≈$<usd> approx)`\n"
-    "12. **Universal OUMV Protocol (`oumv`)**: Inspect live Frontend/Backend runtimes via `tokensafe:oumv(action='status'|'observe'|'understand'|'verify'|'mutate'|'graph', ...)` instead of headless browsers or blind shell curls.\n"
+    "12. **Universal OUMV Protocol (`oumv`)**: When a workspace profile is OUMV-supported (React+Vite, Vue, Solid, Go, FastAPI), "
+    "ALWAYS prefer `tokensafe:oumv(action='status'|'observe'|'understand'|'verify'|'mutate'|'graph', ...)` BEFORE full file crawls, raw curls, or browser checks — "
+    "static OUMV works offline on read/edit tasks too, and `tokensafe dev` starts zero-footprint live Vite+React RPC without touching repo files. "
+    "In mixed monorepos (e.g. React + Node.js), use `oumv` on supported profiles and `repo_map`/`smart_read_file`/`scoped_search` on unsupported stacks (e.g. `backend/node`).\n"
 )
 
 # Short pointer written into PROJECT-level rule files when the full protocol is
@@ -72,7 +75,7 @@ POINTER_RULE = (
     "(~/.zcode/AGENTS.md, ~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.kimi-code/AGENTS.md) and applies to this project. "
     "Core tools: `tokensafe:repo_map(view='graph'|'api'|'tree')` for architecture & directory trees, "
     "`tokensafe:scoped_search` (single or `queries` batch, never raw grep/find), `tokensafe:smart_read_file` (symbol, `targets` bundle, or `.d.ts` `package_name`), "
-    "`tokensafe:apply_edits` for multi-file edits, `tokensafe:oumv` for live runtime introspection/verification, "
+    "`tokensafe:apply_edits` for multi-file edits, `tokensafe:oumv` (MANDATORY first on OUMV-supported React/Vue/Go/FastAPI stacks — live or static offline; check `status` in mixed monorepos), "
     "`tokensafe:session_context(action='budget'|'compact'|'prune'|'mistakes')` for context & anti-stuck hygiene, and "
     "`tokensafe:run_helper(action='sanitize'|'guard'|'diff'|'deps'|'web'|'expand'|'image'|'compress')`; "
     "never hardcode secret fallbacks; append the `⚡ TokenSafe Turn Savings` footer on tool-using turns.\n"
@@ -2164,7 +2167,8 @@ WantedBy=default.target
                     if h_ok:
                         msg = f"{msg}; {h_msg}"
                 results[key] = {"name": info["name"], "success": ok, "message": msg}
-        # Also configure project rules
+        # Also configure project rules and ensure zero-footprint tokensafe-ui companion CLI
+        cls._ensure_tokensafe_ui_global(install_if_missing=True)
         proj_res = cls.install_project(os.getcwd())
         return {
             "agents": results,
@@ -2221,6 +2225,9 @@ WantedBy=default.target
                     print(f"  \033[31m✖\033[0m \033[1m{name}\033[0m: {msg}")
 
         print(f"\n\033[32m\033[1m✅ TokenSafe successfully connected to {installed_count} agent(s)!\033[0m")
+        ui_sync = cls._ensure_tokensafe_ui_global(install_if_missing=True)
+        if ui_sync.get("ok"):
+            print(f"   \033[32m✔\033[0m Zero-footprint Vite+React companion tokensafe-ui {ui_sync['action']} globally.")
         print("   Restart your IDE / Agent to start saving tokens automatically.\n")
         cls.maybe_prompt_account_login(context="install")
         cls._ensure_proxy_default("install")
@@ -2545,6 +2552,46 @@ WantedBy=default.target
 
         return restarted
 
+    @classmethod
+    def _ensure_tokensafe_ui_global(
+        cls,
+        npm_bins: Optional[List[str]] = None,
+        install_if_missing: bool = True,
+    ) -> Dict[str, Any]:
+        """Installs or upgrades global `tokensafe-ui` for zero-footprint Vite+React `tokensafe dev`."""
+        candidates = npm_bins or ([cls._find_npm()] if cls._find_npm() else [])
+        for npm_bin in candidates:
+            if not npm_bin:
+                continue
+            npm_env = cls._npm_subprocess_env(npm_bin)
+            try:
+                res = subprocess.run(
+                    [npm_bin, "list", "-g", "--depth=0", "tokensafe-ui"],
+                    env=npm_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                already_installed = "tokensafe-ui@" in (res.stdout or "")
+                if not already_installed and not install_if_missing:
+                    continue
+                up_res = subprocess.run(
+                    [npm_bin, "install", "-g", "tokensafe-ui@latest"],
+                    env=npm_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+                if up_res.returncode == 0:
+                    return {
+                        "ok": True,
+                        "action": "upgraded" if already_installed else "installed",
+                        "npm": npm_bin,
+                    }
+            except Exception:
+                continue
+        return {"ok": False, "action": "skipped"}
+
     @staticmethod
     def _semver_dir_key(name: str) -> Tuple[int, ...]:
         """Parses a version directory name like 'v24.14.0' into a numeric sort key."""
@@ -2746,12 +2793,15 @@ WantedBy=default.target
                 print(f"  {YELLOW}⚠{RESET} pip update skipped: {e}")
         pip_cmd = pip_bin
 
-        # 3b. Check and upgrade TokenSafe ecosystem packages (Frontend & Backend)
+        # 3b. Check and upgrade TokenSafe Ecosystem packages (Frontend & Backend)
         print(f"\n  {CYAN}→{RESET} Checking TokenSafe Ecosystem packages (UI & Backend)...")
         target_npm_bins = upgraded_npm_bins or ([primary_npm] if primary_npm else [])
+        ui_sync = cls._ensure_tokensafe_ui_global(npm_bins=target_npm_bins, install_if_missing=False)
+        if ui_sync.get("ok"):
+            print(f"    {GREEN}✔{RESET} tokensafe-ui {ui_sync['action']} globally ({ui_sync['npm']}).")
         for npm_bin in target_npm_bins:
             npm_env = cls._npm_subprocess_env(npm_bin)
-            for pkg in ("tokensafe-ui", "create-tokensafe-ui"):
+            for pkg in ("create-tokensafe-ui",):
                 try:
                     res = subprocess.run([npm_bin, "list", "-g", "--depth=0", pkg], env=npm_env, capture_output=True, text=True, timeout=10)
                     if f"{pkg}@" in (res.stdout or ""):

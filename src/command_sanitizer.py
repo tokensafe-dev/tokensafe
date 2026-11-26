@@ -382,6 +382,11 @@ class CommandSanitizer:
         if build_guard:
             return build_guard
 
+        # vite / React+Vite dev servers: route through zero-footprint `tokensafe dev`
+        dev_guard = cls._optimize_vite_dev_stage(stage, cwd)
+        if dev_guard:
+            return dev_guard
+
         # find: prune unbounded recursion on simple directory crawls (avoid breaking -o / -exec / -delete expressions)
         if cmd_tok == "find" and "node_modules" not in stage and ".git" not in stage:
             has_complex = any(a in ("-o", "-or", "-exec", "-execdir", "-delete", "(") for a in cmd_args)
@@ -676,6 +681,95 @@ class CommandSanitizer:
 
         wrapped = f"tokensafe wrap {shlex.quote(stage)}"
         return wrapped, saved, reason, None
+
+    @classmethod
+    def _optimize_vite_dev_stage(cls, stage: str, cwd: Optional[str] = None) -> Optional[Tuple[str, int, str, None]]:
+        """
+        Rewrites Vite+React dev server launches (`vite`, `npm run dev`, `bun run dev`, `pnpm dev`, `yarn dev`)
+        to zero-footprint `tokensafe dev` when `tokensafe-ui` is not yet wired in the project's Vite config,
+        so live OUMV RPC starts automatically without mutating repository files.
+        """
+        if not cwd or not os.path.isdir(cwd):
+            return None
+        if cls._TOKENSAFE_WRAP_RE.search(stage) or cls._TOKENSAFE_TESTS_RE.search(stage):
+            return None
+        if cls._has_redirect(stage) or "|" in stage:
+            return None
+
+        cmd_tok, cmd_args = cls._primary_cmd_and_args(stage)
+        if not cmd_tok:
+            return None
+
+        is_vite_dev = False
+        passthrough: List[str] = []
+
+        def _extract_vite_flags(args_list: List[str]) -> List[str]:
+            out: List[str] = []
+            i = 0
+            while i < len(args_list):
+                a = args_list[i]
+                if a in ("--open",):
+                    out.append(a)
+                elif a == "--host":
+                    if i + 1 < len(args_list) and not args_list[i + 1].startswith("-"):
+                        out.append(f"--host={args_list[i + 1]}")
+                        i += 1
+                    else:
+                        out.append("--host")
+                elif a.startswith(("--port=", "--host=")):
+                    out.append(a)
+                elif a in ("--port", "-p") and i + 1 < len(args_list):
+                    out.append(f"--port={args_list[i + 1]}")
+                    i += 1
+                i += 1
+            return out
+
+        pkg_json_path = os.path.join(cwd, "package.json")
+        if not os.path.isfile(pkg_json_path):
+            return None
+        try:
+            with open(pkg_json_path, "r", encoding="utf-8") as fh:
+                pkg = json.load(fh)
+        except Exception:
+            return None
+        if not isinstance(pkg, dict):
+            return None
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        if "react" not in deps or "vite" not in deps:
+            return None
+
+        # Skip if tokensafe-ui is already wired into vite.config.*
+        for cfg_name in ("vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"):
+            cfg_path = os.path.join(cwd, cfg_name)
+            if os.path.isfile(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8", errors="ignore") as cf:
+                        if "tokensafe-ui" in cf.read():
+                            return None
+                except Exception:
+                    pass
+
+        if cmd_tok == "vite" and (not cmd_args or cmd_args[0].startswith("-") or cmd_args[0] in ("dev", "serve")):
+            is_vite_dev = True
+            passthrough = _extract_vite_flags(cmd_args)
+        elif cmd_tok in ("npx", "bunx") and cmd_args[:1] == ["vite"] and (len(cmd_args) == 1 or cmd_args[1].startswith("-") or cmd_args[1] in ("dev", "serve")):
+            is_vite_dev = True
+            passthrough = _extract_vite_flags(cmd_args[1:])
+        elif cmd_tok in ("npm", "bun", "pnpm", "yarn"):
+            sub = cmd_args[:2]
+            is_dev_script = (sub == ["run", "dev"]) or (cmd_tok in ("pnpm", "yarn") and cmd_args[:1] == ["dev"])
+            if is_dev_script:
+                scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+                dev_script = str(scripts.get("dev") or "")
+                if re.search(r"(?:^|\s)vite(?:\s|$)", dev_script):
+                    is_vite_dev = True
+                    passthrough = _extract_vite_flags(cmd_args)
+
+        if not is_vite_dev or not cls._is_tokensafe_available():
+            return None
+
+        flags_str = (" " + " ".join(passthrough)) if passthrough else ""
+        return f"tokensafe dev{flags_str}", 500, "Routed Vite+React dev server through zero-footprint `tokensafe dev` for live OUMV", None
 
     @classmethod
     def sanitize(cls, command: str, cwd: Optional[str] = None) -> Tuple[Optional[str], int, str]:

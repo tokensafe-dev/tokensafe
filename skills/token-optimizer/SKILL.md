@@ -110,7 +110,12 @@ TokenSafe actively maximizes provider KV-cache hit rates alongside token compres
 
 ## Universal OUMV Protocol (Runtime Introspection & Verification)
 
-TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to inspect, reason about, edit, and verify running Frontend (`tokensafe-ui`, React 18/19 with Zustand/Redux/Context/useReducer, Vue 3) and Backend (FastAPI, Go, Node.js) services in real time without heavy headless browsers or unconstrained shell curls:
+TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to inspect, reason about, edit, and verify Frontend (`tokensafe-ui`, React 18/19 + Vite, Vue 3) and Backend (`Go` Gin/Chi/net-http, `FastAPI`) services without heavy headless browsers or unconstrained shell curls.
+
+### OUMV-First Policy, Zero-Footprint & Mixed Monorepos
+- **Mandatory When Supported (Even Without Dev/Build Running)**: If the workspace contains a supported profile (`frontend/react`, `frontend/vue`, `frontend/solid`, `backend/go`, `backend/fastapi`), prefer `tokensafe:oumv` (`status` -> `observe` L0/L1/L2 -> `understand` impact -> `mutate` -> `verify`) BEFORE brute-force reading components or running `curl`/browsers. Static OUMV works offline even when the agent only reads and edits files.
+- **Zero-Footprint Vite+React (`tokensafe dev`)**: Running `tokensafe dev` (or `vite` / `npm run dev` rewritten automatically by `CommandSanitizer`) starts the project's Vite+React DevServer with `tokensafeReact()` injected in memory and runtime state stored under `~/.tokensafe/runtimes/<hash>.json` (sidecar L2 contracts in `~/.tokensafe/contracts/<hash>.json`) — leaving **0 modified/untracked files** in the repository.
+- **Monorepo Capability Boundaries**: In mixed monorepos (e.g., `apps/web` in React + `apps/api` in Node.js/Express), check `oumv(action="status")` or `[TokenSafe OUMV Workspace Matrix]`. Use `tokensafe:oumv(runtime="frontend")` for React, and use `repo_map` + `smart_read_file` + `scoped_search` + normal tests for unsupported backends like `backend/node` (`status: planned`).
 
 1. **LIVE RUNTIME HEALTH (`oumv(action="status")`)**:
    - Call `tokensafe:oumv(action="status")` to inspect connection status and capabilities of running DevServers (Frontend ports 5173/3000, Backend ports 8080/8000).
