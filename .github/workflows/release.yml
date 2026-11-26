@@ -5,12 +5,21 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish_ref:
+        description: 'Tag to backfill to PyPI (e.g. v4.7.1). Leave empty to run the npm/GitHub release flow.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
   release:
+    # A dispatch with publish_ref is a PyPI backfill only: it must not re-run npm
+    # (whose registry-verify step waits up to 65 minutes for the validation queue)
+    # or touch an existing GitHub release.
+    if: github.event_name == 'push' || inputs.publish_ref == ''
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -101,3 +110,40 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+
+  pypi:
+    # PyPI via Trusted Publishing (OIDC): no token and no secret in this repo.
+    # The publisher configured on pypi.org for project `tokensafe` must name this
+    # repository (tokensafe-dev/tokensafe), this workflow file (release.yml) and the
+    # `pypi` environment; a mismatch is rejected at the OIDC exchange, before upload.
+    # `publish_ref` exists so a release that missing PyPI can be backfilled from the
+    # tagged tree without re-publishing npm or moving the tag.
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_ref != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tokensafe/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.publish_ref || github.ref }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # skip-existing keeps re-runs and tag backfills idempotent.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
