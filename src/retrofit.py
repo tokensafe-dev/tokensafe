@@ -424,8 +424,8 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "profiles": ["frontend"],
             "repo": "tokensafe-ui",
             "mode": "hybrid",
-            "status": "ready",
-            "description": "Vue component hierarchy and store snapshot observer",
+            "status": "planned",
+            "description": "Programmatic adapter exists (manual component registration); no Vite integration or OUMV certification yet — use static analysis for Vue today",
             "technology": {
                 "language": "typescript",
                 "framework": "vue",
@@ -491,8 +491,8 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "profiles": ["backend"],
             "repo": "tokensafe-backend/node",
             "mode": "hybrid",
-            "status": "available",
-            "description": "Express/Fastify runtime: route reflection, OCC source edits, loopback verify, SSE/WS",
+            "status": "ready",
+            "description": "Express/Fastify runtime: route reflection, OCC source edits, loopback verify, SSE/WS (certified Level 3)",
             "technology": {
                 "language": "typescript",
                 "framework": "express | fastify",

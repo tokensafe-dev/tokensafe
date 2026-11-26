@@ -50,10 +50,17 @@ class TestOumvRoutingBrief(unittest.TestCase):
         self.assertIn("tokensafe inject", brief)
 
     def test_unsupported_stack_points_at_tokensafe_tools(self):
+        # Vue has no Vite-integrated OUMV adapter yet: the brief must say so.
+        self._write("package.json", json.dumps({"dependencies": {"vue": "^3.5.0", "vite": "^6.0.0"}}))
+        brief = build_workspace_brief(self.tmp)
+        self.assertIn("no OUMV adapter yet", brief)
+        self.assertIn("scoped_search", brief)
+
+    def test_node_brief_explains_how_to_mount(self):
         self._write("package.json", json.dumps({"dependencies": {"express": "^4.19.0"}}))
         brief = build_workspace_brief(self.tmp)
-        self.assertIn("no adapter yet", brief)
-        self.assertIn("scoped_search", brief)
+        self.assertIn("backend node/express", brief)
+        self.assertIn("tokensafe-backend-node", brief)
 
     def test_mutation_policy_is_reflected(self):
         self._write("package.json", json.dumps({"dependencies": {"react": "^18.3.1", "vite": "^5.4.0"}}))
