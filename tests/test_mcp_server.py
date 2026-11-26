@@ -575,6 +575,30 @@ class TestMCPServer(unittest.TestCase):
             self.assertNotIn("isError", res)
             self.assertIn("file.txt", res["content"][0]["text"])
 
+    def test_repo_map_tree_honors_project_path_beside_a_relative_path(self):
+        # Regression: `path` shadowed an explicit project_path, so view='tree'
+        # on a second repo searched the session workspace instead.
+        import os
+        import tempfile
+        from src.session_context import session_scope
+        with tempfile.TemporaryDirectory() as primary, tempfile.TemporaryDirectory() as other:
+            for root, marker in ((primary, "primary_only.txt"), (other, "other_only.txt")):
+                os.makedirs(os.path.join(root, "src"))
+                with open(os.path.join(root, "src", marker), "w") as f:
+                    f.write("x")
+            with session_scope(root=primary, session_id="test:repo_map_tree"):
+                res = handle_tool_call("repo_map", {"view": "tree", "project_path": other, "path": "src", "depth": 1})
+            self.assertNotIn("isError", res)
+            text = res["content"][0]["text"]
+            self.assertIn("other_only.txt", text)
+            self.assertNotIn("primary_only.txt", text)
+
+    def test_list_dir_names_a_missing_project_path(self):
+        import tempfile
+        res = handle_tool_call("list_dir", {"project_path": tempfile.gettempdir() + "/no_such_repo_xyz", "path": "src"})
+        self.assertTrue(res.get("isError"))
+        self.assertIn("project_path not found", res["content"][0]["text"])
+
     def test_expand_ref_mcp_call(self):
         from src.stash import stash_block
         _, marker = stash_block("SECRET_FULL_PAYLOAD_ABC_123", source="test")

@@ -2485,22 +2485,39 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         return {"content": [{"type": "text", "text": surface_md}]}
 
     elif name == "list_dir":
-        path = args.get("path") or args.get("project_path") or args.get("directory") or args.get("root_dir") or ""
-        if not path:
+        path = args.get("path") or args.get("directory") or ""
+        explicit_root = args.get("project_path") or args.get("root_dir")
+        if not path and not explicit_root:
             return _fallback_error("list_dir", "missing required 'path' argument")
 
-        # Resolve path relative to active workspace, cwd, or absolute
+        # An explicit project_path is the base for a relative path. Before this,
+        # `path` shadowed it and joined to the session workspace, so repo_map
+        # view='tree' on a second repo reported "directory not found".
         active_ws = _workspace_root()
-        if not os.path.isabs(path):
-            if active_ws and os.path.isdir(os.path.join(active_ws, path)):
-                abs_path = os.path.abspath(os.path.join(active_ws, path))
-            else:
-                abs_path = os.path.abspath(path)
-        else:
+
+        def _abs_candidate(value: str) -> str:
+            if os.path.isabs(value):
+                return os.path.abspath(value)
+            if active_ws and os.path.isdir(os.path.join(active_ws, value)):
+                return os.path.abspath(os.path.join(active_ws, value))
+            return os.path.abspath(value)
+
+        base_dir = _abs_candidate(str(explicit_root)) if explicit_root else None
+        if base_dir and not os.path.isdir(base_dir):
+            return _fallback_error("list_dir", f"project_path not found or not a directory: '{explicit_root}'")
+
+        if not path:
+            abs_path = base_dir
+        elif os.path.isabs(path):
             abs_path = os.path.abspath(path)
+        elif base_dir:
+            abs_path = os.path.abspath(os.path.join(base_dir, path))
+        else:
+            abs_path = _abs_candidate(path)
 
         if not os.path.isdir(abs_path):
-            return _fallback_error("list_dir", f"directory not found: {abs_path}")
+            where = f" (resolved from '{path}' under '{base_dir}')" if base_dir and not os.path.isabs(path) else ""
+            return _fallback_error("list_dir", f"directory not found: {abs_path}{where}")
         if is_plugin_or_system_dir(abs_path):
             return _fallback_error("list_dir", f"refusing to inspect system root or plugin dir '{path}'")
         system_roots = {"/", "/Users", "/home", "/root", os.path.expanduser("~")}
