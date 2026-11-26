@@ -1,0 +1,770 @@
+{
+  "target": "go",
+  "tasks": [
+    "product-create-status",
+    "order-conflict-status",
+    "product-validation-status"
+  ],
+  "arms": [
+    "baseline",
+    "oumv"
+  ],
+  "runs": 1,
+  "model": "deepseek-chat",
+  "budget_usd": 0.3,
+  "spent_usd": 0.042607,
+  "aborted": null,
+  "results": [
+    {
+      "arm": "baseline",
+      "task": "product-create-status",
+      "oracle_before": {
+        "passed": 11,
+        "failed": [
+          "TC02_CREATE_PRODUCT"
+        ]
+      },
+      "oracle_after": {
+        "passed": 12,
+        "failed": []
+      },
+      "solved": true,
+      "wall_clock_s": 26.8,
+      "model": "deepseek-chat",
+      "temperature": 0.0,
+      "price_snapshot": "2026-11-26",
+      "prices_usd_per_mtok": {
+        "input_miss": 0.27,
+        "input_hit": 0.07,
+        "output": 1.1
+      },
+      "stop_reason": "solved",
+      "usage": {
+        "calls": 3,
+        "input_tokens": 8481,
+        "cache_hit_tokens": 3712,
+        "cache_miss_tokens": 4769,
+        "output_tokens": 1436,
+        "usd": 0.003127
+      },
+      "steps": [
+        {
+          "index": 1,
+          "tools": [
+            "list_files",
+            "run_command"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 2,
+          "tools": [
+            "read_file",
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 3,
+          "tools": [
+            "write_file"
+          ],
+          "oracle_passed": 12,
+          "oracle_failed": [],
+          "note": "PASS"
+        }
+      ],
+      "run": 1
+    },
+    {
+      "arm": "oumv",
+      "task": "product-create-status",
+      "oracle_before": {
+        "passed": 11,
+        "failed": [
+          "TC02_CREATE_PRODUCT"
+        ]
+      },
+      "oracle_after": {
+        "passed": 12,
+        "failed": []
+      },
+      "solved": true,
+      "wall_clock_s": 54.1,
+      "model": "deepseek-chat",
+      "temperature": 0.0,
+      "price_snapshot": "2026-11-26",
+      "prices_usd_per_mtok": {
+        "input_miss": 0.27,
+        "input_hit": 0.07,
+        "output": 1.1
+      },
+      "stop_reason": "solved",
+      "usage": {
+        "calls": 8,
+        "input_tokens": 28722,
+        "cache_hit_tokens": 23168,
+        "cache_miss_tokens": 5554,
+        "output_tokens": 2048,
+        "usd": 0.005374
+      },
+      "steps": [
+        {
+          "index": 1,
+          "tools": [
+            "oumv_observe",
+            "oumv_verify"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 2,
+          "tools": [
+            "oumv_observe",
+            "oumv_verify"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 3,
+          "tools": [
+            "oumv_getSource",
+            "list_files"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 4,
+          "tools": [
+            "oumv_getSource"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 5,
+          "tools": [
+            "run_command",
+            "oumv_understand"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 6,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 7,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC02_CREATE_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 8,
+          "tools": [
+            "write_file"
+          ],
+          "oracle_passed": 12,
+          "oracle_failed": [],
+          "note": "PASS"
+        }
+      ],
+      "run": 1
+    },
+    {
+      "arm": "baseline",
+      "task": "order-conflict-status",
+      "oracle_before": {
+        "passed": 11,
+        "failed": [
+          "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+        ]
+      },
+      "oracle_after": {
+        "passed": 12,
+        "failed": []
+      },
+      "solved": true,
+      "wall_clock_s": 42.9,
+      "model": "deepseek-chat",
+      "temperature": 0.0,
+      "price_snapshot": "2026-11-26",
+      "prices_usd_per_mtok": {
+        "input_miss": 0.27,
+        "input_hit": 0.07,
+        "output": 1.1
+      },
+      "stop_reason": "solved",
+      "usage": {
+        "calls": 6,
+        "input_tokens": 44086,
+        "cache_hit_tokens": 30848,
+        "cache_miss_tokens": 13238,
+        "output_tokens": 1822,
+        "usd": 0.007738
+      },
+      "steps": [
+        {
+          "index": 1,
+          "tools": [
+            "list_files",
+            "run_command"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 2,
+          "tools": [
+            "read_file",
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 3,
+          "tools": [
+            "read_file",
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 4,
+          "tools": [
+            "read_file",
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 5,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 6,
+          "tools": [
+            "write_file"
+          ],
+          "oracle_passed": 12,
+          "oracle_failed": [],
+          "note": "PASS"
+        }
+      ],
+      "run": 1
+    },
+    {
+      "arm": "oumv",
+      "task": "order-conflict-status",
+      "oracle_before": {
+        "passed": 11,
+        "failed": [
+          "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+        ]
+      },
+      "oracle_after": {
+        "passed": 12,
+        "failed": []
+      },
+      "solved": true,
+      "wall_clock_s": 69.6,
+      "model": "deepseek-chat",
+      "temperature": 0.0,
+      "price_snapshot": "2026-11-26",
+      "prices_usd_per_mtok": {
+        "input_miss": 0.27,
+        "input_hit": 0.07,
+        "output": 1.1
+      },
+      "stop_reason": "solved",
+      "usage": {
+        "calls": 14,
+        "input_tokens": 80757,
+        "cache_hit_tokens": 73856,
+        "cache_miss_tokens": 6901,
+        "output_tokens": 3744,
+        "usd": 0.011152
+      },
+      "steps": [
+        {
+          "index": 1,
+          "tools": [
+            "oumv_observe",
+            "run_command"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 2,
+          "tools": [
+            "oumv_observe",
+            "oumv_getSource"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 3,
+          "tools": [
+            "oumv_understand",
+            "run_command"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 4,
+          "tools": [
+            "oumv_getSource"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 5,
+          "tools": [
+            "list_files"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 6,
+          "tools": [
+            "oumv_getSource"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC06_REJECT_DUPLICATE_IDEMPOTENCY"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 7,
+          "tools": [
+            "write_file"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 8,
+          "tools": [
+            "run_command"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 9,
+          "tools": [
+            "read_file",
+            "oumv_observe"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 10,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 11,
+          "tools": [
+            "list_files",
+            "run_command"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 12,
+          "tools": [
+            "run_command",
+            "read_file"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 13,
+          "tools": [
+            "oumv_getSource"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 14,
+          "tools": [
+            "write_file"
+          ],
+          "oracle_passed": 12,
+          "oracle_failed": [],
+          "note": "PASS"
+        }
+      ],
+      "run": 1
+    },
+    {
+      "arm": "baseline",
+      "task": "product-validation-status",
+      "oracle_before": {
+        "passed": 11,
+        "failed": [
+          "TC03_REJECT_INVALID_PRODUCT"
+        ]
+      },
+      "oracle_after": {
+        "passed": 12,
+        "failed": []
+      },
+      "solved": true,
+      "wall_clock_s": 31.5,
+      "model": "deepseek-chat",
+      "temperature": 0.0,
+      "price_snapshot": "2026-11-26",
+      "prices_usd_per_mtok": {
+        "input_miss": 0.27,
+        "input_hit": 0.07,
+        "output": 1.1
+      },
+      "stop_reason": "solved",
+      "usage": {
+        "calls": 4,
+        "input_tokens": 16599,
+        "cache_hit_tokens": 8832,
+        "cache_miss_tokens": 7767,
+        "output_tokens": 1517,
+        "usd": 0.004384
+      },
+      "steps": [
+        {
+          "index": 1,
+          "tools": [
+            "list_files",
+            "run_command"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 2,
+          "tools": [
+            "read_file",
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 3,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 4,
+          "tools": [
+            "write_file"
+          ],
+          "oracle_passed": 12,
+          "oracle_failed": [],
+          "note": "PASS"
+        }
+      ],
+      "run": 1
+    },
+    {
+      "arm": "oumv",
+      "task": "product-validation-status",
+      "oracle_before": {
+        "passed": 11,
+        "failed": [
+          "TC03_REJECT_INVALID_PRODUCT"
+        ]
+      },
+      "oracle_after": {
+        "passed": 0,
+        "failed": []
+      },
+      "solved": false,
+      "wall_clock_s": 76.2,
+      "model": "deepseek-chat",
+      "temperature": 0.0,
+      "price_snapshot": "2026-11-26",
+      "prices_usd_per_mtok": {
+        "input_miss": 0.27,
+        "input_hit": 0.07,
+        "output": 1.1
+      },
+      "stop_reason": "max_steps",
+      "usage": {
+        "calls": 14,
+        "input_tokens": 84978,
+        "cache_hit_tokens": 75008,
+        "cache_miss_tokens": 9970,
+        "output_tokens": 2627,
+        "usd": 0.010832
+      },
+      "steps": [
+        {
+          "index": 1,
+          "tools": [
+            "oumv_observe",
+            "oumv_verify"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 2,
+          "tools": [
+            "oumv_observe",
+            "oumv_verify"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 3,
+          "tools": [
+            "oumv_observe"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 4,
+          "tools": [
+            "list_files"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 5,
+          "tools": [
+            "oumv_getSource"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 6,
+          "tools": [
+            "oumv_getSource",
+            "oumv_verify"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 7,
+          "tools": [
+            "run_command",
+            "oumv_getSource"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 8,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 9,
+          "tools": [
+            "oumv_verify"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 10,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 11,
+          "tools": [
+            "read_file"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 12,
+          "tools": [
+            "run_command",
+            "oumv_understand"
+          ],
+          "oracle_passed": 11,
+          "oracle_failed": [
+            "TC03_REJECT_INVALID_PRODUCT"
+          ],
+          "note": "FAIL"
+        },
+        {
+          "index": 13,
+          "tools": [
+            "write_file"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        },
+        {
+          "index": 14,
+          "tools": [
+            "run_command"
+          ],
+          "oracle_passed": 0,
+          "oracle_failed": [],
+          "note": "BUILD/TEST ERROR: benchmark/runner/runner.go:169:30: cannot use vanillaApp (variable of type *vanilla_gin.VanillaApp) as http.Handler value in argument to orc.Evaluate: *vanilla_gin.VanillaApp does not implement http.H"
+        }
+      ],
+      "run": 1
+    }
+  ],
+  "generated_at": "2026-11-26T13:00:44Z"
+}

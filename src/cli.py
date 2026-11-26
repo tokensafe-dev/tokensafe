@@ -107,6 +107,7 @@ def _print_help():
     print("  init [--template ...]          Initialize TokenSafe stack in current directory")
     print("  stats / markdown / html        Savings analytics (terminal / .md report / dashboard)")
     print("  savings [--json]               Canonical totals + last event (cite these numbers, never guess)")
+    print("  bench-oumv [--tasks all] [--arms baseline,oumv] [--runs N] [--budget USD]   Measured agent benchmark (real oracle)")
     print("  status                         One-screen health check: hooks, weekly savings, tier, sync")
     print("  budget [--transcript=...]      Context Window Budget HUD & Context Quality Score (Grade S-F)")
     print("  compact <transcript.jsonl>     Fold conversation transcript into Consolidated State Ledger")
@@ -903,6 +904,38 @@ def main(argv: Optional[List[str]] = None):
         print(f"⚡ Launching Zero-Footprint Vite+React OUMV server ({source})...")
         proc = subprocess.run(cmd, cwd=target_dir)
         sys.exit(proc.returncode)
+
+    elif command in ("bench-oumv", "bench_oumv"):
+        # Measured, agent-driven benchmark (DeepSeek by default): real oracle,
+        # provider-side token accounting, hard budget cap.
+        from src.bench import go_target
+        from src.bench.runner import render_markdown, run_matrix, write_artifacts
+
+        def _flag(name: str, default: str) -> str:
+            for i, arg in enumerate(args):
+                if arg == name and i + 1 < len(args):
+                    return args[i + 1]
+                if arg.startswith(name + "="):
+                    return arg.split("=", 1)[1]
+            return default
+
+        tasks_arg = _flag("--tasks", "all")
+        task_ids = list(go_target.TASKS) if tasks_arg == "all" else [t.strip() for t in tasks_arg.split(",") if t.strip()]
+        arms = [a.strip() for a in _flag("--arms", "baseline,oumv").split(",") if a.strip()]
+        runs = int(_flag("--runs", "1"))
+        budget = float(_flag("--budget", "1.0"))
+        model = _flag("--model", "deepseek-chat")
+        max_steps = int(_flag("--max-steps", "14"))
+
+        print(f"\n⚡ OUMV bench (go): tasks={task_ids} arms={arms} runs={runs} model={model} budget=${budget}\n")
+        report = run_matrix(task_ids, arms, runs=runs, model=model, max_steps=max_steps, budget_usd=budget)
+        paths = write_artifacts(report)
+        if "--json" in args:
+            import json as _json
+            print(_json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(render_markdown(report))
+        print(f"artifacts: {paths['markdown']}\n           {paths['json']}\n")
 
     elif command in ("burn", "burn-monitor"):
         from src.burn_monitor import collect_live_burn_snapshot, evaluate_burn_warnings, is_zai_peak_hour

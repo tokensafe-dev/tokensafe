@@ -1,0 +1,169 @@
+"""Runs benchmark arms and writes the measured report."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from src.bench import go_target
+from src.bench.driver import BudgetExceeded, DeepSeekClient, run_agent
+
+
+def run_one(
+    arm: str,
+    task_id: str,
+    helper: Path,
+    model: str = "deepseek-chat",
+    max_steps: int = 14,
+    budget_usd: float = 1.0,
+) -> Dict[str, Any]:
+    ws = go_target.GoWorkspace(task_id, helper)
+    started = time.time()
+    try:
+        before = ws.oracle()
+        client = DeepSeekClient(model=model, temperature=0.0)
+        system = go_target.SYSTEM_OUMV if arm == "oumv" else go_target.SYSTEM_BASELINE
+        tools = go_target.OUMV_TOOLS if arm == "oumv" else go_target.BASE_TOOLS
+        registry = go_target.registry(ws, arm)
+
+        result = run_agent(
+            client=client,
+            system_prompt=system,
+            task_prompt=go_target.task_prompt(task_id),
+            tools=tools,
+            registry=registry,
+            max_steps=max_steps,
+            budget_usd=budget_usd,
+            after_step=lambda _i: ws.oracle(),
+        )
+        after = ws.oracle()
+        return {
+            "arm": arm,
+            "task": task_id,
+            "oracle_before": {"passed": before[0], "failed": before[1]},
+            "oracle_after": {"passed": after[0], "failed": after[1]},
+            "solved": after[0] == 12,
+            "wall_clock_s": round(time.time() - started, 1),
+            **result,
+        }
+    except BudgetExceeded as exc:
+        return {
+            "arm": arm,
+            "task": task_id,
+            "solved": False,
+            "stop_reason": "budget_exceeded",
+            "error": str(exc),
+            "wall_clock_s": round(time.time() - started, 1),
+        }
+    finally:
+        ws.cleanup()
+
+
+def run_matrix(
+    tasks: List[str],
+    arms: List[str],
+    runs: int = 1,
+    model: str = "deepseek-chat",
+    max_steps: int = 14,
+    budget_usd: float = 1.0,
+) -> Dict[str, Any]:
+    helper = go_target.build_helper()
+    results: List[Dict[str, Any]] = []
+    spent = 0.0
+    aborted: Optional[str] = None
+    for run_idx in range(1, runs + 1):
+        for task_id in tasks:
+            for arm in arms:
+                if spent >= budget_usd:
+                    aborted = f"global budget ${budget_usd} exhausted after ${spent:.4f}"
+                    break
+                per_run_budget = max(budget_usd - spent, 0.01)
+                row = run_one(arm, task_id, helper, model=model, max_steps=max_steps, budget_usd=per_run_budget)
+                row["run"] = run_idx
+                results.append(row)
+                spent += float((row.get("usage") or {}).get("usd") or 0.0)
+            if aborted:
+                break
+        if aborted:
+            break
+    return {
+        "target": "go",
+        "tasks": tasks,
+        "arms": arms,
+        "runs": runs,
+        "model": model,
+        "budget_usd": budget_usd,
+        "spent_usd": round(spent, 6),
+        "aborted": aborted,
+        "results": results,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def summarize(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: Dict[str, Dict[str, Any]] = {}
+    for result in report["results"]:
+        key = result["arm"]
+        row = rows.setdefault(key, {"arm": key, "runs": 0, "solved": 0, "input": 0, "output": 0, "usd": 0.0, "steps": 0})
+        row["runs"] += 1
+        row["solved"] += 1 if result.get("solved") else 0
+        usage = result.get("usage") or {}
+        row["input"] += int(usage.get("input_tokens") or 0)
+        row["output"] += int(usage.get("output_tokens") or 0)
+        row["usd"] += float(usage.get("usd") or 0.0)
+        row["steps"] += len(result.get("steps") or [])
+    return sorted(rows.values(), key=lambda r: r["arm"])
+
+
+def render_markdown(report: Dict[str, Any]) -> str:
+    lines = [
+        "# OUMV benchmark — Go sandbox (measured)",
+        "",
+        f"> Model: `{report['model']}` · runs: {report['runs']} · budget: ${report['budget_usd']} · "
+        f"spent: ${report['spent_usd']} · {report['generated_at']}",
+        "",
+        "## Methodology",
+        "",
+        "- Each arm starts from a throwaway copy of the `tokensafe-backend/go` module with one deliberate regression.",
+        "- Correctness is the real 12-assertion oracle (`go test ./benchmark -run TestGroundTruthOracleVanilla`), re-run after every agent step.",
+        "- Token and cost numbers come from the provider `usage` payload; prices are a pinned snapshot printed in the JSON artifact.",
+        "- `baseline` uses file/command tools only; `oumv` gets the same tools plus observe/getSource/verify/impact served by the OUMV runtime.",
+        "",
+        "## Results",
+        "",
+        "| Arm | Runs | Solved | Steps | Input tokens | Output tokens | Cost |",
+        "| :--- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in summarize(report):
+        lines.append(
+            f"| `{row['arm']}` | {row['runs']} | {row['solved']}/{row['runs']} | {row['steps']} | "
+            f"{row['input']:,} | {row['output']:,} | ${row['usd']:.4f} |"
+        )
+    if report.get("aborted"):
+        lines += ["", f"> Stopped early: {report['aborted']}"]
+    lines += ["", "## Per-run detail", "", "| Run | Arm | Task | Oracle before | Oracle after | Stop | Steps |", "| ---: | :--- | :--- | :--- | :--- | :--- | ---: |"]
+    for result in report["results"]:
+        before = result.get("oracle_before") or {}
+        after = result.get("oracle_after") or {}
+        lines.append(
+            f"| {result.get('run')} | `{result['arm']}` | {result['task']} | "
+            f"{before.get('passed', '—')}/12 | {after.get('passed', '—')}/12 | "
+            f"{result.get('stop_reason', '—')} | {len(result.get('steps') or [])} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_artifacts(report: Dict[str, Any], out_dir: Optional[Path] = None) -> Dict[str, str]:
+    from src.paths import resolve_data_dir
+
+    base = Path(out_dir) if out_dir else Path(resolve_data_dir()) / "bench"
+    base.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    json_path = base / f"go-{stamp}.json"
+    md_path = base / f"go-{stamp}.md"
+    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    md_path.write_text(render_markdown(report), encoding="utf-8")
+    return {"json": str(json_path), "markdown": str(md_path)}
