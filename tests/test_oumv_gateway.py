@@ -251,6 +251,38 @@ class TestOUMVGateway(unittest.TestCase):
             with open(full_path, "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), "export const App = () => <div/>;")
 
+    def test_global_runtime_descriptor_zero_footprint_discovery(self):
+        tmp_home = tempfile.mkdtemp(prefix="tokensafe_home_")
+        try:
+            with patch.dict(os.environ, {"TOKENSAFE_HOME": tmp_home}):
+                global_rt = OUMVGateway.global_runtime_file(self.test_dir)
+                os.makedirs(os.path.dirname(global_rt), exist_ok=True)
+                with open(global_rt, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "frontend": {
+                            "name": "react",
+                            "version": "19.0.0",
+                            "url": "http://localhost:5173/__oumv/rpc",
+                            "sessionToken": "zf-token",
+                        }
+                    }, f)
+
+                OUMVGateway._cached_fe = None
+                OUMVGateway._check_workspace_runtime_files(self.test_dir)
+                self.assertIsNotNone(OUMVGateway._cached_fe)
+                self.assertEqual(OUMVGateway._cached_fe["url"], "http://localhost:5173/__oumv/rpc")
+                self.assertEqual(OUMVGateway._cached_fe["sessionToken"], "zf-token")
+                self.assertFalse(os.path.exists(os.path.join(self.test_dir, ".tokensafe")))
+        finally:
+            shutil.rmtree(tmp_home, ignore_errors=True)
+
+    def test_resolve_zero_footprint_vite_command(self):
+        from src.retrofit import resolve_zero_footprint_vite_command
+        cmd, _ = resolve_zero_footprint_vite_command(self.test_dir, port=5179)
+        self.assertIn("dev", cmd)
+        self.assertIn(os.path.abspath(self.test_dir), cmd)
+        self.assertIn("--port=5179", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ Connects AI coding agents to live Frontend (tokensafe-ui, Vite, React) and Backe
 import os
 import json
 import time
+import hashlib
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -81,9 +82,18 @@ class OUMVGateway:
                 if found_be:
                     cls._cached_be = found_be
 
+    @staticmethod
+    def global_runtime_file(workspace_dir: str) -> str:
+        """Zero-footprint global runtime descriptor path outside the target repo."""
+        canonical = os.path.realpath(os.path.abspath(workspace_dir))
+        ws_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        tokensafe_home = os.environ.get("TOKENSAFE_HOME") or os.path.expanduser("~/.tokensafe")
+        return os.path.join(tokensafe_home, "runtimes", f"{ws_id}.json")
+
     @classmethod
     def _check_workspace_runtime_files(cls, workspace_dir: str):
         lock_paths = [
+            cls.global_runtime_file(workspace_dir),
             os.path.join(workspace_dir, ".tokensafe", "runtime.json"),
             os.path.join(workspace_dir, ".oumv", "runtime.json"),
         ]

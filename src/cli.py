@@ -97,6 +97,7 @@ def summarize_unittest_output(raw: str, full_traceback: bool = False) -> str:
 def _print_help():
     print("TokenSafe CLI — usage: tokensafe <command> [args]\n")
     print("Commands:")
+    print("  dev [dir] [--port=5173]         Start Vite+React DevServer with OUMV (zero repo footprint)")
     print("  integrate [--dry-run]          Retrofit OUMV into existing project (React, Vue, FastAPI, Go)")
     print("  adapters [list]                Catalog of frontend/backend OUMV runtime adapters")
     print("  oumv doctor / status           Diagnose OUMV configuration, ports, and permissions")
@@ -733,6 +734,33 @@ def main(argv: Optional[List[str]] = None):
             print(f"  Frontend Runtime:  {status['frontend'].get('status', 'OK')} ({status['frontend'].get('name', 'N/A')})")
             print(f"  Backend Runtime:   {status['backend'].get('status', 'OK')} ({status['backend'].get('name', 'N/A')})")
             print(f"  Workspace:         {status.get('workspace')}\n")
+
+    elif command == "dev":
+        from src.retrofit import resolve_zero_footprint_vite_command
+        target_dir = os.getcwd()
+        port_val: Optional[int] = None
+        host_val: Optional[str] = None
+        open_browser = False
+        for a in args[1:]:
+            if a.startswith("--port="):
+                try:
+                    port_val = int(a.split("=", 1)[1])
+                except ValueError:
+                    pass
+            elif a.startswith("--host="):
+                host_val = a.split("=", 1)[1]
+            elif a == "--host":
+                host_val = "true"
+            elif a == "--open":
+                open_browser = True
+            elif not a.startswith("-"):
+                target_dir = os.path.abspath(a)
+        cmd, source = resolve_zero_footprint_vite_command(
+            target_dir, port=port_val, host=host_val, open_browser=open_browser
+        )
+        print(f"⚡ Launching Zero-Footprint Vite+React OUMV server ({source})...")
+        proc = subprocess.run(cmd, cwd=target_dir)
+        sys.exit(proc.returncode)
 
     elif command in ("burn", "burn-monitor"):
         from src.burn_monitor import collect_live_burn_snapshot, evaluate_burn_warnings, is_zai_peak_hour

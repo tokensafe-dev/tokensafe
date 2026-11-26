@@ -333,7 +333,15 @@ def run_doctor(workspace_dir: str) -> Dict[str, Any]:
     """Diagnostics check for OUMV configuration, ports, lockfiles, and permissions."""
     stack = detect_project_stack(workspace_dir)
     conf_path = os.path.join(workspace_dir, ".tokensafe", "oumv.json")
-    runtime_path = os.path.join(workspace_dir, ".tokensafe", "runtime.json")
+    runtime_paths = [
+        os.path.join(workspace_dir, ".tokensafe", "runtime.json"),
+    ]
+    try:
+        from src.oumv_gateway import OUMVGateway
+        runtime_paths.insert(0, OUMVGateway.global_runtime_file(workspace_dir))
+    except Exception:
+        pass
+    runtime_path = next((p for p in runtime_paths if os.path.isfile(p)), runtime_paths[-1])
 
     has_config = os.path.isfile(conf_path)
     config_data: Dict[str, Any] = {}
@@ -426,3 +434,52 @@ class OUMVProjectContext:
         if any(target.startswith(c) for c in ["#", ".", "[", "button", "input"]) or target.startswith("<") or target.endswith(".tsx") or target.endswith(".jsx"):
             return "frontend"
         return "auto"
+
+
+def resolve_zero_footprint_vite_command(
+    workspace_dir: str,
+    port: Optional[int] = None,
+    host: Optional[str] = None,
+    open_browser: bool = False,
+) -> Tuple[List[str], str]:
+    """Resolves zero-footprint tokensafe-ui Vite+React runner command without editing repo files."""
+    import shutil
+    import subprocess
+
+    ws = os.path.abspath(workspace_dir)
+    cli_flags: List[str] = []
+    if port is not None:
+        cli_flags.append(f"--port={port}")
+    if host:
+        cli_flags.append(f"--host={host}")
+    if open_browser:
+        cli_flags.append("--open")
+
+    # 1. Local project node_modules/.bin/tokensafe-ui (if present)
+    local_bin = os.path.join(ws, "node_modules", ".bin", "tokensafe-ui")
+    if os.path.isfile(local_bin):
+        return ([local_bin, "dev", ws, *cli_flags], "local node_modules")
+
+    # 2. Global tokensafe-ui binary on PATH
+    global_bin = shutil.which("tokensafe-ui")
+    if global_bin:
+        return ([global_bin, "dev", ws, *cli_flags], "global PATH")
+
+    # 3. npm global root package
+    try:
+        res = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0:
+            global_root = res.stdout.strip()
+            cli_js = os.path.join(global_root, "tokensafe-ui", "bin", "cli.js")
+            if os.path.isfile(cli_js):
+                return (["node", cli_js, "dev", ws, *cli_flags], "npm global root")
+    except Exception:
+        pass
+
+    # 4. Explicit override or npx fallback (zero edits to workspace package.json)
+    env_cli = os.environ.get("TOKENSAFE_UI_CLI")
+    if env_cli and os.path.isfile(env_cli):
+        return (["node", env_cli, "dev", ws, *cli_flags], "TOKENSAFE_UI_CLI")
+
+    npx_bin = shutil.which("npx") or "npx"
+    return ([npx_bin, "--yes", "tokensafe-ui", "dev", ws, *cli_flags], "npx tokensafe-ui")
