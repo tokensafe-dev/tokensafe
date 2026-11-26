@@ -675,7 +675,7 @@ TOOLS = [
             'type': 'object',
             'properties': {
                 'path': {'type': 'string', 'description': 'File path (relative or absolute)'},
-                'symbol': {'type': 'string', 'description': 'Function/class/model/type to extract'},
+                'symbol': {'type': 'string', 'description': "Identifier, qualified member ('Type.Method'), endpoint ('POST /api/orders') or schema model. A target that is not a declaration in that file returns the enclosing body (±window) instead of a folded skeleton"},
                 'start_line': {'type': 'integer', 'description': 'Optional start line'},
                 'end_line': {'type': 'integer', 'description': 'Optional end line'},
                 'dep_mode': {'type': 'string', 'enum': ['signature', 'full'], 'description': '1-hop dep mode (default signature)'},
@@ -710,6 +710,7 @@ TOOLS = [
                 'use_regex': {'type': 'boolean', 'description': 'Force regex true/false'},
                 'case_sensitive': {'type': 'boolean'},
                 'max_results': {'type': 'integer', 'description': 'Max lines (default 25, max 100)'},
+                'per_file': {'type': 'integer', 'description': 'Max hits kept per file (default auto: max(6, max_results/2)); raise it to list every occurrence'},
                 'queries': {
                     'type': 'array', 'maxItems': 20,
                     'description': 'Batch mode: up to 20 {pattern, type, path, glob, output_mode} objects',
@@ -1235,6 +1236,196 @@ def _read_line_slice(path: str, start_line: Optional[int], end_line: Optional[in
     return "".join(selected), None
 
 
+_SYMBOL_MISS_MAX_LINES = 200
+_SYMBOL_MISS_HIT_CAP = 8
+_SYMBOL_MISS_FULL_DECL_LINES = 60   # a declaration up to this size is shown whole
+_SYMBOL_MISS_WINDOW_PAD = 12        # otherwise: ±lines around each hit
+_SYMBOL_MISS_WINDOW_HITS = 3
+
+
+def _symbol_scope(graph: Any, rel_path: str, symbol: str, code: str) -> Dict[str, Any]:
+    """Resolve what `symbol` means for *this* file before any skeleton is built.
+
+    A `symbol` is not always a declaration in the file the caller pointed at: it may
+    be a method of a type that lives elsewhere, or plain text inside an anonymous
+    closure (Go `r.POST("/x", func(c *gin.Context) { ... })`, Express handlers,
+    decorators). Skeletonizing then folds away everything while the header still
+    claims "Full body" — the caller pays for the call, gets nothing actionable and
+    re-reads the whole file, which is strictly worse than not calling at all.
+
+    Returns {status, decls, hit_lines, enclosing, elsewhere}:
+      declared   — a declaration by that name lives here (the skeleton keeps its body)
+      body_here  — no declaration here, but the text occurs inside one (closure case)
+      absent     — the text does not occur here at all
+    """
+    decls: List[Tuple[str, int, int]] = []          # every declaration in this file
+    matched_here = False
+    elsewhere: Optional[Tuple[str, int, int, str]] = None
+    for key, sym in getattr(graph, "symbols", {}).items():
+        qualified = key.split("::", 1)[-1]
+        matches = sym.name == symbol or qualified == symbol or qualified.endswith("." + symbol)
+        if sym.file_path == rel_path:
+            decls.append((sym.name, sym.line_start, sym.line_end))
+            matched_here = matched_here or matches
+        elif matches and elsewhere is None:
+            elsewhere = (sym.file_path, sym.line_start, sym.line_end, sym.name)
+
+    decls.sort(key=lambda d: d[1])
+    plan: Dict[str, Any] = {
+        "status": "absent",
+        "decls": decls,
+        "hit_lines": [],
+        "enclosing": None,
+        "elsewhere": elsewhere,
+    }
+    if matched_here:
+        plan["status"] = "declared"
+        return plan
+
+    try:
+        pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+    except re.error:
+        return plan
+    # A caller's "symbol" is often a compound target rather than an identifier:
+    # "POST /api/products", "GET /orders/{id}", "@app.route('/x')". Probe the
+    # whole string first, then narrower predicates (all tokens on one line, the
+    # path token, then identifiers) so an endpoint target anchors on the exact
+    # route registration instead of on every line containing the HTTP verb.
+    parts = [p for p in re.split(r"[\s\"'`(),;]+", symbol) if p]
+    verbs = [p for p in parts if p.upper() in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")]
+    paths = [p for p in parts if p.startswith("/")]
+    bare_names = [p for p in parts if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{2,}", p)]
+    # dotted targets ("Type.Method") resolve to the member first, the type second
+    member_names = [seg for p in parts for seg in reversed(p.split(".")) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{2,}", seg)]
+    name_parts = member_names + bare_names
+
+    def _is_identifier(value: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value))
+
+    def _word(value: str) -> Any:
+        return lambda line, q=value: re.search(rf"\b{re.escape(q)}\b", line) is not None
+
+    predicates: List[Tuple[str, Any]] = []
+    if _is_identifier(symbol):
+        predicates.append((symbol, _word(symbol)))
+    else:
+        predicates.append((symbol, lambda line, q=symbol: q in line))
+    if paths and verbs:
+        predicates.append((
+            f"{verbs[0]} \"{paths[0]}\"",
+            lambda line, v=verbs[0], q=paths[0]: v in line and f'"{q}"' in line,
+        ))
+    for p in paths:
+        predicates.append((f'"{p}"', lambda line, q=p: f'"{q}"' in line))
+    if len(parts) > 1:
+        predicates.append((" ".join(parts), lambda line, ps=parts: all(p in line for p in ps)))
+    for p in paths:
+        predicates.append((p, lambda line, q=p: q in line))
+    for p in dict.fromkeys(name_parts):
+        predicates.append((p, _word(p)))
+
+    matched_probe = None
+    for label, predicate in predicates:
+        hits = []
+        for idx, line in enumerate(code.splitlines(), 1):
+            if predicate(line):
+                hits.append(idx)
+                if len(hits) >= _SYMBOL_MISS_HIT_CAP:
+                    break
+        if hits:
+            plan["hit_lines"] = hits
+            matched_probe = label
+            break
+    plan["probe"] = matched_probe
+    if not plan["hit_lines"]:
+        return plan
+
+    first = plan["hit_lines"][0]
+    best: Optional[Tuple[str, int, int]] = None
+    for name, start, end in decls:  # innermost declaration wins
+        if start <= first <= end and (best is None or (end - start) < (best[2] - best[1])):
+            best = (name, start, end)
+    plan["enclosing"] = best
+    plan["status"] = "body_here"
+    return plan
+
+
+def _render_symbol_scope_miss(plan: Dict[str, Any], path: str, symbol: str, code: str) -> str:
+    """Honest, actionable replacement for a skeleton that folded the requested symbol away."""
+    base = os.path.basename(path)
+    hits = ", ".join(f"L{n}" for n in plan["hit_lines"]) or "none"
+    probe = plan.get("probe")
+    probe_note = f" (matched '{probe}')" if probe and probe != symbol else ""
+    elsewhere = plan["elsewhere"]
+    pointer = ""
+    if elsewhere:
+        r, es, ee, _n = elsewhere
+        pointer = (
+            f"\n// ['{symbol}' is declared in {r} L{es}-L{ee} — call smart_read_file(path=\"{r}\", symbol=\"{symbol}\")"
+            f" if you need that declaration instead]"
+        )
+
+    if plan["status"] == "absent":
+        decl_txt = ", ".join(f"{n} L{s}-L{e}" for n, s, e in plan["decls"][:12]) or "none indexed"
+        return f"// [TokenSafe: '{symbol}' does not occur in {base}. Declarations in this file: {decl_txt}]{pointer}"
+
+    lines = code.splitlines()
+    enclosing = plan["enclosing"]
+    windows: List[Tuple[int, int]] = []
+
+    if enclosing and (enclosing[2] - enclosing[1] + 1) <= _SYMBOL_MISS_FULL_DECL_LINES:
+        name, start, end = enclosing
+        windows = [(start, end)]
+        head = (
+            f"// [TokenSafe Text-Anchor Slice: '{symbol}' is not a declaration in {base}; "
+            f"it occurs at {hits}{probe_note} inside {name} (L{start}-L{end}) — that declaration is shown in full]"
+        )
+    else:
+        pad = _SYMBOL_MISS_WINDOW_PAD
+        for hit in plan["hit_lines"][:_SYMBOL_MISS_WINDOW_HITS]:
+            windows.append((max(1, hit - pad), min(len(lines), hit + pad)))
+        windows.sort()
+        merged: List[Tuple[int, int]] = []
+        for s, e in windows:
+            if merged and s <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        windows = merged
+        if enclosing:
+            name, ds, de = enclosing
+            head = (
+                f"// [TokenSafe Text-Anchor Slice: '{symbol}' is not a declaration in {base}; "
+                f"it occurs at {hits}{probe_note} inside {name} (L{ds}-L{de}) — showing ±{pad} lines around each hit]"
+                f"\n// {lines[ds - 1].strip()}"
+            )
+        else:
+            head = (
+                f"// [TokenSafe Text-Anchor Slice: '{symbol}' is not a declaration in {base}; "
+                f"it occurs at {hits}{probe_note} outside any indexed declaration — showing ±{pad} lines around each hit]"
+            )
+
+    if not windows:
+        return f"{head}{pointer}"
+
+    budget = _SYMBOL_MISS_MAX_LINES
+    chunks: List[str] = []
+    for i, (s, e) in enumerate(windows):
+        if budget <= 0:
+            chunks.append(f"// [... {len(windows) - i} more window(s) suppressed; request start_line/end_line]")
+            break
+        e = min(e, s + budget - 1)
+        budget -= (e - s + 1)
+        # Always print the range: it is the `start_line`/`end_line` the caller needs
+        # when the snippet they edit occurs more than once in the file.
+        chunks.append(f"// --- L{s}-L{e}")
+        chunks.append("\n".join(lines[s - 1:e]))
+        if e < windows[i][1]:
+            chunks.append("// [window truncated]")
+
+    return f"{head}{pointer}\n" + "\n".join(chunks)
+
+
 def _resolve_dep_mode(args: dict) -> Tuple[bool, str]:
     raw_inc = args.get("include_deps")
     inc_deps = True if raw_inc is None else bool(raw_inc)
@@ -1687,6 +1878,36 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             return {"content": [{"type": "text", "text": delivered}]}
 
         if symbol:
+            # Resolve the symbol against this file's declarations *before* skeletonizing.
+            # A miss used to fall through to a whole-file skeleton whose header claimed
+            # "Full body" — the caller then re-read the file anyway (measured in the
+            # OUMV agent matrix: smart_read_file saved zero read tokens).
+            scope_plan = None
+            raw_for_scope = ""
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as _sf:
+                    raw_for_scope = _sf.read()
+                graph_for_scope, rel_for_scope = GraphEngine.for_file(path)
+                scope_plan = _symbol_scope(graph_for_scope, rel_for_scope, symbol, raw_for_scope)
+            except Exception:
+                scope_plan = None
+            if scope_plan and scope_plan["status"] in ("body_here", "absent"):
+                anchored = _render_symbol_scope_miss(scope_plan, path, symbol, raw_for_scope)
+                tracker.record_event(
+                    session_id=_mcp_session_id(),
+                    event_type="SYMBOL_TEXT_ANCHOR",
+                    original_tokens=count_tokens(raw_for_scope),
+                    optimized_tokens=count_tokens(anchored),
+                    details={
+                        "file": os.path.basename(path),
+                        "symbol": symbol,
+                        "resolution": scope_plan["status"],
+                        "hits": len(scope_plan["hit_lines"]),
+                        "enclosing": (scope_plan["enclosing"] or ("", 0, 0))[0],
+                    }
+                )
+                return {"content": [{"type": "text", "text": anchored}]}
+
             # Team pre-warm hit: a teammate already skeletonized this symbol
             team_skel = _team_skeleton_lookup(path, symbol, dep_mode=eff_dep_mode)
             if team_skel:
@@ -2415,7 +2636,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             scope=scope,
             max_results=max_res,
             case_sensitive=c_sens,
-            use_regex=u_regex
+            use_regex=u_regex,
+            per_file=_safe_int(args.get("per_file"), 0, lo=0, hi=100)
         )
         md_text = res["markdown"]
         if not res.get("success", True):

@@ -214,6 +214,150 @@ class TestMCPServer(unittest.TestCase):
         self.assertEqual(resp["id"], 1)
         self.assertFalse(resp["result"].get("isError", False))
 
+    def test_smart_read_file_symbol_inside_closure_returns_enclosing_body(self):
+        """A `symbol` that is not a declaration must not yield a folded whole-file
+        skeleton claiming "Full body": the caller cannot edit from it and re-reads
+        the file (measured as zero read savings in the OUMV agent matrix)."""
+        import os
+        import tempfile
+        import uuid
+        from src.session_context import session_scope
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
+            os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
+            try:
+                app = os.path.join(tmpdir, "app.go")
+                lines = ["package demo", "", 'import "net/http"', "", "type App struct {", "\tMux *http.ServeMux", "}", "",
+                         "func NewApp(mux *http.ServeMux) *App {"]
+                for i in range(20):
+                    lines.append(f'\tmux.HandleFunc("/api/items{i}", func(w http.ResponseWriter, r *http.Request) {{')
+                    lines.append("\t\tw.WriteHeader(http.StatusOK)")
+                    lines.append("\t})")
+                lines += ["\treturn &App{Mux: mux}", "}", ""]
+                with open(app, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines))
+                with session_scope(root=tmpdir, session_id=f"test:anchor:{uuid.uuid4().hex[:8]}"):
+                    res = handle_tool_call("smart_read_file", {"path": app, "symbol": "items7"})
+                txt = res["content"][0]["text"]
+                self.assertIn("Text-Anchor Slice", txt)
+                self.assertNotIn("Full body", txt)
+                self.assertIn("NewApp", txt)
+                self.assertIn("items7", txt)
+                self.assertLess(len(txt), len("\n".join(lines)))
+            finally:
+                if old_db is None:
+                    os.environ.pop("TOKENSAFE_DB_PATH", None)
+                else:
+                    os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
+
+    def test_smart_read_file_endpoint_target_anchors_on_route(self):
+        import os
+        import tempfile
+        import uuid
+        from src.session_context import session_scope
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
+            os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
+            try:
+                app = os.path.join(tmpdir, "routes.go")
+                lines = ["package demo", "", 'import "net/http"', "", "func NewApp(mux *http.ServeMux) *http.ServeMux {"]
+                for i in range(25):
+                    name = f"/api/items{i}"
+                    lines.append(f'\tmux.HandleFunc("{name}", func(w http.ResponseWriter, r *http.Request) {{')
+                    lines.append(f"\t\tw.WriteHeader(http.StatusAccepted)  // {name}")
+                    lines.append("\t})")
+                lines.append('\tmux.HandleFunc("/api/orders", func(w http.ResponseWriter, r *http.Request) {')
+                lines.append("\t\tw.WriteHeader(http.StatusAccepted)  // /api/orders")
+                lines.append("\t})")
+                lines += ["\treturn mux", "}", ""]
+                with open(app, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines))
+                with session_scope(root=tmpdir, session_id=f"test:anchor:{uuid.uuid4().hex[:8]}"):
+                    res = handle_tool_call("smart_read_file", {"path": app, "symbol": "POST /api/orders"})
+                txt = res["content"][0]["text"]
+                self.assertIn("Text-Anchor Slice", txt)
+                # exactly one route matched (not every HandleFunc line)
+                self.assertRegex(txt, r"it occurs at L\d+ \(matched")
+                self.assertIn("/api/orders", txt)
+                self.assertLess(len(txt), len("\n".join(lines)) * 0.6)
+            finally:
+                if old_db is None:
+                    os.environ.pop("TOKENSAFE_DB_PATH", None)
+                else:
+                    os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
+
+    def test_smart_read_file_absent_symbol_reports_declarations(self):
+        import os
+        import tempfile
+        import uuid
+        from src.session_context import session_scope
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
+            os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
+            try:
+                mod = os.path.join(tmpdir, "svc.py")
+                with open(mod, "w", encoding="utf-8") as f:
+                    f.write("def alpha():\n    return 1\n\n\ndef beta():\n    return 2\n")
+                with session_scope(root=tmpdir, session_id=f"test:anchor:{uuid.uuid4().hex[:8]}"):
+                    res = handle_tool_call("smart_read_file", {"path": mod, "symbol": "gamma"})
+                txt = res["content"][0]["text"]
+                self.assertIn("does not occur", txt)
+                self.assertIn("alpha", txt)
+                self.assertLess(len(txt), 400)
+            finally:
+                if old_db is None:
+                    os.environ.pop("TOKENSAFE_DB_PATH", None)
+                else:
+                    os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
+
+    def test_smart_read_file_declared_symbol_still_uses_skeleton(self):
+        import os
+        import tempfile
+        import uuid
+        from src.session_context import session_scope
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
+            os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
+            try:
+                mod = os.path.join(tmpdir, "service.py")
+                body = "".join(f"    value_{i} = {i}\n" for i in range(40))
+                with open(mod, "w", encoding="utf-8") as f:
+                    f.write(f"def target_fn():\n{body}    return value_0\n\n\ndef other_fn():\n    return 0\n")
+                with session_scope(root=tmpdir, session_id=f"test:anchor:{uuid.uuid4().hex[:8]}"):
+                    res = handle_tool_call("smart_read_file", {"path": mod, "symbol": "target_fn"})
+                txt = res["content"][0]["text"]
+                self.assertNotIn("Text-Anchor Slice", txt)
+                self.assertIn("target_fn", txt)
+            finally:
+                if old_db is None:
+                    os.environ.pop("TOKENSAFE_DB_PATH", None)
+                else:
+                    os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
+
     def test_smart_read_file_dep_mode_signature_smaller_than_full(self):
         import os
         import tempfile
