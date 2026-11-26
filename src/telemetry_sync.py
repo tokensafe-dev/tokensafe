@@ -316,7 +316,11 @@ class TelemetrySync:
                                             "model": "aggregate",
                                             "timestamp": int(time.time()),
                                             # Rolled-up historical mass of mixed provenance: conservatively estimated.
-                                            "measurement": "estimated"
+                                            "measurement": "estimated",
+                                            # Idempotency key: the cumulative total at emit time.
+                                            # A replay (state loss) repeats the same key and the
+                                            # server collapses it; a newer total is a real delta.
+                                            "client_event_id": f"rollup:{current_rollup_tokens}",
                                         })
                             except Exception:
                                 pass

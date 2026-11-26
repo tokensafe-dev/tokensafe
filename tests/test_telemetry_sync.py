@@ -298,6 +298,37 @@ class TestTelemetrySync(unittest.TestCase):
         st = TelemetrySync.get_state()
         self.assertIn("last_synced_rollup_tokens", st)
 
+    @patch("urllib.request.urlopen")
+    def test_rollup_lifetime_carries_idempotency_key(self, mock_urlopen):
+        """The server dedupes ROLLUP_LIFETIME by key; the key must be the cumulative total."""
+        sent_events = []
+
+        def fake_urlopen(req, *args, **kwargs):
+            payload = json.loads(req.data.decode("utf-8"))
+            sent_events.extend(payload.get("events", []))
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = json.dumps({"processed": len(payload.get("events", []))}).encode("utf-8")
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        mock_urlopen.side_effect = fake_urlopen
+
+        tracker = MetricsTracker(db_path=ts_mod.METRICS_DB_PATH)
+        for i in range(3):
+            tracker.record_event(f"k_{i}", "PROMPT", 1000, 200)
+        # Rollups are emitted for pruned, not-yet-synced history.
+        tracker.prune(max_events=1, vacuum=False)
+
+        res = TelemetrySync.sync(cloud_url="http://mock-cloud.internal", license_key="TS1.mock.key", email="test@domain.com")
+        self.assertTrue(res["success"])
+        rollups = [e for e in sent_events if e["event_type"] == "ROLLUP_LIFETIME"]
+        self.assertEqual(len(rollups), 1)
+        self.assertEqual(rollups[0]["client_event_id"], "rollup:1600")
+        # A replay of the same cumulative total must produce the same key (server-side dedupe).
+        self.assertEqual(TelemetrySync.get_state()["last_synced_rollup_tokens"], 1600)
+
 
 if __name__ == "__main__":
     unittest.main()
