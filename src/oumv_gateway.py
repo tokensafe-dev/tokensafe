@@ -19,6 +19,23 @@ class OUMVRpcError(RuntimeError):
     """Raised when a live OUMV runtime explicitly returns a JSON-RPC error."""
 
 
+class OUMVUnsupportedMethodError(OUMVRpcError):
+    """The runtime answered but does not implement the requested method.
+
+    This is not a safety rejection: the runtime cannot mediate the operation at
+    all, so the gateway may perform the guarded offline edit instead.
+    """
+
+
+_UNSUPPORTED_HINTS = (
+    "unknown method",
+    "method not found",
+    "-32601",
+    "not implemented",
+    "not supported",
+)
+
+
 class OUMVGateway:
     """Dispatches OUMV protocol calls to live DevServers with zero-config discovery."""
 
@@ -175,16 +192,44 @@ class OUMVGateway:
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if "error" in data and data["error"]:
-                err = data["error"]
-                if isinstance(err, dict):
-                    code = err.get("code")
-                    msg = err.get("message") or str(err)
-                    raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}")
-                raise OUMVRpcError(f"JSON-RPC error from {endpoint_url}: {err}")
-            return data.get("result")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "error" in data and data["error"]:
+                    err = data["error"]
+                    if isinstance(err, dict):
+                        code = err.get("code")
+                        msg = err.get("message") or str(err)
+                        raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}")
+                    raise OUMVRpcError(f"JSON-RPC error from {endpoint_url}: {err}")
+                return data.get("result")
+        except urllib.error.HTTPError as exc:
+            # Some bridges answer an unsupported method with HTTP 400 instead of a
+            # JSON-RPC envelope. Treat that as a protocol error (RuntimeError) so
+            # callers can fall back to offline operation instead of crashing on OSError.
+            code, msg = cls._http_error_detail(exc)
+            raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}") from exc
+        except urllib.error.URLError as exc:
+            raise OUMVRpcError(f"runtime unreachable at {endpoint_url}: {exc.reason}") from exc
+        except (TimeoutError, OSError) as exc:
+            raise OUMVRpcError(f"runtime unreachable at {endpoint_url}: {exc}") from exc
+
+    @staticmethod
+    def _http_error_detail(exc: urllib.error.HTTPError) -> Tuple[Optional[int], str]:
+        """Extracts (JSON-RPC code, message) from an HTTP error body (read once)."""
+        try:
+            raw = exc.read().decode("utf-8", "replace")
+        except Exception:
+            return None, str(exc)
+        try:
+            err = json.loads(raw).get("error")
+            if isinstance(err, dict):
+                return err.get("code"), err.get("message") or raw.strip() or str(exc)
+            if isinstance(err, str):
+                return None, err
+        except Exception:
+            pass
+        return None, raw.strip() or str(exc)
 
     @classmethod
     def _resolve_client_url(cls, runtime: str = "auto", target: Optional[str] = None, workspace_dir: Optional[str] = None) -> str:
@@ -588,9 +633,14 @@ class OUMVGateway:
                 "source": replacement,
                 "expectedVersion": expected_version,
             })
-        except OUMVRpcError:
-            raise
         except RuntimeError as e:
+            if isinstance(e, OUMVRpcError) and not isinstance(e, OUMVUnsupportedMethodError):
+                if not any(hint in str(e).lower() for hint in _UNSUPPORTED_HINTS):
+                    # Explicit safety rejection (conflict, syntax, permission): obey it.
+                    raise
+                # The runtime cannot mediate the edit at all; the offline path below
+                # performs the same guarded edit and reports why.
+                e = OUMVUnsupportedMethodError(str(e))
             # Out-of-the-box direct fallback when live dev-servers are offline
             if replacement is not None:
                 abs_path = os.path.normpath(os.path.join(ws, path))
@@ -647,6 +697,16 @@ class OUMVGateway:
                 if backup_path:
                     result["backupPath"] = backup_path
                     result["rollbackHint"] = f"Previous content backed up at {backup_path}"
+                if isinstance(e, OUMVUnsupportedMethodError):
+                    # The runtime was reachable but has no applyEdit: the edit was
+                    # mediated by the gateway instead. Say so instead of implying
+                    # the runtime verified it.
+                    result["mode"] = "RUNTIME_LACKS_APPLYEDIT_OFFLINE_FALLBACK"
+                    result["runtimeFallbackReason"] = str(e)
+                    result["message"] = (
+                        "Live runtime does not implement oumv/applyEdit; edit applied by the gateway "
+                        "with the same OCC, syntax-guard and backup checks"
+                    )
                 return result
             raise
 

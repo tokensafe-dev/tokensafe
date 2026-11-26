@@ -7,6 +7,8 @@ import json
 import tempfile
 import os
 import shutil
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch, MagicMock
 
 from src.oumv_gateway import OUMVGateway, OUMVRpcError
@@ -250,6 +252,76 @@ class TestOUMVGateway(unittest.TestCase):
                 OUMVGateway.mutate(path=file_path, replacement="broken(", runtime="frontend")
             with open(full_path, "r", encoding="utf-8") as f:
                 self.assertEqual(f.read(), "export const App = () => <div/>;")
+
+    def test_mutate_falls_back_when_runtime_lacks_apply_edit(self):
+        """A bridge that answers HTTP 400 "Unknown method" cannot mediate the edit.
+
+        The gateway must convert that into a protocol error (not crash on OSError)
+        and apply the same guarded offline edit, labelling the fallback honestly.
+        """
+        class UnknownMethodHandler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server API
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = b'{"error":"Unknown method: oumv/applyEdit"}'
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):  # silence test output
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), UnknownMethodHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+                OUMVGateway._last_scan_time = 9999999999.0
+                OUMVGateway._cached_fe = {"url": f"http://127.0.0.1:{server.server_port}/__oumv/rpc"}
+
+                file_path = "src/App.py"
+                full_path = os.path.join(self.test_dir, file_path)
+                os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write("value = 1\n")
+
+                res = OUMVGateway.mutate(path=file_path, replacement="value = 2\n", runtime="frontend")
+                self.assertEqual(res["mode"], "RUNTIME_LACKS_APPLYEDIT_OFFLINE_FALLBACK")
+                self.assertIn("Unknown method", res["runtimeFallbackReason"])
+                self.assertEqual(res["syntaxCheck"]["status"], "passed")
+                with open(full_path, "r", encoding="utf-8") as f:
+                    self.assertEqual(f.read(), "value = 2\n")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_rpc_call_surfaces_http_error_as_rpc_error(self):
+        """HTTP 4xx from a bridge becomes OUMVRpcError, never an OSError."""
+        class BadRequestHandler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 - http.server API
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = b'{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"CONFLICT_DETECTED"}}'
+                self.send_response(409)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), BadRequestHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/__oumv/rpc"
+            with self.assertRaises(OUMVRpcError) as ctx:
+                OUMVGateway._rpc_call(url, "oumv/applyEdit", {"path": "a.py"})
+            self.assertIn("-32001", str(ctx.exception))
+            self.assertIn("CONFLICT_DETECTED", str(ctx.exception))
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_global_runtime_descriptor_zero_footprint_discovery(self):
         tmp_home = tempfile.mkdtemp(prefix="tokensafe_home_")
