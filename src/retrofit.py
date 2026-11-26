@@ -491,8 +491,24 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "profiles": ["backend"],
             "repo": "tokensafe-backend/node",
             "mode": "hybrid",
-            "status": "planned",
-            "description": "Express/Fastify route handler & middleware reflection",
+            "status": "available",
+            "description": "Express/Fastify runtime: route reflection, OCC source edits, loopback verify, SSE/WS",
+            "technology": {
+                "language": "typescript",
+                "framework": "express | fastify",
+                "package": {"manager": "npm", "name": "tokensafe-backend-node", "install": "npm install tokensafe-backend-node"},
+            },
+            "capabilities": [
+                {"name": "observe.pulse", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.surface", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.contract", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.source", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.traces", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.impact", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": True, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True}},
+            ],
         },
     ]
 

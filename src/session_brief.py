@@ -41,6 +41,11 @@ _BACKEND_LINES = {
         "(`tokensafe inject --status` shows it; `tokensafe inject --revert` removes it). "
         "Use tokensafe:oumv for endpoints/source/impact, oumv_verify for in-process checks."
     ),
+    "node": (
+        "backend node/{framework}: install `tokensafe-backend-node` and mount it "
+        "(`mountTokensafe(app)` for Express, `registerTokensafe(app)` for Fastify); "
+        "then use tokensafe:oumv for endpoints/impact and oumv_verify for live checks."
+    ),
 }
 
 
