@@ -577,7 +577,7 @@ createRoot(document.getElementById('root')!).render(<App />);
     def _scaffold_go_backend(cls, target_dir, project_name, subpath, write_fn):
         p = lambda rel: os.path.join(subpath, rel) if subpath else rel
         slug = project_name.lower().replace(" ", "-")
-        write_fn(p("go.mod"), f"module example.com/{slug}\n\ngo 1.21\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.10.0\n\tgithub.com/tokensafe-dev/tokensafe-backend/go v0.4.0\n)\n")
+        write_fn(p("go.mod"), f"module example.com/{slug}\n\ngo 1.21\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.10.0\n\tgithub.com/tokensafe-dev/tokensafe-backend/go v0.4.3\n)\n")
         write_fn(p("main.go"), """package main
 
 import (

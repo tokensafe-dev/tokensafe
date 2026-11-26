@@ -747,7 +747,13 @@ def main(argv: Optional[List[str]] = None):
     elif command in ("inject", "wire"):
         from src import auto_inject
 
-        sub = args[1] if len(args) > 1 and not args[1].startswith("-") else "apply"
+        if "--status" in args:
+            sub = "status"
+        elif "--revert" in args:
+            sub = "revert"
+        else:
+            positional = [a for a in args[1:] if not a.startswith("-")]
+            sub = positional[0] if positional and positional[0] in ("status", "apply", "revert") else "apply"
         dry_run = "--dry-run" in args
         workspace = os.getcwd()
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
@@ -72,23 +73,24 @@ def pyhooks_dir() -> str:
 
 _SITECUSTOMIZE = '''"""TokenSafe OUMV autoload (generated) — see `tokensafe inject --status`.
 
-Patches uvicorn so a FastAPI app gets `mount_tokensafe(app)` the moment it is
-imported. Inert unless TOKENSAFE_OUMV_AUTOMOUNT=1, which the TokenSafe command
-wrapper sets for the agent's own dev-server command.
+Mounts `mount_tokensafe(app)` on a FastAPI app the moment uvicorn resolves it.
+Inert unless TOKENSAFE_OUMV_AUTOMOUNT=1, which `tokensafe run-backend` sets.
 """
 import os
 
 if os.environ.get("TOKENSAFE_OUMV_AUTOMOUNT") == "1":
     def _install():
         try:
-            import uvicorn.importer as _importer
             from tokensafe_python.adapters.fastapi import mount_tokensafe as _mount
-        except Exception:  # tokensafe-python/uvicorn absent — nothing to do
+        except Exception:  # tokensafe-python not installed — nothing to do
             return
 
-        _original = getattr(_importer, "import_from_string", None)
-        if _original is None or getattr(_original, "_tokensafe_wrapped", False):
+        import uvicorn.importer as _importer
+
+        if getattr(_importer.import_from_string, "_tokensafe_wrapped", False):
             return
+
+        _original = _importer.import_from_string
 
         def _patched(import_str, *args, **kwargs):
             app = _original(import_str, *args, **kwargs)
@@ -101,6 +103,14 @@ if os.environ.get("TOKENSAFE_OUMV_AUTOMOUNT") == "1":
 
         _patched._tokensafe_wrapped = True
         _importer.import_from_string = _patched
+
+        # uvicorn/config.py binds the function by name at import time, so patching
+        # the module attribute alone is not enough.
+        try:
+            import uvicorn.config as _config
+            _config.import_from_string = _patched
+        except Exception:
+            pass
 
     _install()
 '''
@@ -186,7 +196,18 @@ def find_go_entrypoint(workspace: str, framework: Optional[str] = None) -> Tuple
 
 
 def _go_anchor(source: str, framework: str) -> Optional[int]:
-    alias, _, anchor_a, anchor_b, _ = _GO_ADAPTERS[framework]
+    """Insertion point: immediately before the server starts listening.
+
+    Mounting must happen after every route is registered, otherwise L1/L2 observe
+    discovers nothing. Fall back to the router-construction line if the entrypoint
+    starts the server indirectly.
+    """
+    for marker in ("r.Run(", ".ListenAndServe(", "ListenAndServeTLS("):
+        idx = source.find(marker)
+        if idx != -1:
+            return source.rfind("\n", 0, idx) + 1
+
+    _, _, anchor_a, anchor_b, _ = _GO_ADAPTERS[framework]
     for anchor in (anchor_a, anchor_b):
         if not anchor:
             continue
@@ -211,11 +232,78 @@ def go_patch_state(workspace: str) -> Dict[str, Any]:
     }
 
 
+_GO_MODULE = "github.com/tokensafe-dev/tokensafe-backend/go"
+_GO_MODULE_VERSION = "v0.4.3"
+
+
+def _ensure_go_dependency(workspace: str) -> Optional[str]:
+    """Adds the adapter module to go.mod when missing. Returns an error reason or None."""
+    go_mod = os.path.join(workspace, "go.mod")
+    if not os.path.isfile(go_mod):
+        return None
+    try:
+        with open(go_mod, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as exc:
+        return f"cannot read go.mod: {exc}"
+
+    # Skip only when the pinned version is already required; an older requirement
+    # would build against an adapter that lacks AutoMount.
+    match = re.search(re.escape(_GO_MODULE) + r"\s+v([0-9][\w.+-]*)", content)
+    if match and f"v{match.group(1)}" == _GO_MODULE_VERSION:
+        return None
+
+    go_bin = shutil.which("go")
+    if not go_bin:
+        return "go is not on PATH: cannot add the adapter dependency"
+
+    try:
+        proc = subprocess.run(
+            [go_bin, "get", f"{_GO_MODULE}@{_GO_MODULE_VERSION}"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"go get failed to run: {exc}"
+    if proc.returncode != 0:
+        output = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return "go get failed: " + (output[0] if output else "unknown error")
+    return None
+
+
+def _go_tidy(workspace: str) -> Tuple[bool, str]:
+    """Runs `go mod tidy` after the import exists (tidy before would drop it)."""
+    go_bin = shutil.which("go")
+    if not go_bin:
+        return True, "go not found on PATH — tidy skipped"
+    try:
+        proc = subprocess.run(
+            [go_bin, "mod", "tidy"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return True, f"tidy failed to run: {exc}"
+    return proc.returncode == 0, (proc.stderr or proc.stdout or "").strip()
+
+
 def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
-    """Inserts the AutoMount call; validates with `go build`; backs up first."""
+    """Ensures the module dependency, inserts the AutoMount call, validates with `go build`.
+
+    The original file is backed up first and restored byte-for-byte if any step fails.
+    """
     path, framework = find_go_entrypoint(workspace)
     if not path or not framework:
         return {"status": "skipped", "reason": "no mountable Go entrypoint (main.go with gin/chi/net/http) found"}
+
+    if not dry_run:
+        dep_error = _ensure_go_dependency(workspace)
+        if dep_error:
+            return {"status": "skipped", "reason": dep_error}
 
     with open(path, "r", encoding="utf-8") as f:
         original = f.read()
@@ -231,7 +319,7 @@ def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
         }
 
     alias, import_path, _, _, call = _GO_ADAPTERS[framework]
-    insert = f"\n\t{_MARK_BEGIN}\n{call}\t{_MARK_END}\n"
+    insert = f"\t{_MARK_BEGIN}\n{call}\t{_MARK_END}\n"
     patched = original[:anchor] + insert + original[anchor:]
 
     import_line = f'\t{alias} "{import_path}"\n'
@@ -252,18 +340,31 @@ def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
 
     backup_dir = _inject_dir(workspace)
     os.makedirs(backup_dir, exist_ok=True)
-    backup_path = os.path.join(backup_dir, os.path.relpath(path, workspace).replace(os.sep, "__") + ".bak")
+    suffix = os.path.relpath(path, workspace).replace(os.sep, "__") + ".bak"
+    backup_path = os.path.join(backup_dir, suffix)
     shutil.copy2(path, backup_path)
+    module_backups: List[Tuple[str, str]] = []
+    for mod_file in ("go.mod", "go.sum"):
+        src = os.path.join(workspace, mod_file)
+        if os.path.isfile(src):
+            dst = os.path.join(backup_dir, mod_file + ".bak")
+            shutil.copy2(src, dst)
+            module_backups.append((src, dst))
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(patched)
 
-    build_ok, build_output = _go_build(workspace)
+    tidy_ok, tidy_output = _go_tidy(workspace)
+    build_ok, build_output = _go_build(workspace) if tidy_ok else (False, tidy_output)
     if not build_ok:
         shutil.copy2(backup_path, path)
+        for src, dst in module_backups:
+            shutil.copy2(dst, src)
+        first_error = next((line for line in build_output.splitlines() if line.strip()), "")
         return {
             "status": "reverted",
-            "reason": "go build failed after the patch — original file restored",
+            "reason": "go build failed after the patch — original file restored"
+                      + (f" ({first_error.strip()})" if first_error else ""),
             "build_output": build_output[-1200:],
         }
 

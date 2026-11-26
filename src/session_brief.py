@@ -72,7 +72,7 @@ def _activation(workspace: str, stack: Dict[str, Any]) -> List[str]:
             hints.append("activate backend: `pip install tokensafe-python` then run the server via `tokensafe run-backend ...`")
         elif item.get("provider") == "go":
             hints.append(
-                "activate backend: `go get github.com/tokensafe-dev/tokensafe-backend/go@v0.4.0` "
+                "activate backend: `go get github.com/tokensafe-dev/tokensafe-backend/go@v0.4.3` "
                 "then `tokensafe inject` (one line, reversible)"
             )
     if not hints and not readiness:
