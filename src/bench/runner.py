@@ -24,8 +24,12 @@ def run_one(
     try:
         before = ws.oracle()
         client = DeepSeekClient(model=model, temperature=0.0)
-        system = go_target.SYSTEM_OUMV if arm == "oumv" else go_target.SYSTEM_BASELINE
-        tools = go_target.OUMV_TOOLS if arm == "oumv" else go_target.BASE_TOOLS
+        if arm == "oumv":
+            system, tools = go_target.SYSTEM_OUMV, go_target.OUMV_TOOLS
+        elif arm == "tokensafe":
+            system, tools = go_target.SYSTEM_TOKENSAFE, go_target.TOKENSAFE_TOOLS
+        else:
+            system, tools = go_target.SYSTEM_BASELINE, go_target.BASE_TOOLS
         registry = go_target.registry(ws, arm)
 
         result = run_agent(
@@ -116,8 +120,12 @@ def run_react_one(
     try:
         before = ws.oracle()
         client = DeepSeekClient(model=model, temperature=0.0)
-        system = react_target.SYSTEM_OUMV if arm == "oumv" else react_target.SYSTEM
-        tools = react_target.OUMV_TOOLS if arm == "oumv" else react_target.TOOLS
+        if arm == "oumv":
+            system, tools = react_target.SYSTEM_OUMV, react_target.OUMV_TOOLS
+        elif arm == "tokensafe":
+            system, tools = react_target.SYSTEM_TOKENSAFE, react_target.TOKENSAFE_TOOLS
+        else:
+            system, tools = react_target.SYSTEM, react_target.TOOLS
         result = run_agent(
             client=client,
             system_prompt=system,
@@ -198,6 +206,7 @@ def _provenance(target: str, tasks: List[str], arms: List[str]) -> Dict[str, Any
     harness_repo = Path(__file__).resolve().parents[2]
     systems = {
         "baseline": getattr(module, "SYSTEM_BASELINE", getattr(module, "SYSTEM", "")),
+        "tokensafe": getattr(module, "SYSTEM_TOKENSAFE", ""),
         "oumv": getattr(module, "SYSTEM_OUMV", ""),
     }
     prompts = {task: module.task_prompt(task) for task in tasks}

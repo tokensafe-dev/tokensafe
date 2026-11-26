@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.bench import tokensafe_mcp
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GO_ROOT = REPO_ROOT / "tokensafe-backend" / "go"
 COPY_ITEMS = ("go.mod", "go.sum", "tokensafe.go", "pkg", "benchmark", "cmd")
@@ -92,6 +94,7 @@ class GoWorkspace:
         # oumv/verify would keep reporting the pristine app's behaviour.
         self.helper = self.dir.parent / "benchoumv"
         self._helper_built_at = 0.0
+        self._mcp = None
         self.break_build()
 
     # ---- task setup -------------------------------------------------------
@@ -253,7 +256,17 @@ class GoWorkspace:
             return {"error": payload["error"]}
         return payload.get("result")
 
+    def tokensafe(self, name: str, arguments: Dict[str, Any]) -> Any:
+        if self._mcp is None:
+            self._mcp = tokensafe_mcp.open_client(self.dir)
+        if self._mcp is None:
+            return {"error": "TokenSafe MCP is unavailable"}
+        return self._mcp.call(name, arguments)
+
     def cleanup(self) -> None:
+        if self._mcp is not None:
+            self._mcp.close()
+            self._mcp = None
         shutil.rmtree(self.dir.parent, ignore_errors=True)
 
 
@@ -327,6 +340,48 @@ BASE_TOOLS: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {"cmd": {"type": "string"}},
                 "required": ["cmd"],
+            },
+        },
+    },
+]
+
+TOKENSAFE_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [
+    {
+        "type": "function",
+        "function": {
+            "name": "ts_smart_read_file",
+            "description": "TokenSafe AST-skeleton reader: a compact symbol view (~90% fewer tokens than the file).",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "symbol": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ts_scoped_search",
+            "description": "TokenSafe scoped search returning file:line hits inside the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "path": {"type": "string", "description": "Relative directory, default '.'"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ts_repo_map",
+            "description": "TokenSafe architecture map: god nodes / high-dependency files, or an API surface.",
+            "parameters": {
+                "type": "object",
+                "properties": {"view": {"type": "string", "enum": ["graph", "api", "tree"]}},
+                "required": ["view"],
             },
         },
     },
@@ -417,6 +472,16 @@ def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
         "search_files": ws.search_files,
         "run_command": ws.run_command,
     }
+    if arm == "tokensafe":
+        tools.update({
+            "ts_smart_read_file": lambda path, symbol="": ws.tokensafe(
+                "smart_read_file", {"path": path, **({"symbol": symbol} if symbol else {})}
+            ),
+            "ts_scoped_search": lambda query, path=".": ws.tokensafe(
+                "scoped_search", {"query": query, "path": path, "max_results": 20}
+            ),
+            "ts_repo_map": lambda view="graph": ws.tokensafe("repo_map", {"view": view, "project_path": "."}),
+        })
     if arm == "oumv":
         tools.update({
             "oumv_observe": lambda level, target="": ws.oumv("oumv/observe", {"level": level, "target": target}),
@@ -437,6 +502,14 @@ SYSTEM_BASELINE = (
     "read_file to inspect it, write_file to fix it, and run_command to verify. Tests and the oracle are "
     "read-only. Make the smallest correct change; stop as soon as the oracle passes."
 )
+SYSTEM_TOKENSAFE = (
+    "You are a senior Go engineer working in a small Go module. The workspace has TokenSafe tools: "
+    "ts_smart_read_file returns a compact AST view of a symbol, ts_scoped_search finds code by substring, "
+    "ts_repo_map shows high-dependency files. Use them before reading whole files; write_file for edits and "
+    "run_command to verify. Tests and the oracle are read-only. Make the smallest correct change and stop "
+    "as soon as the oracle passes."
+)
+
 SYSTEM_OUMV = (
     "You are a senior Go engineer working in a small Go module that exposes the OUMV runtime. "
     "The bug report includes a repro; use it to go straight to the right handler instead of guessing payloads. "

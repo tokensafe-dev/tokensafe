@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.bench import tokensafe_mcp
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AGENT_DOM = REPO_ROOT / "agent-dom"
 PACKAGE = AGENT_DOM / "packages" / "benchmark"
@@ -130,6 +132,7 @@ class ReactWorkspace:
             raise ValueError(f"unknown task {task_id}; valid: {', '.join(TASKS)}")
         self.task_id = task_id
         self._rpc: Optional[OumvStdio] = None
+        self._mcp = None
         base = AGENT_DOM / f".bench-tmp-{next(tempfile._get_candidate_names())}"
         self.dir = base / "benchmark"
         base.mkdir(parents=True)
@@ -249,7 +252,17 @@ class ReactWorkspace:
             self._rpc = OumvStdio(self.dir)
         return self._rpc.request(method, params)
 
+    def tokensafe(self, name: str, arguments: Dict[str, Any]) -> Any:
+        if self._mcp is None:
+            self._mcp = tokensafe_mcp.open_client(self.dir)
+        if self._mcp is None:
+            return {"error": "TokenSafe MCP is unavailable"}
+        return self._mcp.call(name, arguments)
+
     def cleanup(self) -> None:
+        if self._mcp is not None:
+            self._mcp.close()
+            self._mcp = None
         if self._rpc is not None:
             self._rpc.close()
             self._rpc = None
@@ -324,6 +337,16 @@ def registry(ws: ReactWorkspace, arm: str = "baseline") -> Dict[str, Any]:
         "search_files": ws.search_files,
         "run_command": ws.run_command,
     }
+    if arm == "tokensafe":
+        tools.update({
+            "ts_smart_read_file": lambda path, symbol="": ws.tokensafe(
+                "smart_read_file", {"path": path, **({"symbol": symbol} if symbol else {})}
+            ),
+            "ts_scoped_search": lambda query, path="sandboxes": ws.tokensafe(
+                "scoped_search", {"query": query, "path": path, "max_results": 20}
+            ),
+            "ts_repo_map": lambda view="graph": ws.tokensafe("repo_map", {"view": view, "project_path": "."}),
+        })
     if arm == "oumv":
         tools.update({
             "oumv_observe": lambda level, target="": ws.oumv("oumv/observe", {"level": level, "target": target}),
@@ -335,6 +358,45 @@ def registry(ws: ReactWorkspace, arm: str = "baseline") -> Dict[str, Any]:
         })
     return tools
 
+
+TOKENSAFE_TOOLS: List[Dict[str, Any]] = TOOLS + [
+    {
+        "type": "function",
+        "function": {
+            "name": "ts_smart_read_file",
+            "description": "TokenSafe AST-skeleton reader: a compact symbol view of one file.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "symbol": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ts_scoped_search",
+            "description": "TokenSafe scoped search returning file:line hits inside the sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "path": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ts_repo_map",
+            "description": "TokenSafe architecture map: high-dependency files and API surface.",
+            "parameters": {
+                "type": "object",
+                "properties": {"view": {"type": "string", "enum": ["graph", "api", "tree"]}},
+                "required": ["view"],
+            },
+        },
+    },
+]
 
 OUMV_TOOLS: List[Dict[str, Any]] = TOOLS + [
     {
@@ -406,6 +468,14 @@ SYSTEM = (
     "read_file to inspect it, write_file to fix the bug, and run_command to run the 12-assertion oracle. "
     "The oracle output is JSON with `passed` and `failed` assertion ids. Tests and adapter.ts are read-only. "
     "Make the smallest correct change and stop as soon as the oracle reports 12."
+)
+
+SYSTEM_TOKENSAFE = (
+    "You are a senior React engineer working in a small sandbox. The workspace has TokenSafe tools: "
+    "ts_smart_read_file returns a compact AST view of a symbol, ts_scoped_search finds code by substring, "
+    "ts_repo_map shows high-dependency files. Use them before reading whole files; write_file for edits and "
+    "run_command for the 12-assertion oracle. Tests and adapter.ts are read-only. Make the smallest correct "
+    "change and stop as soon as the oracle reports 12."
 )
 
 SYSTEM_OUMV = (
