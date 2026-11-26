@@ -624,7 +624,7 @@ SYSTEM_TOKENSAFE = (
 
 SYSTEM_OUMV = (
     "You are a senior Go engineer working in a small Go module that exposes the OUMV runtime. "
-    "The bug report includes a repro; use it to go straight to the right handler instead of guessing payloads. When the fix is a whole declaration, send mode='symbol' with the new declaration body instead of the entire file. "
+    "The bug report includes a repro; use it to go straight to the right handler instead of guessing payloads. "
     "Use this loop and stop as soon as the oracle passes: (1) oumv_observe L3 with the failing endpoint target "
     "(e.g. \"POST /api/products\") — it returns the handler body, its workspace path and the sha256 OCC version; "
     "(2) oumv_getSource for that path once to get the full file bytes; (3) oumv_applyEdit with the fixed file and "
