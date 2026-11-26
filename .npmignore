@@ -2,6 +2,10 @@ src/cloud_backend.py
 src/mailer.py
 src/weekly_digest.py
 src/__pycache__/
+# The release workflow runs the test suite before `npm publish`, which byte-compiles
+# hooks/ and src/ in place. Ship sources only, never stale .pyc.
+__pycache__/
+*.pyc
 tests/
 frontend/
 bin/sync-public.sh

@@ -37,6 +37,15 @@ jobs:
       - name: Run test suite
         run: python3 -m unittest discover tests
 
+      - name: Strip bytecode before packaging
+        # `npm pack` honours package.json "files", and negations there ("!**/*.pyc")
+        # do not exclude anything. The test run above byte-compiles hooks/ and src/,
+        # so without this the tarball ships stale .pyc files.
+        run: |
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+          echo "remaining pyc: $(find . -name '*.pyc' | wc -l)"
+
       - name: Verify version consistency
         run: python3 scripts/release.py verify
 
