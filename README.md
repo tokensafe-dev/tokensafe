@@ -593,6 +593,7 @@ tokensafe tests
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security policy and vulnerability reporting: [SECURITY.md](SECURITY.md)
 - Metrics and honesty contract: [METRICS.md](METRICS.md)
+- Trademark policy and certification mark rules: [TRADEMARK.md](TRADEMARK.md)
 
 Apache-2.0 for versions 4.7.0 and newer. Versions up to and including 4.6.4 were released under MIT and remain MIT forever — that grant cannot be withdrawn, and those tags stay forkable.
 
