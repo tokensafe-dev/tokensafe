@@ -469,13 +469,18 @@ OUMV_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [
         "type": "function",
         "function": {
             "name": "oumv_applyEdit",
-            "description": "OUMV guarded edit: replaces the file only if `expectedVersion` from oumv_getSource matches the file on disk.",
+            "description": (
+                "OUMV guarded edit: applies only if `expectedVersion` matches the file on disk. "
+                "mode='symbol' replaces one declaration (cheaper than the whole file)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "replacement": {"type": "string"},
+                    "replacement": {"type": "string", "description": "New file content, or the new declaration body for mode='symbol'"},
                     "expectedVersion": {"type": "string", "description": "sha256 version from oumv_getSource"},
+                    "mode": {"type": "string", "enum": ["replace", "symbol"]},
+                    "symbol": {"type": "string", "description": "Declaration to replace when mode='symbol'"},
                 },
                 "required": ["path", "replacement", "expectedVersion"],
             },
@@ -582,8 +587,15 @@ def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
         tools.update({
             "oumv_observe": lambda level, target="": ws.oumv("oumv/observe", {"level": level, "target": target}),
             "oumv_getSource": lambda path, symbol="": ws.oumv("oumv/getSource", {"path": path, "symbol": symbol}),
-            "oumv_applyEdit": lambda path, replacement, expectedVersion: ws.oumv(
-                "oumv/applyEdit", {"path": path, "replacement": replacement, "expectedVersion": expectedVersion}
+            "oumv_applyEdit": lambda path, replacement, expectedVersion, mode="", symbol="": ws.oumv(
+                "oumv/applyEdit",
+                {
+                    "path": path,
+                    "replacement": replacement,
+                    "expectedVersion": expectedVersion,
+                    **({"mode": mode} if mode else {}),
+                    **({"symbol": symbol} if symbol else {}),
+                },
             ),
             "oumv_verify": lambda target, payload=None: ws.oumv(
                 "oumv/verify", {"target": target, "action": "probe", "payload": payload}
@@ -599,22 +611,20 @@ SYSTEM_BASELINE = (
     "read-only. Make the smallest correct change; stop as soon as the oracle passes."
 )
 SYSTEM_TOKENSAFE = (
-    "You are a senior Go engineer working in a small Go module. The workspace has TokenSafe tools. "
-    "The bug report includes a repro; use this loop and stop as soon as the oracle passes: "
-    "(1) ts_scoped_search for the status code or error text named in the repro — it returns file:line hits; "
-    "(2) ts_smart_read_file with that path and the identifier from the hit as `symbol` — it returns the "
-    "enclosing handler body (or a window around the hit) with line numbers, which is what you edit; "
-    "(3) ts_apply_edits with edits=[{path, hunks: [{target: the exact snippet, replacement: the fix, start_line: the L from step 2}]}] plus "
-    'verify="auto" (the project\'s own test command) — it edits and verifies in one call; '
-    "(4) if verify fails, read the reported line and repeat (2)-(3). "
-    "ts_repo_map is for an unfamiliar repository; skip it when the repro already names the endpoint. "
-    "Prefer these tools over list_files/read_file. Tests and the oracle are read-only. "
-    "Do not rewrite whole files; stop as soon as the oracle passes."
+    "You are a senior Go engineer working in a small Go module. The bug report has a repro; "
+    "stop as soon as the oracle passes. Loop: (1) ts_scoped_search on the status code or error "
+    "text from the repro → file:line hits; (2) ts_smart_read_file(path, symbol=<identifier or "
+    "endpoint from the hit>) → the enclosing body or a window, with line numbers; "
+    "(3) ts_apply_edits with edits=[{path, hunks:[{target: exact snippet, replacement: fix, "
+    'start_line: the L from (2)}]}] plus verify="auto" → edit and verdict in one call; '
+    "(4) if verify fails, fix the reported line and repeat (2)-(3). "
+    "Skip ts_repo_map when the repro names the endpoint. Prefer these over list_files/read_file; "
+    "never rewrite a whole file."
 )
 
 SYSTEM_OUMV = (
     "You are a senior Go engineer working in a small Go module that exposes the OUMV runtime. "
-    "The bug report includes a repro; use it to go straight to the right handler instead of guessing payloads. "
+    "The bug report includes a repro; use it to go straight to the right handler instead of guessing payloads. When the fix is a whole declaration, send mode='symbol' with the new declaration body instead of the entire file. "
     "Use this loop and stop as soon as the oracle passes: (1) oumv_observe L3 with the failing endpoint target "
     "(e.g. \"POST /api/products\") — it returns the handler body, its workspace path and the sha256 OCC version; "
     "(2) oumv_getSource for that path once to get the full file bytes; (3) oumv_applyEdit with the fixed file and "

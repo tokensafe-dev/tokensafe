@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,11 +20,16 @@ TOKENSAFE_BIN = Path(__file__).resolve().parents[2] / "bin" / "tokensafe"
 
 
 class TokenSafeMcp:
-    def __init__(self, workspace: Path, timeout: float = 120.0, client_name: str = "oumv-bench"):
+    def __init__(self, workspace: Path, timeout: float = 120.0, client_name: str = "oumv-bench",
+                 profile: str = ""):
         self.timeout = timeout
+        env = dict(os.environ)
+        if profile:
+            env["TOKENSAFE_MCP_PROFILE"] = profile
         self.proc = subprocess.Popen(
             [sys.executable, str(TOKENSAFE_BIN), "mcp"],
             cwd=str(workspace),
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -129,6 +135,10 @@ def open_client(workspace: Path) -> Optional[TokenSafeMcp]:
     if not TOKENSAFE_BIN.exists():
         return None
     try:
-        return TokenSafeMcp(workspace, client_name=_client_name(workspace))
+        # The arm runs the profile the docs recommend for a coding session: four core
+        # tools (+oumv) instead of seven, because every advertised tool is re-sent in
+        # every request. `oumv` is dropped from the arm's surface by build_arm.
+        return TokenSafeMcp(workspace, client_name=_client_name(workspace),
+                            profile=os.environ.get("TOKENSAFE_BENCH_PROFILE", "lean"))
     except Exception:
         return None

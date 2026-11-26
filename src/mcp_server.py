@@ -661,7 +661,11 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
 
 # Compact MCP surface (default): 7 consolidated tools (~2.2k tok vs ~6.0k tok for 28 schemas).
 # All 28 legacy tool names remain callable in _dispatch_tool_call for backward compatibility.
-# Set TOKENSAFE_MCP_PROFILE=full to expose FULL_TOOLS in tools/list.
+# Set TOKENSAFE_MCP_PROFILE=full to expose FULL_TOOLS in tools/list, or =lean for the
+# five tools a code session uses (read / search / edit / map / oumv). Each advertised tool is
+# re-sent in every request, so an unused tool is a per-step tax: the seven-tool surface
+# costs ~1,615 tokens per request, the lean one ~1,100.
+_LEAN_TOOL_NAMES = frozenset({"smart_read_file", "scoped_search", "apply_edits", "repo_map", "oumv"})
 # Slim tool surface: 7 tools, every enum kept, prose and unused optional
 # parameters dropped (the runtime still accepts them). ~35% smaller than the
 # previous literal: this schema is re-sent in every request of every session.
@@ -1177,7 +1181,7 @@ def _read_line_slice(path: str, start_line: Optional[int], end_line: Optional[in
 _SYMBOL_MISS_MAX_LINES = 200
 _SYMBOL_MISS_HIT_CAP = 8
 _SYMBOL_MISS_FULL_DECL_LINES = 60   # a declaration up to this size is shown whole
-_SYMBOL_MISS_WINDOW_PAD = 12        # otherwise: ±lines around each hit
+_SYMBOL_MISS_WINDOW_PAD = 8         # otherwise: ±lines around each hit
 _SYMBOL_MISS_WINDOW_HITS = 3
 
 
@@ -3413,7 +3417,13 @@ def run_mcp_server():
         elif method == "tools/list":
             _TOOLS_LISTED = True
             profile = os.environ.get("TOKENSAFE_MCP_PROFILE", "").strip().lower()
-            response["result"] = {"tools": FULL_TOOLS if profile == "full" else TOOLS}
+            if profile == "full":
+                advertised = FULL_TOOLS
+            elif profile == "lean":
+                advertised = [t for t in TOOLS if t["name"] in _LEAN_TOOL_NAMES]
+            else:
+                advertised = TOOLS
+            response["result"] = {"tools": advertised}
         elif method == "ping":
             response["result"] = {}
         elif method == "tools/call":

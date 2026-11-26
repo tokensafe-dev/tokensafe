@@ -1,5 +1,21 @@
 # Agent Setup Reference
 
+## Tool-surface profiles (`TOKENSAFE_MCP_PROFILE`)
+
+Every advertised tool is re-sent in **every** request, so an unused tool is a per-step tax
+(the seven-tool surface costs ~1,615 tokens per request, the five-tool `lean` one ~1,268).
+
+| Profile | Tools | Use |
+| :--- | :--- | :--- |
+| *(default)* | 7 consolidated | mixed work: also `session_context` (budget/compact/prune) and `run_helper` (sanitize/guard/web/…) |
+| `lean` | `smart_read_file`, `scoped_search`, `apply_edits`, `repo_map`, `oumv` | a coding session that only reads, searches and edits — recommended default for bug-fix work |
+| `full` | 28 legacy names | debugging an older integration; not for everyday use |
+
+Every legacy tool name stays callable at runtime regardless of the profile; the profile only
+changes what the model is shown. Set it in the MCP server's environment
+(`TOKENSAFE_MCP_PROFILE=lean`).
+
+
 Quick start lives in the [README](../README.md). This page is the full integration reference: what `tokensafe setup` configures per agent, how lifecycle hooks work, and how to connect the cloud MCP endpoint.
 
 ## 1. One-Command Install

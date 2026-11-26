@@ -35,6 +35,17 @@ class TestMCPServer(unittest.TestCase):
         if self._orig_ws:
             save_active_workspace(self._orig_ws)
 
+    def test_lean_profile_advertises_only_the_core_tools(self):
+        """Every advertised tool is re-sent in every request; `lean` is the profile the
+        docs recommend for a coding session."""
+        from src.mcp_server import TOOLS, _LEAN_TOOL_NAMES
+        lean = [t for t in TOOLS if t["name"] in _LEAN_TOOL_NAMES]
+        self.assertEqual(
+            sorted(t["name"] for t in lean),
+            ["apply_edits", "oumv", "repo_map", "scoped_search", "smart_read_file"],
+        )
+        self.assertLess(len(lean), len(TOOLS))
+
     def test_tools_list_has_all_schemas(self):
         tool_names = [t["name"] for t in TOOLS]
         expected_tools = [
