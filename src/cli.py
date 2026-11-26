@@ -695,8 +695,14 @@ def main(argv: Optional[List[str]] = None):
             print(f"  \033[33m[DRY-RUN]\033[0m Proposed configuration (.tokensafe/oumv.json):")
             print(json.dumps(cfg, indent=4))
         elif created:
+            mutate_enabled = cfg.get("permissions", {}).get("mutate", True)
+            policy = (
+                "\033[32menabled out-of-the-box (OCC + syntax guard + backups)\033[0m"
+                if mutate_enabled
+                else "\033[33mread-only (mutate: false)\033[0m"
+            )
             print(f"  ✔ Generated OUMV config: \033[1m{conf_file}\033[0m")
-            print(f"  ✔ Mutation policy:       \033[32mread-only (mutate: false)\033[0m")
+            print(f"  ✔ Mutation policy:       {policy}")
             print(f"  ✔ Profiles enabled:      {', '.join(cfg.get('oumv', {}).get('profiles', []))}")
             print("\n  Project is now retrofitted for OUMV. AI coding agents can inspect components and endpoints.\n")
         else:
