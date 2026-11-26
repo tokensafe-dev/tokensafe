@@ -3173,6 +3173,15 @@ def run_mcp_server():
                 "capabilities": {"tools": {}},
                 "serverInfo": SERVER_INFO
             }
+            # Routing brief (MCP `instructions`): which stacks this workspace
+            # works through OUMV and which through the TokenSafe tools.
+            try:
+                from src.session_brief import build_workspace_brief
+                brief = build_workspace_brief(os.getcwd(), include_live=False)
+                if brief:
+                    response["result"]["instructions"] = brief
+            except Exception:
+                pass
         elif method == "tools/list":
             _TOOLS_LISTED = True
             profile = os.environ.get("TOKENSAFE_MCP_PROFILE", "").strip().lower()

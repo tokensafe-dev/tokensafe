@@ -520,8 +520,10 @@ def _adapter_presence(workspace_dir: str, profile: str, provider: str, framework
         for req in ("requirements.txt", "pyproject.toml"):
             path = os.path.join(ws, req)
             try:
-                if os.path.isfile(path) and "tokensafe" in open(path, encoding="utf-8", errors="replace").read():
-                    return {"installed": True, "evidence": f"{req} declares tokensafe"}
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        if "tokensafe" in fh.read():
+                            return {"installed": True, "evidence": f"{req} declares tokensafe"}
             except Exception:
                 pass
         return {"installed": False, "evidence": "tokensafe-python not importable (run: pip install tokensafe-python)"}
@@ -530,8 +532,10 @@ def _adapter_presence(workspace_dir: str, profile: str, provider: str, framework
         for rel in ("go.mod", os.path.join("go", "go.mod")):
             path = os.path.join(ws, rel)
             try:
-                if os.path.isfile(path) and "tokensafe-backend/go" in open(path, encoding="utf-8", errors="replace").read():
-                    return {"installed": True, "evidence": f"{rel} requires tokensafe-backend/go"}
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        if "tokensafe-backend/go" in fh.read():
+                            return {"installed": True, "evidence": f"{rel} requires tokensafe-backend/go"}
             except Exception:
                 pass
         return {"installed": False, "evidence": "tokensafe-backend/go not in go.mod (run: go get github.com/tokensafe-dev/tokensafe-backend/go@vX.Y.Z)"}

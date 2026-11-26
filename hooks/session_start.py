@@ -122,6 +122,14 @@ def main():
                     extra.append(oumv_brief)
             except Exception:
                 pass
+            # Routing brief: what goes through OUMV, what goes through TokenSafe tools.
+            try:
+                from src.session_brief import build_workspace_brief
+                routing = build_workspace_brief(workspace_root, include_live=True)
+                if routing:
+                    extra.append(routing)
+            except Exception:
+                pass
             if extra:
                 directives = f"{directives}\n\n" + "\n".join(extra)
     except Exception:

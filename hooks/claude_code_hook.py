@@ -73,6 +73,17 @@ def handle(event: str, payload: dict, agent: str = AGENT) -> dict:
                     )
         except Exception:
             pass
+        # Routing brief: which stack is worked through OUMV vs TokenSafe tools.
+        try:
+            from src.paths import is_project_root as _is_project_root
+            from src.session_brief import build_workspace_brief
+            cwd_for_brief = str(payload.get("cwd") or os.getcwd())
+            if _is_project_root(cwd_for_brief):
+                routing = build_workspace_brief(cwd_for_brief, include_live=True)
+                if routing:
+                    extra = f"{extra}\n\n{routing}"
+        except Exception:
+            pass
         try:
             from src.burn_monitor import get_burn_warnings
             burn_warn = get_burn_warnings(
@@ -136,6 +147,17 @@ def handle(event: str, payload: dict, agent: str = AGENT) -> dict:
             )
 
         transcript_path = str(payload.get("transcript_path") or "")
+        # Routing brief: which stack is worked through OUMV vs TokenSafe tools.
+        try:
+            from src.paths import is_project_root as _is_project_root
+            from src.session_brief import build_workspace_brief
+            cwd_for_brief = str(payload.get("cwd") or os.getcwd())
+            if _is_project_root(cwd_for_brief):
+                routing = build_workspace_brief(cwd_for_brief, include_live=True)
+                if routing:
+                    extra = f"{extra}\n\n{routing}"
+        except Exception:
+            pass
         try:
             from src.burn_monitor import get_burn_warnings
             burn_warn = get_burn_warnings(
