@@ -38,8 +38,8 @@ _BACKEND_LINES = {
         "Prefer tokensafe:oumv(action='observe'|'understand'|'mutate'|'verify') over grep/curl."
     ),
     "go": (
-        "backend {provider}/{framework}: OUMV mounts with one AutoMount line "
-        "(`tokensafe inject --status` shows it; `tokensafe inject --revert` removes it). "
+        "backend {provider}/{framework}: OUMV mounts with one AutoMountAndServe line "
+        "(discovery included; `tokensafe inject --status` shows it, `--revert` removes it). "
         "Use tokensafe:oumv for endpoints/source/impact, oumv_verify for in-process checks."
     ),
     "node": (

@@ -44,7 +44,7 @@ class TestScaffoldRecipes(unittest.TestCase):
     def test_react_go_recipe_ships_an_automount_backend(self):
         self._scaffold("react-go")
         main_go = self._read("backend/main.go")
-        self.assertIn("oumvgin.AutoMount(r)", main_go)
+        self.assertIn('oumvgin.AutoMountAndServe(r, ":8080")', main_go)
         self.assertIn("useState", self._read("frontend/src/main.tsx"))
         self.assertIn("tokensafe-backend/go", self._read("backend/go.mod"))
 

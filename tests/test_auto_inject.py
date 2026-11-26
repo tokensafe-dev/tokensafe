@@ -96,14 +96,54 @@ class TestAutoInject(unittest.TestCase):
             patched = auto_inject.apply_go_patch(self.tmp)
 
         self.assertEqual(patched["status"], "patched")
+        self.assertEqual(patched["mode"], "serve")
         after = open(main_path, encoding="utf-8").read()
         self.assertIn("// tokensafe:oumv:begin", after)
-        self.assertIn("oumvgin.AutoMount(r)", after)
+        self.assertIn('oumvgin.AutoMountAndServe(r, ":8080")', after)
+        self.assertNotIn("r.Run(", after)
+        self.assertIn('"log"', after)
         self.assertIn('oumvgin "github.com/tokensafe-dev/tokensafe-backend/go/pkg/adapters/gin"', after)
 
         reverted = auto_inject.revert_go_patch(self.tmp)
         self.assertEqual(reverted["status"], "reverted")
         self.assertEqual(open(main_path, "rb").read(), original)
+
+    def test_go_patch_falls_back_to_mount_when_serve_call_is_not_simple(self):
+        with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:
+            f.write("module example.com/app\n\ngo 1.21\n")
+        main_path = os.path.join(self.tmp, "main.go")
+        with open(main_path, "w", encoding="utf-8") as f:
+            f.write(GIN_MAIN.replace('r.Run(":8080")', "r.Run(port())"))
+
+        with patch.object(auto_inject, "_go_build", return_value=(True, "")):
+            patched = auto_inject.apply_go_patch(self.tmp)
+
+        self.assertEqual(patched["status"], "patched")
+        self.assertEqual(patched["mode"], "mount")
+        after = open(main_path, encoding="utf-8").read()
+        self.assertIn("oumvgin.AutoMount(r)", after)
+        self.assertIn("r.Run(port())", after)
+
+    def test_chi_serve_call_is_wrapped(self):
+        source = """package main
+
+import (
+\t"net/http"
+
+\t"github.com/go-chi/chi/v5"
+)
+
+func main() {
+\tr := chi.NewRouter()
+\thttp.ListenAndServe(":8080", r)
+}
+"""
+        wrapped = auto_inject._wrap_go_serve(source, "chi")
+        self.assertIsNotNone(wrapped)
+        patched, preview = wrapped
+        self.assertIn('oumvchi.AutoMountAndServe(r, ":8080")', patched)
+        self.assertNotIn("http.ListenAndServe", patched)
+        self.assertIn("AutoMountAndServe", preview)
 
     def test_go_patch_rolls_back_when_build_fails(self):
         with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:

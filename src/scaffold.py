@@ -577,10 +577,11 @@ createRoot(document.getElementById('root')!).render(<App />);
     def _scaffold_go_backend(cls, target_dir, project_name, subpath, write_fn):
         p = lambda rel: os.path.join(subpath, rel) if subpath else rel
         slug = project_name.lower().replace(" ", "-")
-        write_fn(p("go.mod"), f"module example.com/{slug}\n\ngo 1.21\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.10.0\n\tgithub.com/tokensafe-dev/tokensafe-backend/go v0.4.3\n)\n")
+        write_fn(p("go.mod"), f"module example.com/{slug}\n\ngo 1.21\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.10.0\n\tgithub.com/tokensafe-dev/tokensafe-backend/go v0.4.5\n)\n")
         write_fn(p("main.go"), """package main
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -593,10 +594,11 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// OUMV: observe/understand/mutate/verify over POST /__oumv/rpc.
-	oumvgin.AutoMount(r)
-
-	_ = r.Run(":8080")
+	// OUMV: observe/understand/mutate/verify over POST /__oumv/rpc, plus the
+	// §9.2 discovery descriptor written with the real bound port.
+	if err := oumvgin.AutoMountAndServe(r, ":8080"); err != nil {
+		log.Fatal(err)
+	}
 }
 """)
 
@@ -619,7 +621,7 @@ npm run dev:api                 # backend through `tokensafe run-backend` / go r
 The adapters are already wired, so an agent works through the OUMV protocol:
 
 * frontend — `tokensafe dev` serves L0-L4 plus OCC source edits; nothing is added to git.
-* backend — FastAPI auto-mounts via `tokensafe run-backend`, Go via `oumvgin.AutoMount`.
+* backend — FastAPI auto-mounts via `tokensafe run-backend`, Go via `oumvgin.AutoMountAndServe`.
 * `tokensafe inject --status` prints the live wiring plan; `tokensafe oumv doctor` shows readiness.
 """
 

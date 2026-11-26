@@ -291,6 +291,75 @@ def _go_tidy(workspace: str) -> Tuple[bool, str]:
     return proc.returncode == 0, (proc.stderr or proc.stdout or "").strip()
 
 
+_GO_SERVE_PATTERNS = {
+    # `r.Run(":8080")` — gin
+    "gin": re.compile(r'(?m)^(?P<indent>[ \t]*)(?P<router>[A-Za-z_]\w*)\.Run\((?P<addr>[^()\n]*)\)[ \t]*$'),
+    # `http.ListenAndServe(":8080", r)` — chi
+    "chi": re.compile(
+        r'(?m)^(?P<indent>[ \t]*)http\.ListenAndServe\((?P<addr>[^,()\n]+),\s*(?P<router>[A-Za-z_]\w*)\)[ \t]*$'
+    ),
+}
+
+
+def _go_router_var(source: str, framework: str) -> Optional[str]:
+    _, _, anchor_a, anchor_b, _ = _GO_ADAPTERS[framework]
+    for anchor in (anchor_a, anchor_b):
+        if not anchor:
+            continue
+        idx = source.find(anchor)
+        if idx == -1:
+            continue
+        line_start = source.rfind("\n", 0, idx) + 1
+        line_end = source.find("\n", idx)
+        line = source[line_start : line_end if line_end != -1 else len(source)]
+        match = re.search(r"([A-Za-z_]\w*)\s*:?=\s*" + re.escape(anchor), line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _wrap_go_serve(source: str, framework: str) -> Optional[Tuple[str, str]]:
+    """Rewrites a simple serve call to the discovery-announcing wrapper.
+
+    `r.Run(":8080")` → `oumvgin.AutoMountAndServe(r, ":8080")`, so the §9.2
+    descriptor carries the port the kernel actually assigned. Only a one-line call
+    with no nested parentheses is rewritten; anything else falls back to a bare
+    AutoMount (the user can swap the serve call manually).
+    """
+    pattern = _GO_SERVE_PATTERNS.get(framework)
+    if pattern is None:
+        return None
+    router_var = _go_router_var(source, framework)
+    for match in pattern.finditer(source):
+        if router_var and match.group("router") != router_var:
+            continue
+        alias = _GO_ADAPTERS[framework][0]
+        router = match.group("router")
+        addr = match.group("addr").strip()
+        indent = match.group("indent")
+        block = (
+            f"{indent}{_MARK_BEGIN}\n"
+            f"{indent}if err := {alias}.AutoMountAndServe({router}, {addr}); err != nil {{\n"
+            f"{indent}\tlog.Fatal(err)\n"
+            f"{indent}}}\n"
+            f"{indent}{_MARK_END}\n"
+        )
+        return source[: match.start()] + block + source[match.end() :], block.strip()
+    return None
+
+
+def _ensure_std_import(source: str, package: str) -> str:
+    if re.search(r'^\s*(?:\w+\s+)?"%s"\s*$' % re.escape(package), source, re.M):
+        return source
+    idx = source.find("import (")
+    if idx == -1:
+        return source
+    line_end = source.find("\n", idx)
+    if line_end == -1:
+        return source
+    return source[: line_end + 1] + f'\t"{package}"\n' + source[line_end + 1 :]
+
+
 def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
     """Ensures the module dependency, inserts the AutoMount call, validates with `go build`.
 
@@ -312,15 +381,21 @@ def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
         return {"status": "already-patched", "entrypoint": path, "framework": framework}
 
     anchor = _go_anchor(original, framework)
-    if anchor is None:
+    alias, import_path, _, _, call = _GO_ADAPTERS[framework]
+    wrapped = _wrap_go_serve(original, framework)
+    if wrapped is None and anchor is None:
         return {
             "status": "skipped",
             "reason": f"could not find router construction ({framework}) in {os.path.relpath(path, workspace)}",
         }
 
-    alias, import_path, _, _, call = _GO_ADAPTERS[framework]
-    insert = f"\t{_MARK_BEGIN}\n{call}\t{_MARK_END}\n"
-    patched = original[:anchor] + insert + original[anchor:]
+    if wrapped is not None:
+        patched, preview = wrapped
+        patched = _ensure_std_import(patched, "log")
+    else:
+        insert = f"\t{_MARK_BEGIN}\n{call}\t{_MARK_END}\n"
+        patched = original[:anchor] + insert + original[anchor:]
+        preview = insert.strip()
 
     import_line = f'\t{alias} "{import_path}"\n'
     if import_path not in patched:
@@ -335,7 +410,8 @@ def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
             "status": "would-patch",
             "entrypoint": os.path.relpath(path, workspace),
             "framework": framework,
-            "preview": insert.strip(),
+            "mode": "serve" if wrapped is not None else "mount",
+            "preview": preview,
         }
 
     backup_dir = _inject_dir(workspace)
@@ -369,14 +445,24 @@ def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
         }
 
     with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({"entrypoint": path, "backup": backup_path, "framework": framework}, f, indent=2)
+        json.dump(
+            {
+                "entrypoint": path,
+                "backup": backup_path,
+                "framework": framework,
+                "mode": "serve" if wrapped is not None else "mount",
+            },
+            f,
+            indent=2,
+        )
 
     return {
         "status": "patched",
         "entrypoint": os.path.relpath(path, workspace),
         "framework": framework,
+        "mode": "serve" if wrapped is not None else "mount",
         "backup": backup_path,
-        "line": call.strip(),
+        "line": (preview.splitlines()[1].strip() if wrapped is not None else call.strip()),
     }
 
 
