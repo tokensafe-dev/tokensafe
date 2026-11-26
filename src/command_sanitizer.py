@@ -387,6 +387,12 @@ class CommandSanitizer:
         if dev_guard:
             return dev_guard
 
+        # FastAPI dev servers: run through `tokensafe run-backend` so the global
+        # autoload hook mounts OUMV without editing the project.
+        py_dev_guard = cls._optimize_python_dev_stage(stage, cwd)
+        if py_dev_guard:
+            return py_dev_guard
+
         # find: prune unbounded recursion on simple directory crawls (avoid breaking -o / -exec / -delete expressions)
         if cmd_tok == "find" and "node_modules" not in stage and ".git" not in stage:
             has_complex = any(a in ("-o", "-or", "-exec", "-execdir", "-delete", "(") for a in cmd_args)
@@ -694,6 +700,54 @@ class CommandSanitizer:
             return resolve_tokensafe_ui_cli(cwd) is not None
         except Exception:
             return False
+
+    @classmethod
+    def _is_fastapi_workspace(cls, cwd: Optional[str]) -> bool:
+        """Cheap, side-effect-free FastAPI detection for the rewrite decision."""
+        if not cwd or not os.path.isdir(cwd):
+            return False
+        for name in ("pyproject.toml", "requirements.txt", "main.py", "app.py"):
+            path = os.path.join(cwd, name)
+            try:
+                if os.path.isfile(path):
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        if "fastapi" in f.read().lower():
+                            return True
+            except OSError:
+                continue
+        app_dir = os.path.join(cwd, "app")
+        for name in ("main.py", "app.py"):
+            path = os.path.join(app_dir, name)
+            try:
+                if os.path.isfile(path):
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        if "fastapi" in f.read().lower():
+                            return True
+            except OSError:
+                continue
+        return False
+
+    @classmethod
+    def _optimize_python_dev_stage(cls, stage: str, cwd: Optional[str] = None) -> Optional[Tuple[str, int, str, None]]:
+        """Rewrites `uvicorn ...` / `python -m uvicorn ...` into `tokensafe run-backend ...`.
+
+        The wrapper only sets PYTHONPATH/TOKENSAFE_OUMV_AUTOMOUNT and execs the same
+        command, so the agent keeps control of ports/flags and the repository stays
+        untouched.
+        """
+        stripped = stage.strip()
+        if "tokensafe run-backend" in stripped or "tokensafe inject" in stripped:
+            return None
+        if not re.match(r"^(?:[A-Za-z_]\w*=\S*\s+)*(?:sudo\s+)?(?:python[0-9.]*\s+-m\s+)?uvicorn\b", stripped):
+            return None
+        if not cls._is_fastapi_workspace(cwd):
+            return None
+        return (
+            f"tokensafe run-backend {stripped}",
+            1400,
+            "Routed FastAPI dev server through `tokensafe run-backend` (auto-mounts OUMV, no repo changes)",
+            None,
+        )
 
     @classmethod
     def _optimize_vite_dev_stage(cls, stage: str, cwd: Optional[str] = None) -> Optional[Tuple[str, int, str, None]]:

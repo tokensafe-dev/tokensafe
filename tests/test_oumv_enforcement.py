@@ -287,5 +287,40 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
         self.assertIn("backend/node", TOKENSAFE_DIRECTIVES)
 
 
+class TestFastApiDevRewrite(unittest.TestCase):
+    """`uvicorn` in a FastAPI workspace must go through the autoload wrapper."""
+
+    def setUp(self):
+        self.ws = tempfile.mkdtemp(prefix="tokensafe_fastapi_ws_")
+        with open(os.path.join(self.ws, "requirements.txt"), "w", encoding="utf-8") as f:
+            f.write("fastapi\nuvicorn\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.ws, ignore_errors=True)
+
+    def test_rewrites_uvicorn_in_fastapi_workspace(self):
+        from src.command_sanitizer import CommandSanitizer
+
+        rewritten, _saved, reason = CommandSanitizer.sanitize("uvicorn app:app --reload", cwd=self.ws)
+        self.assertEqual(rewritten, "tokensafe run-backend uvicorn app:app --reload")
+        self.assertIn("auto-mounts OUMV", reason)
+
+    def test_rewrites_python_dash_m_uvicorn(self):
+        from src.command_sanitizer import CommandSanitizer
+
+        rewritten, _saved, _reason = CommandSanitizer.sanitize("python3 -m uvicorn app.main:app", cwd=self.ws)
+        self.assertEqual(rewritten, "tokensafe run-backend python3 -m uvicorn app.main:app")
+
+    def test_leaves_uvicorn_alone_outside_fastapi(self):
+        from src.command_sanitizer import CommandSanitizer
+
+        other = tempfile.mkdtemp(prefix="tokensafe_plain_ws_")
+        try:
+            rewritten, _saved, _reason = CommandSanitizer.sanitize("uvicorn app:app", cwd=other)
+            self.assertIsNone(rewritten)
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

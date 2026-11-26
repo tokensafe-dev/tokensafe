@@ -9,6 +9,7 @@ Used by:
 
 import sys
 import os
+import shutil
 import subprocess
 from typing import Optional, List, Dict, Any
 
@@ -99,6 +100,7 @@ def _print_help():
     print("Commands:")
     print("  dev [dir] [--port N] [--host H] [--open]  Start Vite+React DevServer with OUMV (zero repo footprint)")
     print("  integrate [--dry-run]          Retrofit OUMV into existing project (React, Vue, FastAPI, Go)")
+    print("  inject [status|apply|revert]   Auto-wire adapters with zero repo footprint (add --dry-run)")
     print("  adapters [list]                Catalog of frontend/backend OUMV runtime adapters")
     print("  oumv doctor / status           Diagnose OUMV configuration, ports, and permissions")
     print("  create <name> [--template ...] Greenfield project scaffolder (tokensafe-ui + tokensafe-backend)")
@@ -707,6 +709,66 @@ def main(argv: Optional[List[str]] = None):
             print("\n  Project is now retrofitted for OUMV. AI coding agents can inspect components and endpoints.\n")
         else:
             print(f"  ✔ Existing configuration preserved: \033[1m{conf_file}\033[0m (use --force to overwrite)\n")
+
+    elif command in ("run-backend", "run_backend"):
+        # Executes the user's dev-server command with the OUMV autoload hook active.
+        # Nothing is written into the repository: the hook lives in ~/.tokensafe.
+        from src.auto_inject import backend_env, ensure_python_autoload
+
+        argv_rest = [a for a in args[1:]]
+        if not argv_rest:
+            print("usage: tokensafe run-backend <command...>   e.g. tokensafe run-backend uvicorn app:app --reload")
+            return
+        ensure_python_autoload()
+        env = backend_env()
+        tool = argv_rest[0]
+        resolved = shutil.which(tool)
+        if not resolved:
+            print(f"tokensafe run-backend: `{tool}` not found on PATH")
+            return
+        os.execvpe(resolved, argv_rest, env)
+
+    elif command in ("inject", "wire"):
+        from src import auto_inject
+
+        sub = args[1] if len(args) > 1 and not args[1].startswith("-") else "apply"
+        dry_run = "--dry-run" in args
+        workspace = os.getcwd()
+
+        if sub == "status":
+            data = auto_inject.plan(workspace)
+            print(f"\n\033[1m\033[36m⚡ TOKENSAFE OUMV INJECT PLAN ⚡\033[0m\n")
+            print(f"  Profiles:        {', '.join(data['profiles']) or 'none detected'}")
+            for action in data["actions"]:
+                writes = "writes repo" if action["writes_repo"] else "zero repo footprint"
+                print(f"  - {action['kind']:<24} {action['profile']:<9} {writes}")
+                if action.get("entrypoint"):
+                    print(f"      entrypoint: {action['entrypoint']} (patched: {action.get('already_patched')})")
+                if action.get("install"):
+                    print(f"      install:    {action['install']}")
+                if action.get("run"):
+                    print(f"      run:        {action['run']}")
+            print(f"  Python autoload: {'✔ installed' if data['python_autoload_present'] else '○ not installed'}")
+            print(f"  Revertable:      {'✔ yes' if data['revertable'] else '○ no'}\n")
+        elif sub == "revert":
+            result = auto_inject.revert(workspace)
+            state = result.get("go", {}).get("status", "nothing-to-revert")
+            print(f"  Go patch: {state}")
+            if result.get("go", {}).get("entrypoint"):
+                print(f"  Restored: {result['go']['entrypoint']}")
+        else:
+            result = auto_inject.apply(workspace, dry_run=dry_run, include_go=True)
+            prefix = "[DRY-RUN] " if dry_run else ""
+            cfg = result.get("config", {})
+            print(f"\n{prefix}OUMV config: {cfg.get('path')} ({'created' if cfg.get('created') else 'preserved'}), mutate={cfg.get('mutate')}")
+            for action in result.get("actions", []):
+                status = action.get("status", "?")
+                print(f"  {prefix}{action['kind']}: {status}")
+                if action.get("run"):
+                    print(f"      run: {action['run']}")
+                if action.get("reason"):
+                    print(f"      reason: {action['reason']}")
+            print()
 
     elif command in ("adapters", "adapter"):
         from src.retrofit import get_adapters_catalog
