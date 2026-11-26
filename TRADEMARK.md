@@ -12,8 +12,8 @@ implementations, CC-BY-4.0 for the specification text and fixtures).
 
 ## 1. Status of the Marks
 
-- `TokenSafe` and `OUMV` are used as trademarks of the Owner. Registration is being pursued
-  in the European Union; until a registration issues in a given jurisdiction, the marks are
+- `TokenSafe` and `OUMV` are used as trademarks of the Owner. Registration is planned in the
+  European Union; until a registration issues in a given jurisdiction, the marks are
   protected by use and by unfair-competition law.
 - Use **™** freely next to the marks. Use **®** only where a registration has actually
   issued and only in connection with the registered goods and services.
