@@ -120,7 +120,7 @@ class TestSearchRootResolution(unittest.TestCase):
                 "query": "*.py",
                 "mode": "glob",
                 "path": os.path.join(REPO_ROOT, "src", "bench"),
-                "max_results": 5,
+                "max_results": 10,
             },
         )
         self.assertNotIn("isError", res)
