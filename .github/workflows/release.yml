@@ -73,6 +73,25 @@ jobs:
           fi
           exit $STATUS
 
+      - name: Verify the version is actually installable
+        # `npm publish` can exit 0 with "your package is being processed" while the
+        # version stays invisible (staged publish awaiting 2FA approval). Without
+        # this gate the release is green and npm has nothing — 4.6.3 shipped that way.
+        run: |
+          VERSION=$(python3 -c "import json;print(json.load(open('package.json'))['version'])")
+          for i in $(seq 1 20); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/tokensafe/${VERSION}?t=$(date +%s)")
+            if [ "$CODE" = "200" ]; then
+              echo "tokensafe@${VERSION} is available on npm."
+              exit 0
+            fi
+            echo "attempt ${i}: registry HTTP ${CODE} for tokensafe@${VERSION}"
+            sleep 15
+          done
+          echo "::error::tokensafe@${VERSION} is not visible on the npm registry after ~5 minutes."
+          echo "If the publish is staged, approve it on npmjs.com (package → pending publish) or rerun with an OTP."
+          exit 1
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
