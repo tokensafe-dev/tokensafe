@@ -25,6 +25,11 @@ class AgentFirewall:
     _PRUNE_INTERVAL = 3600.0       # amortized hourly prune of the persistent layer
     _PRUNE_KEEP = 500
     _last_prune = 0.0
+    # Content this process has actually delivered. The cache is keyed by session_id,
+    # and host session ids like "mcp:<client>" outlive one process — so a DB hit alone
+    # does not mean the caller already has the bytes in context, and saying "reused
+    # session read" when it doesn't is how an agent talks itself out of a needed read.
+    _EMITTED_IN_PROCESS = set()
 
     @classmethod
     def _ensure_table(cls, tracker: MetricsTracker):
@@ -189,7 +194,14 @@ class AgentFirewall:
                 )
                 opt_tokens = count_tokens(payload)
             else:
-                scope_label = "Persistent cache" if hit_scope == "persistent" else "Reused session read"
+                emitted_key = (abs_path, symbol_key)
+                if hit_scope == "persistent":
+                    scope_label = "Persistent cache"
+                elif emitted_key in cls._EMITTED_IN_PROCESS:
+                    scope_label = "Reused session read"
+                else:
+                    scope_label = "Cached read (same file, unchanged on disk)"
+                cls._EMITTED_IN_PROCESS.add(emitted_key)
                 sym_label = f"::{symbol_key}" if symbol_key else ""
                 # Static deterministic header (no changing hit counters that bust LLM prefix KV-cache)
                 header = (
@@ -251,6 +263,9 @@ class AgentFirewall:
         tokens = count_tokens(content)
         now = int(time.time())
         content_hash = cls._file_content_hash(abs_path)
+        # record_cache runs right after the caller received this content, so from here
+        # on a hit in this process really is a repeat of what the agent already has.
+        cls._EMITTED_IN_PROCESS.add((abs_path, symbol_key))
 
         def _insert():
             with tracker._get_connection() as conn:
