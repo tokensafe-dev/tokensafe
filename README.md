@@ -204,6 +204,33 @@ Why TokenSafe agents ship working code on the first pass without burning quotas 
 
 Deeper mechanics (language matrix, AST syntax trees, cache tiers, governor) live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## What happens on the first prompt
+
+You install TokenSafe, open a project in your agent, and the first turn does the wiring:
+
+1. **Detect** the stack (React/Vue + Vite, FastAPI, Go/Gin|Chi, or nothing supported).
+2. **Activate** the adapters:
+   * frontend — `tokensafe dev` serves OUMV from an inline Vite config; **no file in the
+     repository changes**;
+   * FastAPI — a global `~/.tokensafe/pyhooks/sitecustomize.py` mounts `mount_tokensafe(app)`
+     when the server runs through `tokensafe run-backend uvicorn ...`;
+   * Go — one `AutoMount()` line between `tokensafe:oumv` markers, byte-exact backup in
+     `~/.tokensafe/inject/`, `go build` validated, `tokensafe inject --revert` restores it.
+3. **Brief the agent** — a short routing block (hook context and MCP `instructions`) says which
+   stack is worked through OUMV and which through the TokenSafe tools. Nothing is written into
+   the repository by the brief.
+
+```bash
+tokensafe inject --status     # what would be wired, and where
+tokensafe inject --dry-run    # same, but explicit
+tokensafe inject              # apply the safe parts (config + Python autoload + Go line)
+tokensafe inject --revert     # restore the Go entrypoint byte-for-byte
+tokensafe create shop --template react-fastapi   # greenfield with everything pre-wired
+tokensafe oumv doctor         # readiness: adapter installed? runtime live? blocking reasons
+```
+
+Full matrix and details: [docs/OUMV.md](docs/OUMV.md).
+
 ## Benchmarks
 
 ### Agent Usability Benchmarks (AUB) — Full-Stack Agent Velocity
@@ -443,7 +470,7 @@ All hook adapters fail open: an internal error never stalls your agent. Failures
 | `oumv_status` | Status, capabilities, and connection health of frontend/backend OUMV runtimes with hybrid fallback mode |
 | `oumv_observe` | Progressive runtime observation (L0 pulse, L1 surface, L2 detail) with out-of-the-box static AST fallback |
 | `oumv_understand` | Query runtime causality, state dependencies, and backend route mappings |
-| `oumv_mutate` | Controlled mutations with optimistic concurrency control (safe-by-default, requires workspace permissions) |
+| `oumv_mutate` | OCC-guarded source edits (mandatory `expectedVersion`, path jail, syntax pre-flight, backup) |
 | `oumv_verify` | Transactional verification and state invariant assertions |
 </details>
 
@@ -548,10 +575,11 @@ TokenSafe integrates with the [OUMV Protocol](https://github.com/tokensafe-dev/o
 - **Consolidated Adapters**:
   - **Frontend**: `tokensafe-ui/react`, `tokensafe-ui/vue`, and the zero-footprint Vite bridge (`tokensafe-ui/vite`) with a session token stored in the per-workspace descriptor (`~/.tokensafe/runtimes/<hash>.json`, mode 0600).
   - **Backend**: Go (`gin`, `chi`, `stdhttp`) and Python (`fastapi`, `sqlalchemy`) in [`tokensafe-backend`](https://github.com/tokensafe-dev/tokensafe-backend).
-- **Safe-by-Default Mutations**: Mutation tools (`oumv_mutate`) require explicit permission in `.tokensafe/oumv.json` (`mutate: false` by default) and enforce optimistic concurrency control to prevent agent code drifts.
-- **Doctor & Integration CLI**: Run `tokensafe integrate` to scaffold project configs or `tokensafe oumv doctor` to verify dev-server connectivity and capabilities.
+- **Guarded Mutations, Enabled by Default**: `oumv_mutate` works out of the box and guards every write — mandatory OCC `expectedVersion`, workspace path jail, syntax pre-flight, backup of previous bytes. Opt out with `permissions.mutate: false` in `.tokensafe/oumv.json`.
+- **Automatic Wiring CLI**: `tokensafe inject` activates adapters with zero repository footprint (Vite wrapper, Python autoload, one marker-delimited Go line), `tokensafe inject --revert` restores it, and `tokensafe oumv doctor` reports readiness with blocking reasons.
+- **Greenfield Recipes**: `tokensafe create <name> --template react-fastapi|react-go|vue-gin|fastapi|gin` generates a normal project in your stack with OUMV already wired.
 
-More documentation: [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/API.md](docs/API.md) · [METRICS.md](METRICS.md) · [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md)
+More documentation: [docs/OUMV.md](docs/OUMV.md) · [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/API.md](docs/API.md) · [METRICS.md](METRICS.md)
 
 ## Development and License
 

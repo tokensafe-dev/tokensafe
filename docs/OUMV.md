@@ -1,0 +1,76 @@
+# OUMV in TokenSafe — supported stacks and how wiring works
+
+OUMV (Observe · Understand · Mutate · Verify) is served by **adapters for the stack you
+already use**. There is no TokenSafe framework to adopt: the native SolidJS runtime and
+the `tokensafe.New()` Go framework still exist in the trees for tests, but they are not
+the recommended path and are not documented as a product surface.
+
+## Supported stacks
+
+| Profile | Stack | What gets mounted | Activation | Repo footprint |
+| :--- | :--- | :--- | :--- | :--- |
+| Frontend | React 18/19 + Vite | JSON-RPC at `/__oumv/rpc` on the dev server (L0–L4, contracts, OCC edits) | `tokensafe dev` | **none** |
+| Frontend | Vue 3 + Vite | Same endpoint; DOM-level L0–L2 | `tokensafe dev` | **none** |
+| Backend | Python / FastAPI | `mount_tokensafe(app)` via `uvicorn` import hook | `tokensafe run-backend uvicorn ...` | **none** |
+| Backend | Go / Gin | `oumvgin.AutoMount(r)` | `tokensafe inject` | one line + one import, marker-delimited, revertible |
+| Backend | Go / Chi | `oumvchi.AutoMount(r)` | `tokensafe inject` | same |
+| Backend | Go / net/http | `stdhttp.NewServeMux(rt)` | generated project (`tokensafe create --template gin`) | adapter-owned mux |
+| Backend | Node.js / Express, Fastify, NestJS | — | not yet | — |
+
+Anything else (Django, Angular, Rails, …) is explicitly unsupported: the routing brief
+tells the agent to use `repo_map` / `scoped_search` / `smart_read_file` there instead of
+probing OUMV.
+
+## Commands
+
+```bash
+tokensafe inject --status     # plan: what is wired, what is missing, exact commands
+tokensafe inject --dry-run    # same plan, explicit
+tokensafe inject              # apply: config + Python autoload + Go one-liner
+tokensafe inject --revert     # restore the Go entrypoint byte-for-byte
+tokensafe dev                 # zero-footprint Vite bridge for the frontend
+tokensafe run-backend uvicorn app:app --reload   # FastAPI with the autoload hook
+tokensafe oumv doctor         # readiness + blocking reasons
+tokensafe create shop --template react-fastapi   # greenfield, already wired
+```
+
+## Files that are written, and where
+
+| Path | Purpose | In git? |
+| :--- | :--- | :--- |
+| `~/.tokensafe/runtimes/<hash>.json` | discovery descriptor (url, session token, levels) | outside the repo |
+| `~/.tokensafe/pyhooks/sitecustomize.py` | uvicorn import hook for FastAPI | outside the repo |
+| `~/.tokensafe/inject/<hash>/` | Go entrypoint backup + manifest | outside the repo |
+| `<repo>/.tokensafe/oumv.json` | project config (permissions, adapters) | excluded via `.git/info/exclude` |
+| `<repo>/main.go` (Go only) | one `AutoMount()` line + import | **visible**, revertible |
+
+The Go line is the only tracked edit, and it is unavoidable: an adapter must live inside
+the process. It is inserted between `// tokensafe:oumv:begin` / `// tokensafe:oumv:end`,
+validated with `go build ./...`, and `tokensafe inject --revert` restores the original
+bytes from the backup.
+
+## What the agent is told
+
+On the first prompt in a workspace, hooks (Antigravity, Claude Code, ZCode, Kimi) and the
+MCP server's `initialize.instructions` receive a short routing brief:
+
+```
+[TokenSafe OUMV routing brief]
+- frontend react/react: OUMV live via `tokensafe dev` ... Call tokensafe:oumv(...)
+- backend fastapi/fastapi: OUMV auto-mounts via `tokensafe run-backend uvicorn ...`
+- mutations: enabled with guardrails (OCC version, path jail, syntax pre-flight, backups)
+```
+
+Cursor and Codex have no injectable hook — they receive the same text through MCP
+instructions. Nothing is committed to the repository for the brief.
+
+## Verifying
+
+```bash
+tokensafe oumv doctor                 # config + adapter presence + blocking reasons
+curl -s localhost:5173/__oumv/rpc -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"oumv/handshake","params":{}}'
+```
+
+Conformance reports per adapter: `tokensafe-backend/certification/*.json` (Go + FastAPI,
+Level 3, reproduced in CI).
