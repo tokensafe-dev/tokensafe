@@ -4,12 +4,15 @@ Unit tests for the TokenSafe OUMV Retrofit & Stack Detection Engine.
 
 import unittest
 import os
+import subprocess
 import tempfile
 import json
 import shutil
 
 from src.retrofit import (
     detect_project_stack,
+    generate_config,
+    run_doctor,
     generate_config,
     get_adapters_catalog,
     run_doctor,
@@ -181,6 +184,59 @@ dependencies = [
         self.assertEqual(ctx.resolve_target_runtime("<CheckoutButton />"), "frontend")
         self.assertEqual(ctx.resolve_target_runtime("button#submit"), "frontend")
         self.assertEqual(ctx.resolve_target_runtime("/api/v1/users"), "backend")
+
+
+
+class TestZeroTraceIntegration(unittest.TestCase):
+    """The generated manifest must never appear as a git change."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="tokensafe_integrate_")
+        subprocess.run(["git", "init", "-q", self.test_dir], check=True)
+        with open(os.path.join(self.test_dir, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "app", "dependencies": {"react": "^18.3.1"}, "devDependencies": {"vite": "^5.4.0"}}, f)
+        subprocess.run(["git", "-C", self.test_dir, "add", "package.json"], check=True)
+        subprocess.run(
+            ["git", "-C", self.test_dir, "-c", "user.email=t@example.com", "-c", "user.name=Test",
+             "commit", "-qm", "fixture"],
+            check=True,
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_generate_config_stays_out_of_git_status(self):
+        generate_config(self.test_dir)
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=self.test_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(status, "", f"integration left tracked changes: {status!r}")
+
+        # The local-only exclude is what keeps it invisible (never the tracked .gitignore).
+        exclude_path = os.path.join(self.test_dir, ".git", "info", "exclude")
+        with open(exclude_path, encoding="utf-8") as f:
+            self.assertIn(".tokensafe/", f.read())
+        self.assertFalse(os.path.exists(os.path.join(self.test_dir, ".gitignore")))
+
+    def test_doctor_is_not_ready_without_an_installed_adapter(self):
+        generate_config(self.test_dir)
+        doc = run_doctor(self.test_dir)
+        self.assertFalse(doc["ready_for_agent"])
+        self.assertTrue(doc["blocking"])
+        self.assertIn("node_modules/tokensafe-ui", doc["blocking"][0])
+
+        # Adapter present -> ready (no live runtime needed for the static path).
+        pkg_dir = os.path.join(self.test_dir, "node_modules", "tokensafe-ui")
+        os.makedirs(pkg_dir)
+        with open(os.path.join(pkg_dir, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "tokensafe-ui", "version": "0.1.21"}, f)
+
+        doc = run_doctor(self.test_dir)
+        self.assertTrue(doc["ready_for_agent"], doc["blocking"])
+        self.assertTrue(doc["adapter_readiness"]["frontend"]["installed"])
+        self.assertIn("node_modules/tokensafe-ui", doc["adapter_readiness"]["frontend"]["evidence"])
 
 
 if __name__ == "__main__":

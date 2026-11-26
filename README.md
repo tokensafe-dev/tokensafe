@@ -208,6 +208,11 @@ Deeper mechanics (language matrix, AST syntax trees, cache tiers, governor) live
 
 ### Agent Usability Benchmarks (AUB) — Full-Stack Agent Velocity
 
+> ⚠️ **Simulated, not measured.** These AER figures are computed from fixture traces in the
+> benchmark harnesses (the 12-assertion oracles are real; the agent turns/tokens are not).
+> A measured three-arm run (no TokenSafe / TokenSafe / OUMV) is the next benchmark milestone
+> — until it lands, treat this table as a model, not as a product claim.
+
 Beyond file slicing, TokenSafe's agent-native ecosystem eliminates architectural friction, state pollution, and compiler loops for autonomous coding agents across frontend and backend:
 
 | Ecosystem Stack | Target Package | Baseline vs. TokenSafe | Autonomous Efficiency Ratio (AER) | Token Savings | Turns to Green | State Safety |
@@ -541,7 +546,7 @@ TokenSafe integrates with the [OUMV Protocol](https://github.com/tokensafe-dev/o
 - **Out-of-the-Box Stack Detection**: TokenSafe automatically detects your application stack (`package.json`, `go.mod`, `pyproject.toml`, Vite, Next.js, FastAPI, Gin) and configures agent tooling dynamically.
 - **Level 1 Static AST Fallback**: When live dev-servers are offline, `oumv_observe` and `oumv_understand` gracefully fall back to zero-config static AST component trees and route maps with evidence tracking.
 - **Consolidated Adapters**:
-  - **Frontend**: `@tokensafe-ui/oumv/react`, `@tokensafe-ui/oumv/vue`, and `@tokensafe-ui/vite` with secure `.tokensafe/runtime.json` session authentication.
+  - **Frontend**: `tokensafe-ui/react`, `tokensafe-ui/vue`, and the zero-footprint Vite bridge (`tokensafe-ui/vite`) with a session token stored in the per-workspace descriptor (`~/.tokensafe/runtimes/<hash>.json`, mode 0600).
   - **Backend**: Go (`gin`, `chi`, `stdhttp`) and Python (`fastapi`, `sqlalchemy`) in [`tokensafe-backend`](https://github.com/tokensafe-dev/tokensafe-backend).
 - **Safe-by-Default Mutations**: Mutation tools (`oumv_mutate`) require explicit permission in `.tokensafe/oumv.json` (`mutate: false` by default) and enforce optimistic concurrency control to prevent agent code drifts.
 - **Doctor & Integration CLI**: Run `tokensafe integrate` to scaffold project configs or `tokensafe oumv doctor` to verify dev-server connectivity and capabilities.

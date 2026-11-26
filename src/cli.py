@@ -731,8 +731,16 @@ def main(argv: Optional[List[str]] = None):
             be = doc['detected_stack'].get('backend')
             print(f"  Detected Frontend:                 {fe['framework'] if fe else 'None'}")
             print(f"  Detected Backend:                  {be['framework'] if be else 'None'}")
-            mut = doc['permissions'].get('mutate', False)
-            print(f"  Mutation Permission:              {'✔ Enabled' if mut else '○ Read-Only (Default safe)'}\n")
+            mut = doc['permissions'].get('mutate', True)
+            print(f"  Mutation Permission:              {'✔ Enabled (out-of-the-box, guarded)' if mut else '○ Read-only (mutate: false)'}")
+            for profile, item in (doc.get('adapter_readiness') or {}).items():
+                state = "✔ ready" if item["ready"] else "○ not ready"
+                live = " (live)" if item["live"] else ""
+                print(f"  Adapter {profile:<10}             {state}{live}: {item['provider']}/{item['framework']} — {item['evidence']}")
+            print(f"  Ready for agent:                  {'✔ yes' if doc.get('ready_for_agent') else '○ no'}")
+            for reason in doc.get('blocking') or []:
+                print(f"    - {reason}")
+            print()
         else:
             from src.oumv_gateway import OUMVGateway
             status = OUMVGateway.status()

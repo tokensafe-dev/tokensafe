@@ -353,6 +353,13 @@ def generate_config(
         os.makedirs(target_dir, exist_ok=True)
         with open(target_file, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
+        # The manifest must never show up as an untracked change: ignore it via
+        # .git/info/exclude (local-only) instead of editing the tracked .gitignore.
+        try:
+            from src.paths import ensure_local_git_exclude
+            ensure_local_git_exclude(workspace_dir)
+        except Exception:
+            pass
 
     return config, target_file, True
 
@@ -490,8 +497,50 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
     ]
 
 
+def _adapter_presence(workspace_dir: str, profile: str, provider: str, framework: str) -> Dict[str, Any]:
+    """Best-effort, side-effect-free check whether an adapter is available locally.
+
+    Returns {"installed": bool, "evidence": str} where evidence names what was
+    actually found — never a bare True.
+    """
+    ws = os.path.abspath(workspace_dir)
+    if profile == "frontend":
+        pkg_json = os.path.join(ws, "node_modules", "tokensafe-ui", "package.json")
+        if os.path.isfile(pkg_json):
+            return {"installed": True, "evidence": "node_modules/tokensafe-ui"}
+        return {"installed": False, "evidence": "node_modules/tokensafe-ui missing (run: npm install -D tokensafe-ui)"}
+
+    if provider == "fastapi":
+        try:
+            import importlib.util
+            if importlib.util.find_spec("tokensafe_python") is not None:
+                return {"installed": True, "evidence": "tokensafe_python importable"}
+        except Exception:
+            pass
+        for req in ("requirements.txt", "pyproject.toml"):
+            path = os.path.join(ws, req)
+            try:
+                if os.path.isfile(path) and "tokensafe" in open(path, encoding="utf-8", errors="replace").read():
+                    return {"installed": True, "evidence": f"{req} declares tokensafe"}
+            except Exception:
+                pass
+        return {"installed": False, "evidence": "tokensafe-python not importable (run: pip install tokensafe-python)"}
+
+    if provider == "go":
+        for rel in ("go.mod", os.path.join("go", "go.mod")):
+            path = os.path.join(ws, rel)
+            try:
+                if os.path.isfile(path) and "tokensafe-backend/go" in open(path, encoding="utf-8", errors="replace").read():
+                    return {"installed": True, "evidence": f"{rel} requires tokensafe-backend/go"}
+            except Exception:
+                pass
+        return {"installed": False, "evidence": "tokensafe-backend/go not in go.mod (run: go get github.com/tokensafe-dev/tokensafe-backend/go@vX.Y.Z)"}
+
+    return {"installed": False, "evidence": f"no adapter published for {provider}/{framework}"}
+
+
 def run_doctor(workspace_dir: str) -> Dict[str, Any]:
-    """Diagnostics check for OUMV configuration, ports, lockfiles, and permissions."""
+    """Diagnostics for OUMV configuration, detected adapters and agent readiness."""
     stack = detect_project_stack(workspace_dir)
     conf_path = os.path.join(workspace_dir, ".tokensafe", "oumv.json")
     runtime_paths = [
@@ -522,6 +571,34 @@ def run_doctor(workspace_dir: str) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # Per-profile readiness: a config file alone is not "ready for agent".
+    readiness: Dict[str, Any] = {}
+    for profile, key in (("frontend", "frontend"), ("backend", "backend")):
+        detected = stack.get(key)
+        if not detected:
+            continue
+        provider = detected.get("provider", "")
+        framework = detected.get("framework", "")
+        presence = _adapter_presence(workspace_dir, profile, provider, framework)
+        live = has_runtime and runtime_data.get("type", profile) in (profile, None)
+        readiness[profile] = {
+            "provider": provider,
+            "framework": framework,
+            "installed": presence["installed"],
+            "evidence": presence["evidence"],
+            "live": bool(live),
+            "ready": bool(presence["installed"] or live),
+        }
+
+    permissions = config_data.get("permissions", {"observe": True, "mutate": True})
+    config_enabled = bool(config_data.get("oumv", {}).get("enabled", has_config))
+    ready_for_agent = bool(
+        has_config
+        and config_enabled
+        and permissions.get("observe", True)
+        and all(item["ready"] for item in readiness.values())
+    )
+
     return {
         "workspace": workspace_dir,
         "detected_stack": stack,
@@ -529,8 +606,14 @@ def run_doctor(workspace_dir: str) -> Dict[str, Any]:
         "config": config_data,
         "runtime_beacon_present": has_runtime,
         "runtime_beacon": runtime_data,
-        "permissions": config_data.get("permissions", {"observe": True, "mutate": False}),
-        "ready_for_agent": True,
+        "permissions": permissions,
+        "adapter_readiness": readiness,
+        "ready_for_agent": ready_for_agent,
+        "blocking": [
+            f"{profile}: {item['evidence']}"
+            for profile, item in readiness.items()
+            if not item["ready"]
+        ],
     }
 
 

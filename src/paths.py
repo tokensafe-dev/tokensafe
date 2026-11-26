@@ -205,6 +205,64 @@ def ensure_tokensafe_gitignore(project_root: Optional[str]) -> bool:
     return updated
 
 
+def ensure_local_git_exclude(project_root: Optional[str]) -> bool:
+    """Ignores ``.tokensafe/`` WITHOUT editing any tracked file.
+
+    ``ensure_tokensafe_gitignore`` appends to the project's ``.gitignore``, which
+    is a tracked file — a visible diff in the user's repository. For the
+    zero-trace injection flow we instead write to ``$GIT_DIR/info/exclude``
+    (local-only, never committed) and drop a self-ignoring
+    ``.tokensafe/.gitignore`` so the directory stays invisible even if a future
+    ``git add -f`` picks it up.
+    """
+    if not project_root or not os.path.isdir(project_root):
+        return False
+
+    updated = False
+    proj_tokensafe = os.path.join(project_root, ".tokensafe")
+    if os.path.isdir(proj_tokensafe):
+        inner_ignore = os.path.join(proj_tokensafe, ".gitignore")
+        if not os.path.isfile(inner_ignore):
+            try:
+                with open(inner_ignore, "w", encoding="utf-8") as f:
+                    f.write("# TokenSafe local runtime artifacts & caches\n*\n!.gitignore\n")
+                updated = True
+            except Exception:
+                pass
+
+    git_dir = os.path.join(project_root, ".git")
+    if os.path.isfile(git_dir):
+        # Worktrees/submodules: .git is a file pointing at the real git dir.
+        try:
+            with open(git_dir, "r", encoding="utf-8") as f:
+                pointer = f.read().strip()
+            if pointer.startswith("gitdir:"):
+                git_dir = os.path.abspath(os.path.join(project_root, pointer.split(":", 1)[1].strip()))
+        except Exception:
+            pass
+    elif not os.path.isdir(git_dir):
+        return updated
+
+    exclude_path = os.path.join(git_dir, "info", "exclude")
+    try:
+        content = ""
+        if os.path.isfile(exclude_path):
+            with open(exclude_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        entries = {ln.strip() for ln in content.splitlines()}
+        if not ({".tokensafe/", ".tokensafe"} & entries):
+            os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
+            with open(exclude_path, "a", encoding="utf-8") as f:
+                if content and not content.endswith("\n"):
+                    f.write("\n")
+                f.write("# TokenSafe local runtime artifacts (local-only, never committed)\n.tokensafe/\n")
+            updated = True
+    except Exception:
+        pass
+
+    return updated
+
+
 _PROJECT_MARKER_FILES = (
     "package.json", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
     "go.mod", "Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts",
