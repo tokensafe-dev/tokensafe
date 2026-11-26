@@ -575,6 +575,16 @@ def main(argv: Optional[List[str]] = None):
         template = "fullstack"
         force = False
 
+        if "--list" in args:
+            print("\nAvailable recipes:")
+            print("  react-fastapi   React 18 + Vite + FastAPI (recommended)")
+            print("  react-go        React 18 + Vite + Go/Gin")
+            print("  vue-gin         Vue 3 + Vite + Go/Gin")
+            print("  react / vue     frontend only (OUMV via `tokensafe dev`)")
+            print("  fastapi / gin   backend only (auto-mount)")
+            print("  backend, ui, fullstack   legacy TokenSafe-native templates\n")
+            return
+
         i = 1
         while i < len(args):
             arg = args[i]
@@ -583,13 +593,17 @@ def main(argv: Optional[List[str]] = None):
                 print("Usage:")
                 print("  tokensafe create <project-name> [options]\n")
                 print("Options:")
-                print("  --template <type>   fullstack (default), ui, backend, python, go")
+                print("  --template <type>   recipe or stack:")
+                print("                        react-fastapi (recommended), react-go, vue-gin,")
+                print("                        react, vue, fastapi, gin, backend, ui, fullstack")
                 print("  --force, -f         Overwrite existing files")
                 print("  --help, -h          Show this help screen\n")
                 print("Examples:")
                 print("  tokensafe create my-app")
                 print("  tokensafe create my-dashboard --template ui")
-                print("  tokensafe create store-api --template backend\n")
+                print("  tokensafe create store-api --template fastapi")
+                print("  tokensafe create shop --template react-fastapi")
+                print("  tokensafe create edge-api --template gin\n")
                 return
             elif arg in ("--template", "-t") and i + 1 < len(args):
                 template = args[i + 1]
@@ -646,7 +660,9 @@ def main(argv: Optional[List[str]] = None):
                 print("Usage:")
                 print("  tokensafe init [options]\n")
                 print("Options:")
-                print("  --template <type>   fullstack (default), ui, backend, python, go")
+                print("  --template <type>   recipe or stack:")
+                print("                        react-fastapi (recommended), react-go, vue-gin,")
+                print("                        react, vue, fastapi, gin, backend, ui, fullstack")
                 print("  --force, -f         Overwrite existing files\n")
                 return
             elif arg in ("--template", "-t") and i + 1 < len(args):

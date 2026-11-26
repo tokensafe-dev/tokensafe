@@ -335,10 +335,16 @@ class ProjectScaffolder:
     ) -> Dict[str, Any]:
         """Generates project template files in target_dir."""
         template = template.lower().strip()
-        if template not in ("fullstack", "ui", "backend", "python", "fastapi", "go"):
-            raise ValueError(f"Unknown template: '{template}'. Valid options: fullstack, ui, backend, python, go")
+        valid = (
+            "fullstack", "ui", "backend", "python", "fastapi", "go", "gin",
+            "react-fastapi", "react-go", "vue-gin", "react", "vue",
+        )
+        if template not in valid:
+            raise ValueError(
+                f"Unknown template: '{template}'. Valid options: {', '.join(valid)}"
+            )
 
-        if template in ("python", "fastapi"):
+        if template == "python":
             template = "backend"
 
         os.makedirs(target_dir, exist_ok=True)
@@ -404,13 +410,64 @@ class ProjectScaffolder:
             readme = cls._generate_readme(project_name, template="ui")
             _write("README.md", readme)
 
-        elif template in ("backend", "go"):
-            cls._scaffold_backend(target_dir, project_name, subpath="", write_fn=_write)
+        elif template in ("react-fastapi", "react-go", "vue-gin"):
+            frontend, backend = template.split("-")
+            cls._scaffold_react_ui(target_dir, project_name, subpath="frontend", write_fn=_write, write_json_fn=_write_json) if frontend == "react" else cls._scaffold_vue_ui(target_dir, project_name, subpath="frontend", write_fn=_write, write_json_fn=_write_json)
+            if backend in ("go", "gin"):
+                cls._scaffold_go_backend(target_dir, project_name, subpath="backend", write_fn=_write)
+                backend_url = "http://localhost:8080/__oumv/rpc"
+                backend_name = "tokensafe-backend"
+            else:
+                cls._scaffold_backend(target_dir, project_name, subpath="backend", write_fn=_write)
+                backend_url = "http://localhost:8000/__oumv/rpc"
+                backend_name = "tokensafe-python"
+            _write_json(os.path.join(".tokensafe", "runtime.json"), {
+                "frontend": {
+                    "name": "tokensafe-ui",
+                    "version": "0.1.22",
+                    "url": "http://localhost:5173/__oumv/rpc",
+                },
+                "backend": {"name": backend_name, "version": "0.4.0", "url": backend_url},
+            })
+            _write("AGENTS.md", cls._generate_agents_md(project_name, is_fullstack=True))
+            _write("README.md", cls._generate_recipe_readme(project_name, template))
+            _write("package.json", json.dumps({
+                "name": project_name.lower().replace(" ", "-"),
+                "private": True,
+                "scripts": {
+                    "dev": "tokensafe dev frontend",
+                    "dev:api": "tokensafe run-backend"
+                             + (" go run ./backend" if backend in ("go", "gin")
+                                else " uvicorn main:app --reload --app-dir backend"),
+                },
+            }, indent=2) + "\n")
+
+        elif template in ("react", "vue"):
+            if template == "react":
+                cls._scaffold_react_ui(target_dir, project_name, subpath="", write_fn=_write, write_json_fn=_write_json)
+            else:
+                cls._scaffold_vue_ui(target_dir, project_name, subpath="", write_fn=_write, write_json_fn=_write_json)
+            _write_json(os.path.join(".tokensafe", "runtime.json"), {
+                "frontend": {
+                    "name": "tokensafe-ui",
+                    "version": "0.1.22",
+                    "url": "http://localhost:5173/__oumv/rpc",
+                },
+            })
+            _write("AGENTS.md", cls._generate_agents_md(project_name, is_fullstack=False, is_ui=True))
+            _write("README.md", cls._generate_recipe_readme(project_name, template))
+
+        elif template in ("backend", "go", "gin", "fastapi"):
+            is_go = template in ("go", "gin")
+            if is_go:
+                cls._scaffold_go_backend(target_dir, project_name, subpath="", write_fn=_write)
+            else:
+                cls._scaffold_backend(target_dir, project_name, subpath="", write_fn=_write)
             runtime_config = {
                 "backend": {
-                    "name": "tokensafe-python" if template != "go" else "tokensafe-backend",
-                    "version": "0.1.0",
-                    "url": "http://localhost:8000/__oumv/rpc" if template != "go" else "http://localhost:8080/__oumv/rpc"
+                    "name": "tokensafe-backend" if is_go else "tokensafe-python",
+                    "version": "0.4.0" if is_go else "0.3.0",
+                    "url": "http://localhost:8080/__oumv/rpc" if is_go else "http://localhost:8000/__oumv/rpc"
                 }
             }
             _write_json(os.path.join(".tokensafe", "runtime.json"), runtime_config)
@@ -440,6 +497,131 @@ class ProjectScaffolder:
         write_fn(p(os.path.join("src", "style.css")), DEFAULT_STYLE_CSS)
         write_fn(p(os.path.join("src", "main.ts")), DEFAULT_MAIN_TS)
         write_fn(p(os.path.join("src", "App.tsx")), DEFAULT_APP_TSX)
+
+    # ---- framework recipes: user picks the stack, we wire OUMV -------------
+
+    @classmethod
+    def _scaffold_react_ui(cls, target_dir, project_name, subpath, write_fn, write_json_fn):
+        p = lambda rel: os.path.join(subpath, rel) if subpath else rel
+        slug = project_name.lower().replace(" ", "-")
+        write_json_fn(p("package.json"), {
+            "name": f"{slug}-web",
+            "private": True,
+            "type": "module",
+            "scripts": {
+                # `tokensafe dev` serves OUMV with an inline Vite config: no plugin
+                # line, no descriptor, nothing to commit.
+                "dev": "tokensafe dev",
+                "build": "vite build",
+            },
+            "dependencies": {"react": "^18.3.1", "react-dom": "^18.3.1"},
+            "devDependencies": {
+                "@vitejs/plugin-react": "^4.3.1",
+                "vite": "^5.4.0",
+                "tokensafe-ui": "^0.1.22",
+            },
+        })
+        write_json_fn(p("tsconfig.json"), {
+            "compilerOptions": {
+                "target": "ES2022",
+                "module": "ESNext",
+                "moduleResolution": "Bundler",
+                "jsx": "react-jsx",
+                "strict": True,
+                "skipLibCheck": True,
+                "noEmit": True,
+            },
+            "include": ["src"],
+        })
+        write_fn(p("vite.config.ts"), "import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\n\n// OUMV is served by `tokensafe dev` (zero repo footprint); this config stays plain.\nexport default defineConfig({ plugins: [react()] });\n")
+        write_fn(p("index.html"), f"<!doctype html>\n<html lang=\"en\">\n  <head><meta charset=\"utf-8\" /><title>{project_name}</title></head>\n  <body><div id=\"root\"></div><script type=\"module\" src=\"/src/main.tsx\"></script></body>\n</html>\n")
+        write_fn(p("src/main.tsx"), """import { useState } from 'react';
+import { createRoot } from 'react-dom/client';
+
+export function App() {
+  const [count, setCount] = useState(0);
+  return (
+    <main>
+      <h1>__NAME__</h1>
+      <button onClick={() => setCount(count + 1)}>count: {count}</button>
+    </main>
+  );
+}
+
+createRoot(document.getElementById('root')!).render(<App />);
+""".replace("__NAME__", project_name))
+        write_fn(p("src/style.css"), "body { font-family: system-ui, sans-serif; margin: 2rem; }\n")
+
+    @classmethod
+    def _scaffold_vue_ui(cls, target_dir, project_name, subpath, write_fn, write_json_fn):
+        p = lambda rel: os.path.join(subpath, rel) if subpath else rel
+        slug = project_name.lower().replace(" ", "-")
+        write_json_fn(p("package.json"), {
+            "name": f"{slug}-web",
+            "private": True,
+            "type": "module",
+            "scripts": {"dev": "tokensafe dev", "build": "vite build"},
+            "dependencies": {"vue": "^3.4.0"},
+            "devDependencies": {
+                "@vitejs/plugin-vue": "^5.1.0",
+                "vite": "^5.4.0",
+                "tokensafe-ui": "^0.1.22",
+            },
+        })
+        write_fn(p("vite.config.ts"), "import { defineConfig } from 'vite';\nimport vue from '@vitejs/plugin-vue';\n\n// OUMV is served by `tokensafe dev` (zero repo footprint).\nexport default defineConfig({ plugins: [vue()] });\n")
+        write_fn(p("index.html"), f"<!doctype html>\n<html lang=\"en\">\n  <head><meta charset=\"utf-8\" /><title>{project_name}</title></head>\n  <body><div id=\"app\"></div><script type=\"module\" src=\"/src/main.ts\"></script></body>\n</html>\n")
+        write_fn(p("src/main.ts"), "import { createApp } from 'vue';\nimport App from './App.vue';\n\ncreateApp(App).mount('#app');\n")
+        write_fn(p("src/App.vue"), f"<template>\n  <main>\n    <h1>{project_name}</h1>\n    <button @click=\"count++\">count: {{{{ count }}}}</button>\n  </main>\n</template>\n\n<script setup lang=\"ts\">\nimport {{ ref }} from 'vue';\nconst count = ref(0);\n</script>\n")
+
+    @classmethod
+    def _scaffold_go_backend(cls, target_dir, project_name, subpath, write_fn):
+        p = lambda rel: os.path.join(subpath, rel) if subpath else rel
+        slug = project_name.lower().replace(" ", "-")
+        write_fn(p("go.mod"), f"module example.com/{slug}\n\ngo 1.21\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.10.0\n\tgithub.com/tokensafe-dev/tokensafe-backend/go v0.4.0\n)\n")
+        write_fn(p("main.go"), """package main
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	oumvgin "github.com/tokensafe-dev/tokensafe-backend/go/pkg/adapters/gin"
+)
+
+func main() {
+	r := gin.Default()
+	r.GET("/api/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	// OUMV: observe/understand/mutate/verify over POST /__oumv/rpc.
+	oumvgin.AutoMount(r)
+
+	_ = r.Run(":8080")
+}
+""")
+
+    @classmethod
+    def _generate_recipe_readme(cls, project_name: str, template: str) -> str:
+        return f"""# {project_name}
+
+Generated by `tokensafe create --template {template}`.
+
+## Run
+
+```bash
+npm install                     # root + frontend deps (if applicable)
+npm run dev                     # frontend through `tokensafe dev` (OUMV, zero repo footprint)
+npm run dev:api                 # backend through `tokensafe run-backend` / go run
+```
+
+## Working with an AI agent
+
+The adapters are already wired, so an agent works through the OUMV protocol:
+
+* frontend — `tokensafe dev` serves L0-L4 plus OCC source edits; nothing is added to git.
+* backend — FastAPI auto-mounts via `tokensafe run-backend`, Go via `oumvgin.AutoMount`.
+* `tokensafe inject --status` prints the live wiring plan; `tokensafe oumv doctor` shows readiness.
+"""
 
     @classmethod
     def _scaffold_backend(cls, target_dir: str, project_name: str, subpath: str, write_fn):
