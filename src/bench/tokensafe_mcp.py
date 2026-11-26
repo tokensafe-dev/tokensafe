@@ -13,7 +13,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 TOKENSAFE_BIN = Path(__file__).resolve().parents[2] / "bin" / "tokensafe"
 
@@ -64,6 +64,30 @@ class TokenSafeMcp:
             if body.get("id") != request_id:
                 continue
             return body
+
+    def tool_schemas(self, exclude: Optional[set] = None) -> List[Dict[str, Any]]:
+        """The tools the server actually advertises, in OpenAI function-calling shape.
+
+        The arm must show the model the *shipped* schema: its size and wording are part
+        of the product's cost (re-sent on every request), and a hand-written stand-in
+        both hides that cost and measures a configuration no user runs.
+        """
+        body = self._rpc("tools/list", {})
+        tools = (body.get("result") or {}).get("tools") or []
+        out: List[Dict[str, Any]] = []
+        for tool in tools:
+            name = str(tool.get("name") or "")
+            if not name or (exclude and name in exclude):
+                continue
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": str(tool.get("description") or ""),
+                    "parameters": tool.get("inputSchema") or {"type": "object", "properties": {}},
+                },
+            })
+        return out
 
     def call(self, name: str, arguments: Dict[str, Any]) -> Any:
         body = self._rpc("tools/call", {"name": name, "arguments": arguments})

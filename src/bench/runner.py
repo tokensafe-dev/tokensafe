@@ -24,13 +24,9 @@ def run_one(
     try:
         before = ws.oracle()
         client = DeepSeekClient(model=model, temperature=0.0)
-        if arm == "oumv":
-            system, tools = go_target.SYSTEM_OUMV, go_target.OUMV_TOOLS
-        elif arm == "tokensafe":
-            system, tools = go_target.SYSTEM_TOKENSAFE, go_target.TOKENSAFE_TOOLS
-        else:
-            system, tools = go_target.SYSTEM_BASELINE, go_target.BASE_TOOLS
-        registry = go_target.registry(ws, arm)
+        # one place decides prompt + schemas + dispatcher, so a schema the model sees is
+        # always a tool the dispatcher can run
+        system, tools, registry = go_target.build_arm(ws, arm)
 
         result = run_agent(
             client=client,

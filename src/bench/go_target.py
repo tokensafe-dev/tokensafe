@@ -256,6 +256,27 @@ class GoWorkspace:
             return {"error": payload["error"]}
         return payload.get("result")
 
+    def tokensafe_tool_schemas(self) -> Optional[List[Dict[str, Any]]]:
+        """The product's own `tools/list`, renamed to the arm's stable aliases.
+
+        `oumv` is excluded: it is a different product surface and would let this arm
+        call the protocol runtime the third arm is measuring.
+        """
+        if self._mcp is None:
+            self._mcp = tokensafe_mcp.open_client(self.dir)
+        if self._mcp is None:
+            return None
+        live = self._mcp.tool_schemas(exclude={"oumv"})
+        if not live:
+            return None
+        renamed = []
+        for tool in live:
+            clone = json.loads(json.dumps(tool))
+            real = clone["function"]["name"]
+            clone["function"]["name"] = TOKENSAFE_ALIASES.get(real, real)
+            renamed.append(clone)
+        return renamed
+
     def tokensafe(self, name: str, arguments: Dict[str, Any]) -> Any:
         if self._mcp is None:
             self._mcp = tokensafe_mcp.open_client(self.dir)
@@ -493,6 +514,45 @@ OUMV_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [
 ]
 
 
+# The product's tool names -> the arm's stable aliases (the prompts use these).
+TOKENSAFE_ALIASES = {
+    "smart_read_file": "ts_smart_read_file",
+    "scoped_search": "ts_scoped_search",
+    "apply_edits": "ts_apply_edits",
+    "repo_map": "ts_repo_map",
+    "session_context": "ts_session_context",
+    "run_helper": "ts_run_helper",
+}
+
+
+def build_arm(ws: GoWorkspace, arm: str) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+    """What one arm sees: prompt, tool schemas and dispatcher, decided in one place.
+
+    For the `tokensafe` arm the schemas come from the server's own `tools/list` (falling
+    back to the hand-written aliases only when the CLI is missing), so the measured arm
+    pays the schema cost a real session pays.
+    """
+    if arm == "tokensafe":
+        live = ws.tokensafe_tool_schemas()
+        tools = BASE_TOOLS + (live if live else TOKENSAFE_TOOLS[len(BASE_TOOLS):])
+        registry: Dict[str, Any] = {
+            "list_files": ws.list_files,
+            "read_file": ws.read_file,
+            "write_file": ws.write_file,
+            "search_files": ws.search_files,
+            "run_command": ws.run_command,
+        }
+        reverse = {alias: real for real, alias in TOKENSAFE_ALIASES.items()}
+        for tool in tools[len(BASE_TOOLS):]:
+            alias = tool["function"]["name"]
+            real = reverse.get(alias, alias)
+            registry[alias] = (lambda r: lambda **kwargs: ws.tokensafe(r, kwargs))(real)
+        return SYSTEM_TOKENSAFE, tools, registry
+    if arm == "oumv":
+        return SYSTEM_OUMV, OUMV_TOOLS, registry(ws, arm)
+    return SYSTEM_BASELINE, BASE_TOOLS, registry(ws, arm)
+
+
 def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
     tools: Dict[str, Any] = {
         "list_files": ws.list_files,
@@ -544,7 +604,7 @@ SYSTEM_TOKENSAFE = (
     "(1) ts_scoped_search for the status code or error text named in the repro — it returns file:line hits; "
     "(2) ts_smart_read_file with that path and the identifier from the hit as `symbol` — it returns the "
     "enclosing handler body (or a window around the hit) with line numbers, which is what you edit; "
-    "(3) ts_apply_edits with one hunk {target: the exact snippet, replacement: the fix} plus "
+    "(3) ts_apply_edits with edits=[{path, hunks: [{target: the exact snippet, replacement: the fix, start_line: the L from step 2}]}] plus "
     'verify="auto" (the project\'s own test command) — it edits and verifies in one call; '
     "(4) if verify fails, read the reported line and repeat (2)-(3). "
     "ts_repo_map is for an unfamiliar repository; skip it when the repro already names the endpoint. "
