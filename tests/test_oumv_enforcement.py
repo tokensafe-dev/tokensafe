@@ -156,6 +156,28 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
             OUMVGateway.mark_oumv_used(self.test_dir)
             self.assertIsNone(get_oumv_read_edit_advisory(self.test_dir, tsx_path, session_id="s2"))
 
+    def test_edit_in_oumv_stack_never_auto_approves(self):
+        """An OUMV nudge must never ride on permissionDecision:"allow" for edits.
+
+        "allow" bypasses the host permission prompt, so an advisory would silently
+        auto-approve every edit inside a supported stack.
+        """
+        web_dir, _ = self._create_react_plus_node_monorepo()
+        tsx_path = os.path.join(web_dir, "src", "App.tsx")
+        with patch.dict(os.environ, {"TOKENSAFE_HOME": self.tmp_home, "TOKENSAFE_DATA_DIR": self.tmp_data}):
+            with patch("src.adapter_core.get_oumv_read_edit_advisory", return_value="[TokenSafe OUMV]: nudge"):
+                res = evaluate_cc_pre_tool_use(
+                    {
+                        "tool_name": "Edit",
+                        "tool_input": {"file_path": tsx_path, "old_string": "Save", "new_string": "Store"},
+                        "cwd": self.test_dir,
+                        "session_id": "s1",
+                    },
+                    agent="claude_code",
+                )
+        self.assertEqual(res, {})
+        self.assertNotIn("permissionDecision", str(res))
+
     def test_installer_ensures_tokensafe_ui_global_and_updates_rules(self):
         fake_npm = "/usr/local/bin/npm"
         calls = []

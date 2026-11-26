@@ -550,15 +550,14 @@ def evaluate_cc_pre_tool_use(payload: Dict[str, Any], agent: str) -> Dict[str, A
     tp = str(payload.get("transcript_path") or "")
     canon = canonical_tool_name(tool)
 
-    def _cc_decision(decision: str, reason: str, extra_ctx: str = "") -> Dict[str, Any]:
-        inner: Dict[str, Any] = {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": reason,
+    def _cc_decision(decision: str, reason: str) -> Dict[str, Any]:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision,
+                "permissionDecisionReason": reason,
+            }
         }
-        if extra_ctx:
-            inner["additionalContext"] = extra_ctx
-        return {"hookSpecificOutput": inner}
 
     # 1. Loop Detector Guard (all tools)
     try:
@@ -657,15 +656,9 @@ def evaluate_cc_pre_tool_use(payload: Dict[str, Any], agent: str) -> Dict[str, A
                     )
         except Exception:
             pass
-        oumv_note = get_oumv_read_edit_advisory(cwd, file_path, session_id)
-        if oumv_note:
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "additionalContext": oumv_note,
-                }
-            }
+        # No OUMV advisory on edit: PreToolUse could only deliver it by returning an
+        # explicit permissionDecision, and "allow" auto-approves the edit (bypassing the
+        # user's permission prompt). The read branch already delivers the same nudge.
         return {}
 
     if canon == "read":
