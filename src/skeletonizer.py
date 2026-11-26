@@ -119,6 +119,12 @@ class BraceLexer:
 class Skeletonizer:
     """Generates structural AST skeletons without LLMs with incremental mtime caching."""
 
+    # Below this size a skeleton costs MORE than it saves: the caller asked for the
+    # file, gets only signatures, and has to spend a second call to read the body it
+    # needed — measured in the OUMV agent matrix (a 155-line Go app: 727-char skeleton
+    # + 3,209-char re-read vs 3,200-char raw read in one call). Above it, folding wins.
+    MIN_SKELETON_LINES = 200
+
     # Design-token selectors matched on word boundaries so class names like
     # `.html-widget` or identifiers like `innerHTML` no longer masquerade as tokens.
     TOKEN_SELECTOR_REGEX = re.compile(r'(?<![\w.#-])(?::root|@theme|html|body)(?![\w-])')
@@ -782,7 +788,7 @@ class Skeletonizer:
             return None, 0, 0
 
         lines_count = len(code.splitlines())
-        if lines_count < 150:
+        if lines_count < cls.MIN_SKELETON_LINES:
             return None, 0, 0
 
         ext = os.path.splitext(original_path)[1]
@@ -822,10 +828,10 @@ class Skeletonizer:
         else:
             header_comment = (
                 f"// [TOCP AST Skeleton: {lines_count} lines folded into API signatures]\n"
-                f"// [To inspect implementation of a specific method, call read_file with StartLine/EndLine]\n\n"
+                f"// [For one symbol's body call smart_read_file(symbol=...); for a range call smart_read_file(start_line=, end_line=)]\n\n"
             ) if ext != ".py" else (
                 f"# [TOCP AST Skeleton: {lines_count} lines folded into API signatures]\n"
-                f"# [To inspect implementation of a specific method, call read_file with StartLine/EndLine]\n\n"
+                f"# [For one symbol's body call smart_read_file(symbol=...); for a range call smart_read_file(start_line=, end_line=)]\n\n"
             )
 
         full_content = header_comment + (prefetch_block + "\n" if prefetch_block else "") + skeleton_content

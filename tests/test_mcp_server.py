@@ -214,6 +214,55 @@ class TestMCPServer(unittest.TestCase):
         self.assertEqual(resp["id"], 1)
         self.assertFalse(resp["result"].get("isError", False))
 
+    def test_inline_verify_gets_its_own_timeout_budget(self):
+        """The edit is on disk before verify runs: cutting the call at the 8s transport
+        default loses the verdict and reports 'could not complete' about work that did."""
+        from src.mcp_server import _tool_timeout, MCP_TOOL_TIMEOUT
+        self.assertEqual(_tool_timeout("smart_read_file", {}), MCP_TOOL_TIMEOUT)
+        self.assertGreater(_tool_timeout("apply_edits", {"verify": "auto"}), MCP_TOOL_TIMEOUT)
+        self.assertGreater(_tool_timeout("apply_edits", {"verify": "go test", "verify_timeout_sec": 60}), 60)
+        self.assertLessEqual(_tool_timeout("apply_edits", {"verify": "x", "verify_timeout_sec": 900}), 180.0)
+        self.assertEqual(_tool_timeout("apply_edits", {"edits": []}), MCP_TOOL_TIMEOUT)
+
+    def test_small_file_is_returned_raw_not_skeletonized(self):
+        """A skeleton below the crossover costs a second call: the caller asked for the
+        file, got signatures, and re-read the body. Measured on a 155-line Go app."""
+        import os
+        import tempfile
+        import uuid
+        from src.session_context import session_scope
+        from src.skeletonizer import Skeletonizer
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_db = os.environ.get("TOKENSAFE_DB_PATH")
+            old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+            os.environ["TOKENSAFE_DATA_DIR"] = tmpdir
+            os.environ["TOKENSAFE_DB_PATH"] = os.path.join(tmpdir, "metrics.db")
+            try:
+                small = os.path.join(tmpdir, "small.py")
+                body = "".join(f"    value_{i} = {i}\n" for i in range(Skeletonizer.MIN_SKELETON_LINES - 40))
+                with open(small, "w", encoding="utf-8") as f:
+                    f.write(f"def handler():\n{body}    return value_0\n")
+                big = os.path.join(tmpdir, "big.py")
+                with open(big, "w", encoding="utf-8") as f:
+                    f.write(f"def handler():\n{body}\n{body}\n    return value_0\n")
+                with session_scope(root=tmpdir, session_id=f"test:smallfile:{uuid.uuid4().hex[:8]}"):
+                    res_small = handle_tool_call("smart_read_file", {"path": small})
+                    res_big = handle_tool_call("smart_read_file", {"path": big})
+                txt_small = res_small["content"][0]["text"]
+                txt_big = res_big["content"][0]["text"]
+                self.assertNotIn("AST Skeleton", txt_small)
+                self.assertIn("value_7 = 7", txt_small)
+                self.assertIn("AST Skeleton", txt_big)
+            finally:
+                if old_db is None:
+                    os.environ.pop("TOKENSAFE_DB_PATH", None)
+                else:
+                    os.environ["TOKENSAFE_DB_PATH"] = old_db
+                if old_data is None:
+                    os.environ.pop("TOKENSAFE_DATA_DIR", None)
+                else:
+                    os.environ["TOKENSAFE_DATA_DIR"] = old_data
+
     def test_smart_read_file_symbol_inside_closure_returns_enclosing_body(self):
         """A `symbol` that is not a declaration must not yield a folded whole-file
         skeleton claiming "Full body": the caller cannot edit from it and re-reads
