@@ -137,6 +137,8 @@ def _print_help():
     print("  logout / unlink                Unlink this device and remove local license")
     print("  sync                           Sync telemetry with the cloud backend")
     print("  providers / proxy / mcp        Providers info / proxy server / MCP stdio server")
+    print("  agent [--model M] [-C dir] <prompt>   One agent turn in this workspace (streaming tool use)")
+    print("  acp                            ACP agent server over stdio (Zed, JetBrains, Neovim, Emacs)")
     print("  --version                      Print version and exit")
 
 
@@ -1129,6 +1131,91 @@ def main(argv: Optional[List[str]] = None):
         else:
             from src.mcp_server import run_mcp_server
             run_mcp_server()
+
+    elif command in ("acp",):
+        from src.acp.server import run_acp_server
+        run_acp_server()
+
+    elif command in ("agent", "run-agent", "run_agent"):
+        opts = {"model": "", "provider": "", "base_url": "", "root": "", "max_steps": 16, "budget": 1.0}
+        prompt_parts: List[str] = []
+        index = 1
+        while index < len(args):
+            arg = args[index]
+            if arg in ("--model", "-m") and index + 1 < len(args):
+                opts["model"] = args[index + 1]
+                index += 2
+            elif arg == "--provider" and index + 1 < len(args):
+                opts["provider"] = args[index + 1]
+                index += 2
+            elif arg in ("--base-url", "--base_url") and index + 1 < len(args):
+                opts["base_url"] = args[index + 1]
+                index += 2
+            elif arg in ("--root", "-C") and index + 1 < len(args):
+                opts["root"] = args[index + 1]
+                index += 2
+            elif arg == "--max-steps" and index + 1 < len(args):
+                try:
+                    opts["max_steps"] = int(args[index + 1])
+                except ValueError:
+                    pass
+                index += 2
+            elif arg == "--budget" and index + 1 < len(args):
+                try:
+                    opts["budget"] = float(args[index + 1])
+                except ValueError:
+                    pass
+                index += 2
+            else:
+                prompt_parts.append(arg)
+                index += 1
+        prompt = " ".join(prompt_parts).strip()
+        if not prompt:
+            print("Usage: tokensafe agent [--model M] [--provider P] [--base-url U] [-C dir] "
+                  "[--max-steps N] [--budget USD] <prompt>")
+            sys.exit(1)
+        from src.agent.loop import AgentConfig, AgentLoop
+        from src.agent.providers import ProviderError
+        import json as _json
+
+        def _sink(event):
+            kind = event.get("type")
+            if kind == "text":
+                sys.stdout.write(event.get("text") or "")
+                sys.stdout.flush()
+            elif kind == "tool_call":
+                rendered = _json.dumps(event.get("arguments"), ensure_ascii=False)[:160]
+                print(f"\n\033[2m→ {event.get('name')} {rendered}\033[0m")
+            elif kind == "tool_result":
+                state = "ok" if event.get("ok") else "error"
+                print(f"\033[2m← {event.get('name')}: {state} ({len(event.get('text') or '')} chars)\033[0m")
+            elif kind == "compaction":
+                print(f"\033[2m[context compacted: {event.get('before')} → {event.get('after')} tokens]\033[0m")
+
+        loop = AgentLoop(
+            root=opts["root"] or None,
+            session_id="cli:agent",
+            config=AgentConfig(
+                model=opts["model"],
+                provider=opts["provider"],
+                base_url=opts["base_url"],
+                max_steps=opts["max_steps"],
+                budget_usd=opts["budget"],
+            ),
+            event_sink=_sink,
+        )
+        try:
+            result = loop.run(prompt)
+        except ProviderError as exc:
+            print(f"\n\033[31mError:\033[0m {exc}")
+            sys.exit(2)
+        usage = result.usage
+        priced = "" if usage.get("priced") else " · unpriced model"
+        print(
+            f"\n\033[2m[{result.stop_reason} · {result.steps} step(s) · "
+            f"{usage.get('input_tokens', 0)} in / {usage.get('output_tokens', 0)} out · "
+            f"${usage.get('usd', 0.0):.4f}{priced}]\033[0m"
+        )
 
     elif command in ("mcp-proxy", "mcp_proxy"):
         target_args = list(args[1:])
