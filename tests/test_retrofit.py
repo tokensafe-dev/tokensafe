@@ -44,6 +44,47 @@ class TestRetrofitEngine(unittest.TestCase):
         self.assertIn("zustand", stack["frontend"]["state_managers"])
         self.assertIsNone(stack["backend"])
 
+    def test_backend_precedence_prefers_supported_stack(self):
+        """A supported Go/Python backend must outrank an unsupported Node one."""
+        os.makedirs(os.path.join(self.test_dir, "api"))
+        os.makedirs(os.path.join(self.test_dir, "python"))
+        with open(os.path.join(self.test_dir, "api", "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "api", "dependencies": {"express": "^4.19.0"}}, f)
+
+        stack = detect_project_stack(self.test_dir)
+        self.assertEqual(stack["backend"]["provider"], "node")
+        self.assertFalse(stack["backend"]["oumv_supported"])
+
+        with open(os.path.join(self.test_dir, "python", "pyproject.toml"), "w", encoding="utf-8") as f:
+            f.write("[project]\ndependencies = ['fastapi']\n")
+        stack = detect_project_stack(self.test_dir)
+        self.assertEqual(stack["backend"]["provider"], "fastapi")
+        self.assertTrue(stack["backend"]["oumv_supported"])
+        # The same manifest is reachable from the root scan and monorepo discovery: one entry.
+        python_pkgs = [p for p in stack["packages"] if p["path"] == "python"]
+        self.assertEqual(len(python_pkgs), 1, stack["packages"])
+
+        with open(os.path.join(self.test_dir, "go.mod"), "w", encoding="utf-8") as f:
+            f.write("module app\n\ngo 1.22\n")
+        stack = detect_project_stack(self.test_dir)
+        self.assertEqual(stack["backend"]["provider"], "go")
+
+    def test_root_frontend_scope_ignores_tooling_scripts(self):
+        """Root-level .ts tooling must not be nudged as OUMV-observable frontend."""
+        from src.retrofit import is_path_in_supported_oumv_scope
+        with open(os.path.join(self.test_dir, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"dependencies": {"react": "^18.2.0"}, "devDependencies": {"vite": "^5.0.0"}}, f)
+        os.makedirs(os.path.join(self.test_dir, "scripts"))
+        os.makedirs(os.path.join(self.test_dir, "src", "hooks"))
+        build_ts = os.path.join(self.test_dir, "scripts", "build.ts")
+        hook_ts = os.path.join(self.test_dir, "src", "hooks", "useAuth.ts")
+        for p in (build_ts, hook_ts):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("export const x = 1;\n")
+
+        self.assertIsNone(is_path_in_supported_oumv_scope(self.test_dir, build_ts))
+        self.assertIsNotNone(is_path_in_supported_oumv_scope(self.test_dir, hook_ts))
+
     def test_detect_go_gin_project(self):
         go_mod_content = """module myapp
 

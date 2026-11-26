@@ -9,6 +9,13 @@ import json
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
+# Top-level directories that hold frontend source in a repo-root app (as opposed to
+# scripts/, tooling/ and configs, which are .ts/.js but not OUMV-observable).
+_FRONTEND_SOURCE_DIRS = frozenset({
+    "src", "app", "pages", "components", "hooks", "lib", "features",
+    "views", "stores", "store", "utils", "layouts", "router", "routes", "api",
+})
+
 
 def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[str]]:
     """Inspects a single package.json for frontend or Node.js backend stack."""
@@ -125,16 +132,29 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
         "packages": [],
     }
 
+    def _add_detected(rel_path: str) -> None:
+        if rel_path not in stack["detected_files"]:
+            stack["detected_files"].append(rel_path)
+
+    def _add_package(entry: Dict[str, Any]) -> None:
+        """Adds a package once: the same manifest is reachable from the root scan
+        (e.g. python/pyproject.toml) and from monorepo discovery."""
+        key = (entry.get("role"), entry.get("path"), entry.get("framework"))
+        for existing in stack["packages"]:
+            if (existing.get("role"), existing.get("path"), existing.get("framework")) == key:
+                return
+        stack["packages"].append(entry)
+
     def _scan_dir(target_dir: str):
         rel = os.path.relpath(target_dir, workspace_dir) or "."
         pkg_json_path = os.path.join(target_dir, "package.json")
         if os.path.isfile(pkg_json_path):
-            stack["detected_files"].append(os.path.relpath(pkg_json_path, workspace_dir))
+            _add_detected(os.path.relpath(pkg_json_path, workspace_dir))
             fe_info, be_info, _ = _detect_package_json_entry(pkg_json_path, rel_dir=rel)
             if fe_info:
                 if not stack["frontend"]:
                     stack["frontend"] = fe_info
-                stack["packages"].append({
+                _add_package({
                     "role": "frontend",
                     "path": rel,
                     "framework": fe_info["framework"],
@@ -147,7 +167,7 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
             if be_info:
                 if not stack["backend"]:
                     stack["backend"] = be_info
-                stack["packages"].append({
+                _add_package({
                     "role": "backend",
                     "path": rel,
                     "framework": be_info["framework"],
@@ -163,8 +183,7 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
             go_mod_path = os.path.join(target_dir, "go", "go.mod")
         if os.path.isfile(go_mod_path):
             rel_mod = os.path.relpath(go_mod_path, workspace_dir)
-            if rel_mod not in stack["detected_files"]:
-                stack["detected_files"].append(rel_mod)
+            _add_detected(rel_mod)
             if "go" not in stack["package_managers"]:
                 stack["package_managers"].append("go")
             framework = "net/http"
@@ -190,7 +209,7 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
             }
             if not stack["backend"] or not stack["backend"].get("oumv_supported", False):
                 stack["backend"] = go_entry
-            stack["packages"].append({
+            _add_package({
                 "role": "backend",
                 "path": go_entry["root"],
                 "framework": framework,
@@ -210,8 +229,7 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
         for pf in py_files:
             if os.path.isfile(pf):
                 rel_pf = os.path.relpath(pf, workspace_dir)
-                if rel_pf not in stack["detected_files"]:
-                    stack["detected_files"].append(rel_pf)
+                _add_detected(rel_pf)
                 if "pip/python" not in stack["package_managers"]:
                     stack["package_managers"].append("pip/python")
                 try:
@@ -236,9 +254,11 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
                         "oumv_supported": supported,
                         "status": "ready" if supported else "planned",
                     }
-                    if not stack["backend"]:
+                    # A supported Python backend outranks an unsupported Node one,
+                    # mirroring the Go precedence rule above.
+                    if not stack["backend"] or not stack["backend"].get("oumv_supported", False):
                         stack["backend"] = py_entry
-                    stack["packages"].append({
+                    _add_package({
                         "role": "backend",
                         "path": py_entry["root"],
                         "framework": framework,
@@ -253,7 +273,7 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
 
     _scan_dir(workspace_dir)
     if os.path.isfile(os.path.join(workspace_dir, "pnpm-workspace.yaml")):
-        stack["detected_files"].append("pnpm-workspace.yaml")
+        _add_detected("pnpm-workspace.yaml")
 
     for lock, pm in [("pnpm-lock.yaml", "pnpm"), ("bun.lockb", "bun"), ("bun.lock", "bun"), ("yarn.lock", "yarn"), ("package-lock.json", "npm")]:
         if os.path.isfile(os.path.join(workspace_dir, lock)):
@@ -715,6 +735,7 @@ def format_oumv_workspace_brief(workspace_dir: str, include_live: bool = False) 
 
 def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str) -> Optional[Dict[str, Any]]:
     """Returns the supported stack entry owning `file_path`, or None if unsupported (e.g. backend/node)."""
+
     if not workspace_dir or not file_path:
         return None
     ws_abs = os.path.realpath(os.path.abspath(workspace_dir))
@@ -738,8 +759,18 @@ def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str) -> Optio
                 return None
             ext = os.path.splitext(f_abs)[1].lower()
             role = pkg.get("role")
-            if role == "frontend" and ext in (".tsx", ".jsx", ".vue", ".ts", ".js"):
-                return pkg
+            if role == "frontend":
+                if ext in (".tsx", ".jsx", ".vue"):
+                    return pkg
+                if ext in (".ts", ".js"):
+                    # A repository-root frontend also owns scripts/, configs and
+                    # tooling in .ts/.js; only nudge files under source-like dirs.
+                    if p_rel != ".":
+                        return pkg
+                    top = rel.split("/", 1)[0].lower()
+                    if "/" in rel and top in _FRONTEND_SOURCE_DIRS:
+                        return pkg
+                return None
             if role == "backend" and ext in (".go", ".py"):
                 return pkg
             return None
