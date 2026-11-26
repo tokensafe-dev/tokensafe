@@ -106,6 +106,7 @@ def _print_help():
     print("  create <name> [--template ...] Greenfield project scaffolder (tokensafe-ui + tokensafe-backend)")
     print("  init [--template ...]          Initialize TokenSafe stack in current directory")
     print("  stats / markdown / html        Savings analytics (terminal / .md report / dashboard)")
+    print("  savings [--json]               Canonical totals + last event (cite these numbers, never guess)")
     print("  status                         One-screen health check: hooks, weekly savings, tier, sync")
     print("  budget [--transcript=...]      Context Window Budget HUD & Context Quality Score (Grade S-F)")
     print("  compact <transcript.jsonl>     Fold conversation transcript into Consolidated State Ledger")
@@ -336,6 +337,27 @@ def main(argv: Optional[List[str]] = None):
         print(f"  Tokens saved:     \033[32m\033[1m+{orig_t - fold_t:,} tokens\033[0m\n")
         print(ledger)
         print()
+
+    elif command in ("savings", "saved"):
+        # Canonical, machine-readable savings numbers. Agents must cite this
+        # command instead of guessing (see the footer rule in AGENTS.md).
+        from src.savings import build_savings_report
+
+        report = build_savings_report()
+        if "--json" in args:
+            import json as _json
+            print(_json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            last = report.get("last_event") or {}
+            print("\n\033[1m\033[36m⚡ TOKENSAFE SAVINGS (canonical) ⚡\033[0m\n")
+            print(f"  Data dir:            {report['data_dir']}")
+            print(f"  Events / sessions:   {report['total_events']} / {report['sessions']}")
+            print(f"  Saved (live):        {report['saved_tokens_live']:,} tokens")
+            print(f"  Saved (pruned+sync): {report['pruned_synced_saved_tokens']:,} tokens")
+            print(f"  Cumulative:          {report['cumulative_saved_tokens']:,} tokens (≈${report['usd_saved_approx']:.2f})")
+            if last:
+                print(f"  Last event:          {last.get('event_type')} — {last.get('saved_tokens'):,} tokens at {last.get('timestamp')}")
+            print()
 
     elif command in ("stats", "dashboard"):
         tracker = MetricsTracker()

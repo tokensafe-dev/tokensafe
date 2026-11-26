@@ -329,6 +329,46 @@ class TestTelemetrySync(unittest.TestCase):
         # A replay of the same cumulative total must produce the same key (server-side dedupe).
         self.assertEqual(TelemetrySync.get_state()["last_synced_rollup_tokens"], 1600)
 
+    @patch("urllib.request.urlopen")
+    def test_rollup_watermark_survives_sync_state_loss(self, mock_urlopen):
+        """Deleting sync_state.json must not replay the whole lifetime rollup.
+
+        The state file is easy to lose; the metrics DB is not. Without the durable
+        copy the client re-emits its entire lifetime mass and the server (which has
+        no way to tell it apart from real usage) counts it again.
+        """
+        sent_events = []
+
+        def fake_urlopen(req, *args, **kwargs):
+            payload = json.loads(req.data.decode("utf-8"))
+            sent_events.extend(payload.get("events", []))
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = json.dumps({"processed": len(payload.get("events", []))}).encode("utf-8")
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        mock_urlopen.side_effect = fake_urlopen
+
+        tracker = MetricsTracker(db_path=ts_mod.METRICS_DB_PATH)
+        for i in range(3):
+            tracker.record_event(f"w_{i}", "PROMPT", 1000, 200)
+        tracker.prune(max_events=1, vacuum=False)
+
+        res1 = TelemetrySync.sync(cloud_url="http://mock-cloud.internal", license_key="TS1.mock.key", email="t@d.com")
+        self.assertTrue(res1["success"])
+        self.assertEqual(len([e for e in sent_events if e["event_type"] == "ROLLUP_LIFETIME"]), 1)
+
+        # Simulate the loss of the JSON cursor (fresh data dir, manual cleanup).
+        os.remove(ts_mod.SYNC_STATE_PATH)
+        self.assertEqual(TelemetrySync.get_state()["last_synced_rollup_tokens"], 1600)
+
+        sent_events.clear()
+        res2 = TelemetrySync.sync(cloud_url="http://mock-cloud.internal", license_key="TS1.mock.key", email="t@d.com")
+        self.assertTrue(res2["success"])
+        self.assertEqual([e["event_type"] for e in sent_events if e["event_type"] == "ROLLUP_LIFETIME"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

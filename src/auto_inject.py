@@ -446,7 +446,7 @@ def plan(workspace: str) -> Dict[str, Any]:
                 "framework": "fastapi",
                 "writes_repo": False,
                 "description": "sitecustomize patches uvicorn; mount_tokensafe(app) runs on import",
-                "install": entry.get("technology", {}).get("package", {}).get("install", "pip install tokensafe-python"),
+                "install": entry.get("technology", {}).get("package", {}).get("install", 'pip install "tokensafe-backend-python @ git+https://github.com/tokensafe-dev/tokensafe-backend.git#subdirectory=python"'),
                 "run": python_run_hint(workspace),
             })
         elif provider == "go":

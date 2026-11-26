@@ -69,7 +69,7 @@ def _activation(workspace: str, stack: Dict[str, Any]) -> List[str]:
         if profile == "frontend":
             hints.append("activate frontend: run `tokensafe dev` (installs nothing into the repo)")
         elif item.get("provider") == "fastapi":
-            hints.append("activate backend: `pip install tokensafe-python` then run the server via `tokensafe run-backend ...`")
+            hints.append('activate backend: `pip install "tokensafe-backend-python @ git+https://github.com/tokensafe-dev/tokensafe-backend.git#subdirectory=python"` then run the server via `tokensafe run-backend ...`')
         elif item.get("provider") == "go":
             hints.append(
                 "activate backend: `go get github.com/tokensafe-dev/tokensafe-backend/go@v0.4.3` "

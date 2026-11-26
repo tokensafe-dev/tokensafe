@@ -67,6 +67,47 @@ def _sync_state_path() -> str:
     return os.path.join(_data_dir(), "sync_state.json")
 
 
+_ROLLUP_WATERMARK_KEYS = (
+    "last_synced_rollup_tokens",
+    "last_synced_rollup_orig",
+    "last_synced_rollup_usd",
+)
+
+
+def _sync_meta_read(db_path: str, key: str) -> Optional[str]:
+    """Reads a durable sync marker from the metrics DB (survives state-file loss)."""
+    try:
+        with closing(sqlite3.connect(db_path, timeout=5.0)) as conn:
+            conn.execute("PRAGMA busy_timeout=3000")
+            row = conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,)).fetchone()
+            return str(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
+def _sync_meta_write(db_path: str, values: Dict[str, Any]) -> None:
+    """Persists durable sync markers next to the events they describe (best effort)."""
+    if not values:
+        return
+    for _attempt in range(2):
+        try:
+            with closing(sqlite3.connect(db_path, timeout=5.0)) as conn:
+                # The sync loop holds a read connection open while paging.
+                conn.execute("PRAGMA busy_timeout=3000")
+                conn.execute("CREATE TABLE IF NOT EXISTS sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                conn.executemany(
+                    "INSERT INTO sync_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [(k, str(v)) for k, v in values.items()],
+                )
+                conn.commit()
+            return
+        except sqlite3.OperationalError:
+            time.sleep(0.2)
+        except Exception:
+            return
+
+
 def _sync_lock_path() -> str:
     if SYNC_LOCK_PATH != _DEFAULT_SYNC_LOCK_PATH:
         return SYNC_LOCK_PATH
@@ -93,31 +134,52 @@ class TelemetrySync:
 
     @classmethod
     def get_state(cls) -> Dict[str, Any]:
-        """Loads sync cursor state from persistent JSON."""
+        """Loads sync cursor state, overlaying durable watermarks from the metrics DB.
+
+        sync_state.json is easy to lose (fresh data dir, manual cleanup), and losing it
+        makes the client replay its whole lifetime rollup, which the server cannot tell
+        apart from real usage. The metrics DB survives, so the larger watermark wins.
+        """
         state_path = _sync_state_path()
-        if not os.path.exists(state_path):
-            return {
-                "last_synced_event_id": 0,
-                "last_synced_at": 0,
-                "total_synced_events": 0,
-                "lifetime_rollup_synced": False
-            }
-        try:
-            with open(state_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {
-                "last_synced_event_id": 0,
-                "last_synced_at": 0,
-                "total_synced_events": 0,
-                "lifetime_rollup_synced": False
-            }
-        except Exception:
-            return {
-                "last_synced_event_id": 0,
-                "last_synced_at": 0,
-                "total_synced_events": 0,
-                "lifetime_rollup_synced": False
-            }
+        state: Dict[str, Any] = {
+            "last_synced_event_id": 0,
+            "last_synced_at": 0,
+            "total_synced_events": 0,
+            "lifetime_rollup_synced": False,
+        }
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    state.update(loaded)
+            except Exception:
+                pass
+
+        db_path = _metrics_db_path()
+        durable_rollup = False
+        for key in _ROLLUP_WATERMARK_KEYS:
+            raw = _sync_meta_read(db_path, key)
+            if raw is None:
+                continue
+            try:
+                durable = float(raw) if key.endswith("_usd") else int(float(raw))
+            except (TypeError, ValueError):
+                continue
+            if durable > 0:
+                durable_rollup = True
+            current = state.get(key)
+            try:
+                current_val: Optional[float] = (
+                    float(current) if key.endswith("_usd") else int(float(current))
+                ) if current is not None else None
+            except (TypeError, ValueError):
+                current_val = None
+            if current_val is None or durable > current_val:
+                state[key] = durable
+        if durable_rollup:
+            state["lifetime_rollup_synced"] = True
+        return state
 
     @classmethod
     def save_state(cls, state: Dict[str, Any]):
@@ -249,7 +311,7 @@ class TelemetrySync:
             current_last_id = last_id
             headers = {
                 "Content-Type": "application/json",
-                "User-Agent": "TokenSafe-Sync/4.6.3"
+                "User-Agent": "TokenSafe-Sync/4.6.4"
             }
             if active_key:
                 headers["Authorization"] = f"Bearer {active_key}"
@@ -472,6 +534,12 @@ class TelemetrySync:
                                         last_synced_rollup = current_rollup_tokens
                                         last_synced_rollup_orig = current_rollup_orig
                                         last_synced_rollup_usd = current_rollup_usd
+                                        # Durable copy: survives deletion/corruption of sync_state.json.
+                                        _sync_meta_write(db_path, {
+                                            "last_synced_rollup_tokens": last_synced_rollup,
+                                            "last_synced_rollup_orig": last_synced_rollup_orig,
+                                            "last_synced_rollup_usd": last_synced_rollup_usd,
+                                        })
                                 cls.save_state({
                                     "last_synced_event_id": current_last_id,
                                     "last_synced_at": int(time.time()),

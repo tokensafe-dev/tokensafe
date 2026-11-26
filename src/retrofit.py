@@ -475,7 +475,7 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "technology": {
                 "language": "python",
                 "framework": "fastapi",
-                "package": {"manager": "pip", "name": "tokensafe-python", "install": "pip install tokensafe-python"},
+                "package": {"manager": "pip", "name": "tokensafe-backend-python", "install": 'pip install "tokensafe-backend-python @ git+https://github.com/tokensafe-dev/tokensafe-backend.git#subdirectory=python"'},
             },
             "capabilities": [
                 {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
@@ -526,7 +526,7 @@ def _adapter_presence(workspace_dir: str, profile: str, provider: str, framework
                             return {"installed": True, "evidence": f"{req} declares tokensafe"}
             except Exception:
                 pass
-        return {"installed": False, "evidence": "tokensafe-python not importable (run: pip install tokensafe-python)"}
+        return {"installed": False, "evidence": 'tokensafe_python not importable (run: pip install "tokensafe-backend-python @ git+https://github.com/tokensafe-dev/tokensafe-backend.git#subdirectory=python")'}
 
     if provider == "go":
         for rel in ("go.mod", os.path.join("go", "go.mod")):

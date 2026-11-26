@@ -1,0 +1,6 @@
+# `package.json → files` includes hooks/ wholesale, and npm does not apply "!"
+# negations declared there. A nested .npmignore inside an included directory IS
+# honoured, so bytecode produced by a local test run never reaches the tarball.
+__pycache__/
+*.pyc
+*.pyo
