@@ -12,7 +12,7 @@ the recommended path and are not documented as a product surface.
 | Frontend | React 18/19 + Vite | JSON-RPC at `/__oumv/rpc` on the dev server (L0–L4, contracts, OCC edits) | `tokensafe dev` | **none** |
 | Frontend | Vue 3 + Vite | Same endpoint; DOM-level L0–L2 | `tokensafe dev` | **none** |
 | Backend | Python / FastAPI | `mount_tokensafe(app)` via `uvicorn` import hook | `tokensafe run-backend uvicorn ...` | **none** |
-| Backend | Go / Gin | `oumvgin.AutoMount(r)` | `tokensafe inject` | one line + one import, marker-delimited, revertible |
+| Backend | Go / Gin | `oumvgin.AutoMount(r)` | `tokensafe inject` | one line + one import (marker-delimited, revertible) **and** `go.mod`/`go.sum` dependency entries |
 | Backend | Go / Chi | `oumvchi.AutoMount(r)` | `tokensafe inject` | same |
 | Backend | Go / net/http | `stdhttp.NewServeMux(rt)` | generated project (`tokensafe create --template gin`) | adapter-owned mux |
 | Backend | Node.js / Express, Fastify, NestJS | — | not yet | — |
@@ -43,9 +43,10 @@ tokensafe create shop --template react-fastapi   # greenfield, already wired
 | `~/.tokensafe/inject/<hash>/` | Go entrypoint backup + manifest | outside the repo |
 | `<repo>/.tokensafe/oumv.json` | project config (permissions, adapters) | excluded via `.git/info/exclude` |
 | `<repo>/main.go` (Go only) | one `AutoMount()` line + import | **visible**, revertible |
+| `<repo>/go.mod`, `go.sum` (Go only) | `go get` + `go mod tidy` for the adapter module | **visible** (normal dependency commit) |
 
-The Go line is the only tracked edit, and it is unavoidable: an adapter must live inside
-the process. It is inserted between `// tokensafe:oumv:begin` / `// tokensafe:oumv:end`,
+The Go edits are the only tracked changes, and they are unavoidable: an adapter must live
+inside the process, and its module must be in the dependency graph. It is inserted between `// tokensafe:oumv:begin` / `// tokensafe:oumv:end`,
 validated with `go build ./...`, and `tokensafe inject --revert` restores the original
 bytes from the backup.
 
