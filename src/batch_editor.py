@@ -23,6 +23,7 @@ Key capabilities:
 import os
 import re
 import stat
+import sys
 import difflib
 import shlex
 import subprocess
@@ -345,6 +346,60 @@ def _apply_hunk_to_text(
     return new_content, None
 
 
+def detect_verify_command(base_dir: str, files: Optional[List[str]] = None) -> Optional[List[str]]:
+    """The project's own test command, for `apply_edits(verify="auto")`.
+
+    Only commands the project already declares are used — never a guess about which
+    files are tests — and only runner/flag shapes that `validate_verify_command`
+    accepts, so a resolved command can never come back blocked. Returning None is a normal
+    outcome: the caller then says "applied unverified" instead of inventing a verdict.
+
+    `files` (the paths being edited) narrows the run to the edited packages: an
+    unscoped `go test ./...` in a real module outlives the MCP tool timeout and can be
+    red on unrelated pre-existing failures, which would roll back a good edit.
+    """
+    def has(name: str) -> bool:
+        return os.path.exists(os.path.join(base_dir, name))
+
+    if has("go.mod"):
+        pkgs: List[str] = []
+        for f in files or []:
+            abs_f = os.path.abspath(os.path.join(base_dir, f))
+            rel = os.path.relpath(abs_f, base_dir).replace("\\", "/")
+            if rel.startswith(".."):
+                continue
+            pkg = os.path.dirname(rel) or "."
+            pkg = "." if pkg == "." else "./" + pkg
+            if pkg not in pkgs:
+                pkgs.append(pkg)
+        return ["go", "test"] + (pkgs or ["./..."])
+    if has("Cargo.toml"):
+        return ["cargo", "test", "--quiet"]
+    pkg = os.path.join(base_dir, "package.json")
+    if os.path.exists(pkg):
+        try:
+            import json as _json
+            with open(pkg, "r", encoding="utf-8") as f:
+                scripts = (_json.load(f) or {}).get("scripts") or {}
+            if isinstance(scripts, dict) and scripts.get("test"):
+                return ["npm", "test", "--silent"]
+        except (OSError, ValueError):
+            pass
+    py_files = []
+    for f in files or []:
+        if not str(f).endswith(".py"):
+            continue
+        rel = os.path.relpath(os.path.abspath(os.path.join(base_dir, f)), base_dir).replace("\\", "/")
+        if not rel.startswith(".."):
+            py_files.append(rel)
+    for marker in ("pytest.ini", "tox.ini", "pyproject.toml", "setup.cfg", "conftest.py"):
+        if has(marker):
+            return ["python3", "-m", "pytest", "-q"] + py_files
+    if os.path.isdir(os.path.join(base_dir, "tests")):
+        return ["python3", "-m", "pytest", "-q"] + py_files
+    return None
+
+
 def execute_batch_edits(
     edits: List[Dict[str, Any]],
     best_effort: bool = False,
@@ -384,20 +439,36 @@ def execute_batch_edits(
         }
 
     verified_argv: Optional[List[str]] = None
+    auto_verify_note = ""
     if verify:
-        verified_argv, verify_err, verify_check = validate_verify_command(str(verify), base_dir=real_base)
-        if verify_err or not verified_argv:
-            return {
-                "success": False,
-                "blocked": True,
-                "check_name": verify_check or "VERIFY_COMMAND_BLOCKED",
-                "error": verify_err or "Verification command blocked.",
-                "applied_count": 0,
-                "applied_files": [],
-                "failed_count": 0,
-                "failed_files": [],
-                "dry_run": dry_run,
-            }
+        # verify="auto" -> run the project's own declared test command. This is the
+        # tool's strongest convergence lever (edit + verdict in one call) and it was
+        # never used because agents had to type the command from the task text.
+        if str(verify).strip().lower() == "auto":
+            requested = [str(e.get("path") or "") for e in edits if isinstance(e, dict) and e.get("path")]
+            verified_argv = detect_verify_command(real_base, files=requested)
+            if verified_argv:
+                verify = " ".join(verified_argv)
+            else:
+                auto_verify_note = (
+                    "no declared test command found (go.mod / package.json scripts.test / "
+                    "pytest config / a tests/ directory)"
+                )
+                verify = ""
+        if verify:
+            verified_argv, verify_err, verify_check = validate_verify_command(str(verify), base_dir=real_base)
+            if verify_err or not verified_argv:
+                return {
+                    "success": False,
+                    "blocked": True,
+                    "check_name": verify_check or "VERIFY_COMMAND_BLOCKED",
+                    "error": verify_err or "Verification command blocked.",
+                    "applied_count": 0,
+                    "applied_files": [],
+                    "failed_count": 0,
+                    "failed_files": [],
+                    "dry_run": dry_run,
+                }
 
     # Pre-validation & secret check
     prepared_files: Dict[str, Dict[str, Any]] = {}
@@ -756,6 +827,10 @@ def execute_batch_edits(
             }
             result["success"] = False
             _rollback_after_verify_failure()
+
+    if auto_verify_note and applied_files_info and not dry_run:
+        # Asked to verify, could not: say so plainly instead of reporting success as a pass.
+        result["verify"] = {"command": "auto", "passed": None, "note": auto_verify_note}
 
     if best_effort and applied_files_info:
         result.setdefault("edits_kept", True)

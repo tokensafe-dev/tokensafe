@@ -768,7 +768,7 @@ TOOLS = [
                 },
                 'best_effort': {'type': 'boolean'},
                 'dry_run': {'type': 'boolean'},
-                'verify': {'type': 'string', 'description': 'Shell command to run after edits (e.g. pytest, npm test)'},
+                'verify': {'type': 'string', 'description': "Command run after the edit with its verdict returned in the same call; 'auto' uses the project's own declared test command (go test / npm test / pytest)"},
                 'verify_timeout_sec': {'type': 'integer'},
                 'cwd': {'type': 'string'},
             },
@@ -1868,12 +1868,18 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 prefetch_block, _ = DependencyPrefetcher.prefetch_for_file(path)
             slice_header = f"// [TOCP Raw Slice: lines {range_label} of {os.path.basename(path)}]\n"
             delivered = (prefetch_block or "") + slice_header + (content or "")
+            # A requested line range is a read, not an optimization: the caller already
+            # knew what it wanted and any agent does the same with offset/limit. Charging
+            # the whole file as the counterfactual credited 257k tokens to a 30-line read
+            # of a 29k-line file (measured in the lifetime aggregate) and hid regressions.
+            delivered_tokens = count_tokens(delivered)
             tracker.record_event(
                 session_id=_mcp_session_id(),
                 event_type="RAW_SLICE",
-                original_tokens=max(200, st.st_size // 4),
-                optimized_tokens=count_tokens(delivered),
-                details={"file": os.path.basename(path), "lines": range_label, "symbol": sym_clean[:120]}
+                original_tokens=delivered_tokens,
+                optimized_tokens=delivered_tokens,
+                details={"file": os.path.basename(path), "lines": range_label,
+                         "symbol": sym_clean[:120], "counterfactual": "same_range"}
             )
             return {"content": [{"type": "text", "text": delivered}]}
 
@@ -3335,6 +3341,25 @@ def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 
     return new_res
 
 
+def _tool_timeout(tool_name: str, tool_args: dict) -> float:
+    """The tool's own declared budget wins over the transport's default.
+
+    `apply_edits` can run an inline verify command, and the edit is already on disk by
+    then: cutting the call at the default 8 s both loses the verdict and tells the
+    caller "could not complete" about work that did complete. Ask for the declared
+    verify budget plus a margin, capped so a hung suite cannot wedge the server.
+    """
+    if tool_name == "apply_edits":
+        has_verify = bool(tool_args.get("verify"))
+        try:
+            declared = int(tool_args.get("verify_timeout_sec") or (30 if has_verify else 0))
+        except (TypeError, ValueError):
+            declared = 30 if has_verify else 0
+        if declared > 0:
+            return min(max(MCP_TOOL_TIMEOUT, declared + 5.0), 180.0)
+    return MCP_TOOL_TIMEOUT
+
+
 def _execute_with_timeout(tool_name: str, tool_args: dict, timeout: float = MCP_TOOL_TIMEOUT) -> dict:
     """Runs handle_tool_call inside a daemon thread with hard timeout so stdio MCP never freezes."""
     box = {"result": None, "error": None}
@@ -3463,7 +3488,7 @@ def run_mcp_server():
                     # arguments as a malformed JSON string — repair before failing.
                     from src.json_repair import parse_tool_arguments
                     tool_args = parse_tool_arguments(raw_tool_args) or {}
-                raw_res = _execute_with_timeout(tool_name, tool_args)
+                raw_res = _execute_with_timeout(tool_name, tool_args, timeout=_tool_timeout(tool_name, tool_args))
                 redacted = _redact_result_secrets(raw_res)
                 response["result"] = _cap_mcp_output_size(redacted, tool_name=tool_name)
             except Exception as e:

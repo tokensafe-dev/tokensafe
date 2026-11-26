@@ -150,6 +150,29 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertTrue(res["verify"]["passed"])
         self.assertEqual(res["verify"]["exit_code"], 0)
 
+    def test_verify_auto_uses_the_projects_declared_command(self):
+        """verify='auto' is the convergence lever: edit + verdict in one call, without
+        the agent having to retype the test command from the task description."""
+        from src.batch_editor import detect_verify_command
+        with open(os.path.join(self.tmp_dir, "Makefile"), "w", encoding="utf-8") as f:
+            f.write("test:\n\t@true\n")
+        self.assertIsNone(detect_verify_command(self.tmp_dir),
+                          "make/npm-style undeclared runners must not be auto-resolved")
+
+        os.remove(os.path.join(self.tmp_dir, "Makefile"))
+        with open(os.path.join(self.tmp_dir, "pyproject.toml"), "w", encoding="utf-8") as f:
+            f.write("[project]\nname = 'demo'\n")
+        self.assertEqual(detect_verify_command(self.tmp_dir), ["python3", "-m", "pytest", "-q"])
+
+    def test_verify_auto_reports_no_runner_instead_of_claiming_a_pass(self):
+        with open(os.path.join(self.tmp_dir, "plain.py"), "w", encoding="utf-8") as f:
+            f.write("value = 1\n")
+        edits = [{"path": "plain.py", "hunks": [{"target": "value = 1", "replacement": "value = 2"}]}]
+        res = execute_batch_edits(edits=edits, verify="auto", cwd=self.tmp_dir)
+        self.assertTrue(res["success"])
+        self.assertIsNone(res["verify"]["passed"])
+        self.assertIn("no declared test command", res["verify"]["note"])
+
     def test_batch_editor_verify_blocks_shell_injection_and_escape(self):
         """Regression tests for CWE-78 / CWE-863 on apply_edits.verify and cwd."""
         file_a = os.path.join(self.tmp_dir, "safe.py")
