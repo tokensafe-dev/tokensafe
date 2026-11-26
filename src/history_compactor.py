@@ -23,6 +23,29 @@ def _extract_step_text(step: dict) -> str:
             for b in content
             if isinstance(b, dict)
         ).strip()
+    # ZCode event log: {"type": "...", "payload": {...}}
+    payload = step.get("payload")
+    if isinstance(payload, dict):
+        pcontent = payload.get("content")
+        if isinstance(pcontent, str) and pcontent:
+            return pcontent
+        if isinstance(pcontent, list):
+            parts = [
+                str(b.get("text") or b.get("thinking") or "")
+                for b in pcontent
+                if isinstance(b, dict)
+            ]
+            joined = " ".join(parts).strip()
+            if joined:
+                return joined
+        pinput = payload.get("input")
+        if isinstance(pinput, str) and pinput:
+            return pinput
+        if step.get("type") == "turn_started" and isinstance(pinput, dict):
+            text = pinput.get("text") or pinput.get("prompt")
+            if isinstance(text, str) and text:
+                return text
+
     message = step.get("message")
     if not isinstance(message, dict):
         return ""
@@ -86,6 +109,11 @@ def _extract_step_tool_calls(step: dict) -> List[Tuple[str, dict]]:
             if isinstance(tc, dict):
                 args = tc.get("args")
                 calls.append((str(tc.get("name", "")), args if isinstance(args, dict) else {}))
+    payload = step.get("payload")
+    if isinstance(payload, dict) and step.get("type") == "tool_call_scheduled":
+        args = payload.get("input")
+        calls.append((str(payload.get("toolName", "")), args if isinstance(args, dict) else {}))
+
     message = step.get("message")
     if isinstance(message, dict):
         mc = message.get("content")

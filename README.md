@@ -237,8 +237,8 @@ Full matrix and details: [docs/OUMV.md](docs/OUMV.md).
 
 > ⚠️ **Simulated, not measured.** These AER figures are computed from fixture traces in the
 > benchmark harnesses (the 12-assertion oracles are real; the agent turns/tokens are not).
-> A measured three-arm run (no TokenSafe / TokenSafe / OUMV) is the next benchmark milestone
-> — until it lands, treat this table as a model, not as a product claim.
+> A measured run is the next benchmark milestone — until it lands, treat this table as a
+> model, not as a product claim.
 
 Beyond file slicing, TokenSafe's agent-native ecosystem eliminates architectural friction, state pollution, and compiler loops for autonomous coding agents across frontend and backend:
 
