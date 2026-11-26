@@ -924,10 +924,23 @@ def main(argv: Optional[List[str]] = None):
         if "--help" in args or "-h" in args:
             print(
                 "\n  tokensafe bench-oumv [--target go|react] [--tasks all|id,id] [--arms baseline,oumv] "
-                "[--runs N] [--budget USD] [--model NAME] [--max-steps N] [--dry-run] [--json]\n"
+                "[--runs N] [--budget USD] [--model NAME] [--max-steps N] [--dry-run] [--mechanics] [--json]\n"
                 "\n  Measured agent run against DeepSeek with a hard USD cap. --dry-run prints the\n"
-                "  matrix and the pricing without calling the provider.\n"
+                "  matrix and the pricing without calling the provider. --mechanics measures the\n"
+                "  runtime itself (payload sizes, verification latency, guard rejections), no model.\n"
             )
+            return
+
+        if "--mechanics" in args:
+            # Deterministic runtime measurements: no provider call, no API key.
+            from src.bench import mechanics
+
+            results = mechanics.run()
+            if "--json" in args:
+                import json as _json
+                print(_json.dumps(results, indent=2, ensure_ascii=False))
+            else:
+                print(mechanics.render_markdown(results))
             return
 
         target = _flag("--target", "go")
@@ -951,7 +964,7 @@ def main(argv: Optional[List[str]] = None):
 
         print(f"\n⚡ OUMV bench ({target}): tasks={task_ids} runs={runs} model={model} budget=${budget}\n")
         if target == "react":
-            report = run_react_matrix(task_ids, runs=runs, model=model, max_steps=max_steps, budget_usd=budget)
+            report = run_react_matrix(task_ids, arms, runs=runs, model=model, max_steps=max_steps, budget_usd=budget)
         else:
             report = run_matrix(task_ids, arms, runs=runs, model=model, max_steps=max_steps, budget_usd=budget)
         paths = write_artifacts(report)

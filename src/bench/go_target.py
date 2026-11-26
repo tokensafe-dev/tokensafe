@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,10 +33,19 @@ MAX_TOOL_OUTPUT = 4000
 TASKS: Dict[str, Dict[str, Any]] = {
     "product-create-status": {
         "symptom": "creating a product returns HTTP 200 instead of 201, so the contract test fails.",
+        "repro": (
+            "POST /api/products with {\"title\":\"USB-C Hub\",\"price\":39.99,\"stock\":15,\"category\":\"electronics\"} "
+            "must answer 201; it answers 200. Stateless: one request is enough."
+        ),
         "breaks": [(f"{SANDBOX_FILE}", "c.JSON(http.StatusCreated, p)", "c.JSON(http.StatusOK, p)")],
     },
     "order-conflict-status": {
         "symptom": "a duplicate idempotency key returns HTTP 400 instead of 409, so clients retry blindly.",
+        "repro": (
+            "POST /api/orders with {\"idempotencyKey\":\"order_key_001\",\"customerId\":\"cust_100\","
+            "\"items\":[{\"productId\":2,\"quantity\":1}]} twice in the same process: the second call must answer 409 "
+            "and answers 400. Stateful: the first call creates the key, so the second call is the one that fails."
+        ),
         "breaks": [(
             SANDBOX_FILE,
             'c.JSON(http.StatusConflict, gin.H{"error": errMsg})',
@@ -44,6 +54,10 @@ TASKS: Dict[str, Dict[str, Any]] = {
     },
     "product-validation-status": {
         "symptom": "an invalid product payload is accepted with HTTP 200 instead of being rejected with 422.",
+        "repro": (
+            "POST /api/products with {\"title\":\"Bad Product\",\"price\":-10,\"stock\":5} must answer 422 (or 400); "
+            "it answers 200. Stateless: one request is enough."
+        ),
         "breaks": [(
             SANDBOX_FILE,
             # the CreateProduct validation branch (the binding branch alone is not
@@ -60,11 +74,10 @@ def _run(cmd: List[str], cwd: Path, timeout: float = 240.0, env: Optional[Dict[s
 
 
 class GoWorkspace:
-    def __init__(self, task_id: str, helper: Path):
+    def __init__(self, task_id: str):
         if task_id not in TASKS:
             raise ValueError(f"unknown task {task_id}; valid: {', '.join(TASKS)}")
         self.task_id = task_id
-        self.helper = helper
         self.dir = Path(tempfile.mkdtemp(prefix=f"oumv-bench-{task_id}-")) / "go"
         self.dir.mkdir(parents=True)
         for item in COPY_ITEMS:
@@ -74,6 +87,11 @@ class GoWorkspace:
                 shutil.copytree(src, dst)
             else:
                 shutil.copy2(src, dst)
+        # The runtime must serve the *workspace* code: build the helper inside the
+        # copied module and rebuild it when an edit changes the sources, otherwise
+        # oumv/verify would keep reporting the pristine app's behaviour.
+        self.helper = self.dir.parent / "benchoumv"
+        self._helper_built_at = 0.0
         self.break_build()
 
     # ---- task setup -------------------------------------------------------
@@ -160,8 +178,60 @@ class GoWorkspace:
         out = ((proc.stdout or "") + (proc.stderr or "")).strip()
         return {"exit_code": proc.returncode, "output": out[-MAX_TOOL_OUTPUT:]}
 
+    def search_files(self, query: str, path: str = ".", max_hits: int = 40) -> Any:
+        """Case-insensitive substring search — the grep a normal agent would have."""
+        base = self._resolve(path)
+        needle = query.strip().lower()
+        if not needle:
+            return {"error": "query is required"}
+        max_hits = max(1, min(int(max_hits), 100))
+        hits: List[str] = []
+        for entry in sorted(base.rglob("*")):
+            if not entry.is_file() or entry.suffix not in {".go", ".mod", ".sum"}:
+                continue
+            if any(part in {".git", "vendor"} for part in entry.relative_to(base).parts):
+                continue
+            try:
+                text = entry.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if needle in line.lower():
+                    hits.append(f"{entry.relative_to(base)}:{number}: {line.strip()[:160]}")
+                    if len(hits) >= max_hits:
+                        return {"query": query, "hits": hits, "truncated": True}
+        return {"query": query, "hits": hits, "truncated": False}
+
     # ---- OUMV -------------------------------------------------------------
+    def _newest_source_mtime(self) -> float:
+        newest = 0.0
+        for path in self.dir.rglob("*.go"):
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+        return newest
+
+    def _ensure_helper(self, rebuild: bool) -> Optional[Dict[str, Any]]:
+        """Builds the workspace helper; rebuilds only when live code is requested."""
+        if self.helper.exists() and (not rebuild or self._helper_built_at >= self._newest_source_mtime()):
+            return None
+        proc = _run(["go", "build", "-o", str(self.helper), "./cmd/benchoumv"], cwd=self.dir)
+        if proc.returncode != 0:
+            lines = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()
+            return {"error": {"code": -32002, "message": "BUILD_ERROR: " + (lines[-1] if lines else "build failed")[:300]}}
+        self._helper_built_at = time.time()
+        return None
+
     def oumv(self, method: str, params: Dict[str, Any]) -> Any:
+        # verify/observe/understand must see the edited sources; getSource and L3
+        # read files directly, so they can reuse the last good binary.
+        live = method in ("oumv/verify", "oumv/understand") or (
+            method == "oumv/observe" and str(params.get("level") or "") != "L3"
+        )
+        failure = self._ensure_helper(rebuild=live)
+        if failure:
+            return failure
         request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         proc = subprocess.run(
             [str(self.helper)],
@@ -185,16 +255,6 @@ class GoWorkspace:
 
     def cleanup(self) -> None:
         shutil.rmtree(self.dir.parent, ignore_errors=True)
-
-
-def build_helper() -> Path:
-    """Builds `cmd/benchoumv` once from the pristine module."""
-    out_dir = Path(tempfile.mkdtemp(prefix="oumv-bench-helper-"))
-    helper = out_dir / "benchoumv"
-    proc = _run(["go", "build", "-o", str(helper), "./cmd/benchoumv"], cwd=GO_ROOT)
-    if proc.returncode != 0:
-        raise RuntimeError(f"failed to build benchoumv: {(proc.stderr or proc.stdout)[-800:]}")
-    return helper
 
 
 # ---- tool schemas ---------------------------------------------------------
@@ -245,6 +305,22 @@ BASE_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "search_files",
+            "description": "Case-insensitive substring search across workspace .go files, returns path:line hits.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "path": {"type": "string", "description": "Relative directory, default '.'"},
+                    "max_hits": {"type": "integer", "description": "Default 40, max 100"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": "Run an allowlisted Go command (go test ./benchmark…, go build ./…, go vet ./benchmark…).",
             "parameters": {
@@ -287,6 +363,22 @@ OUMV_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [
     {
         "type": "function",
         "function": {
+            "name": "oumv_applyEdit",
+            "description": "OUMV guarded edit: replaces the file only if `expectedVersion` from oumv_getSource matches the file on disk.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "replacement": {"type": "string"},
+                    "expectedVersion": {"type": "string", "description": "sha256 version from oumv_getSource"},
+                },
+                "required": ["path", "replacement", "expectedVersion"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "oumv_verify",
             "description": "OUMV verify: dispatch a request (optionally with a JSON body) in-process and see status/body without starting a server.",
             "parameters": {
@@ -322,12 +414,16 @@ def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
         "list_files": ws.list_files,
         "read_file": ws.read_file,
         "write_file": ws.write_file,
+        "search_files": ws.search_files,
         "run_command": ws.run_command,
     }
     if arm == "oumv":
         tools.update({
             "oumv_observe": lambda level, target="": ws.oumv("oumv/observe", {"level": level, "target": target}),
             "oumv_getSource": lambda path, symbol="": ws.oumv("oumv/getSource", {"path": path, "symbol": symbol}),
+            "oumv_applyEdit": lambda path, replacement, expectedVersion: ws.oumv(
+                "oumv/applyEdit", {"path": path, "replacement": replacement, "expectedVersion": expectedVersion}
+            ),
             "oumv_verify": lambda target, payload=None: ws.oumv(
                 "oumv/verify", {"target": target, "action": "probe", "payload": payload}
             ),
@@ -337,24 +433,29 @@ def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
 
 
 SYSTEM_BASELINE = (
-    "You are a senior Go engineer working in a small Go module. Use list_files/read_file to inspect code, "
-    "write_file to fix it, and run_command to verify. Tests and the oracle are read-only. "
-    "Make the smallest correct change; stop as soon as the oracle passes."
+    "You are a senior Go engineer working in a small Go module. Use search_files to locate code, "
+    "read_file to inspect it, write_file to fix it, and run_command to verify. Tests and the oracle are "
+    "read-only. Make the smallest correct change; stop as soon as the oracle passes."
 )
 SYSTEM_OUMV = (
     "You are a senior Go engineer working in a small Go module that exposes the OUMV runtime. "
-    "Prefer the OUMV tools before reading whole files: oumv_observe L1 lists endpoints, L2 gives an endpoint "
-    "contract, oumv_getSource returns source with an OCC version token, oumv_verify dispatches a request "
-    "in-process, oumv_understand gives impact analysis. Fix the code with write_file, confirm with "
-    "oumv_verify or run_command, and stop as soon as the oracle passes. Tests are read-only."
+    "The bug report includes a repro; use it to go straight to the right handler instead of guessing payloads. "
+    "Use this loop and stop as soon as the oracle passes: (1) oumv_observe L3 with the failing endpoint target "
+    "(e.g. \"POST /api/products\") — it returns the handler body, its workspace path and the sha256 OCC version; "
+    "(2) oumv_getSource for that path once to get the full file bytes; (3) oumv_applyEdit with the fixed file and "
+    "the version from step 1 or 2 (it rejects a stale version); (4) confirm with oumv_verify when the repro is a "
+    "single request. When the failure needs state created by earlier requests, run the oracle with run_command "
+    "instead — oumv_verify intentionally starts a fresh app per call. Do not call list_files/read_file unless an "
+    "OUMV tool returns an error. Tests are read-only."
 )
 
 
 def task_prompt(task_id: str) -> str:
-    symptom = TASKS[task_id]["symptom"]
+    task = TASKS[task_id]
     return (
-        f"The order API has a regression: {symptom}\n"
-        "Reproduce it, find the cause, and fix the handler code. "
+        f"The order API has a regression: {task['symptom']}\n"
+        f"Repro: {task['repro']}\n"
+        "Find the cause and fix the handler code. "
         "Verification: `go test ./benchmark -run TestGroundTruthOracleVanilla -count=1` must pass all 12 assertions. "
         "Do not modify tests, the oracle, or the database package."
     )

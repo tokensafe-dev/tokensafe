@@ -30,6 +30,7 @@ STORE = f"{WRITE_PREFIX}store.ts"
 TASKS: Dict[str, Dict[str, Any]] = {
     "search-filter": {
         "symptom": "typing in the search box no longer filters the task list (the query is ignored).",
+        "repro": "set the search query to 'milk': the list still shows every task instead of only matching titles/tags.",
         "breaks": [(
             STORE,
             "    if (state.searchQuery.trim()) {\n      const q = state.searchQuery.toLowerCase();\n      const inTitle = task.title.toLowerCase().includes(q);\n      const inTags = task.tags?.some((tag) => tag.toLowerCase().includes(q)) ?? false;\n      if (!inTitle && !inTags) return false;\n    }\n",
@@ -38,6 +39,7 @@ TASKS: Dict[str, Dict[str, Any]] = {
     },
     "optimistic-rollback": {
         "symptom": "when the background sync fails, the toggled task keeps the optimistic status instead of rolling back.",
+        "repro": "toggle a task while the mock backend rejects the sync: the task must return to its previous status and show an error.",
         "breaks": [(
             STORE,
             """    } catch (err: any) {
@@ -55,6 +57,7 @@ TASKS: Dict[str, Dict[str, Any]] = {
     },
     "saving-indicator": {
         "symptom": "the save button is never disabled while the request is in flight, so users double-submit.",
+        "repro": "click Save once: isSaving must become true for the duration of the request; it stays false.",
         "breaks": [(
             STORE,
             "    this.set({ isSaving: true, errorMessage: null, successMessage: null });",
@@ -64,11 +67,69 @@ TASKS: Dict[str, Dict[str, Any]] = {
 }
 
 
+OUMV_STDIO = AGENT_DOM / "packages" / "vite" / "scripts" / "oumv-stdio.mjs"
+
+
+class OumvStdio:
+    """Newline-delimited JSON-RPC client for the shipped React stdio adapter.
+
+    The adapter serves the same controller `tokensafe dev` uses; in headless mode
+    L0-L3 come from the static AST, which is exactly what an agent gets before a
+    browser tab connects. One process per workspace, closed with the workspace.
+    """
+
+    def __init__(self, root: Path):
+        self.proc = subprocess.Popen(
+            ["node", str(OUMV_STDIO), "--root", str(root)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(AGENT_DOM),
+        )
+        self._id = 0
+
+    def request(self, method: str, params: Dict[str, Any]) -> Any:
+        self._id += 1
+        payload = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
+        try:
+            self.proc.stdin.write(json.dumps(payload) + "\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline()
+        except (BrokenPipeError, ValueError) as exc:
+            return {"error": f"OUMV adapter is not running: {exc}"}
+        if not line:
+            stderr = (self.proc.stderr.read() or "")[-300:] if self.proc.stderr else ""
+            return {"error": f"OUMV adapter produced no output: {stderr}"}
+        try:
+            body = json.loads(line)
+        except json.JSONDecodeError:
+            return {"error": f"invalid JSON from adapter: {line[:200]}"}
+        if body.get("error"):
+            return {"error": body["error"]}
+        return body.get("result")
+
+    def close(self) -> None:
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
 class ReactWorkspace:
     def __init__(self, task_id: str):
         if task_id not in TASKS:
             raise ValueError(f"unknown task {task_id}; valid: {', '.join(TASKS)}")
         self.task_id = task_id
+        self._rpc: Optional[OumvStdio] = None
         base = AGENT_DOM / f".bench-tmp-{next(tempfile._get_candidate_names())}"
         self.dir = base / "benchmark"
         base.mkdir(parents=True)
@@ -160,7 +221,38 @@ class ReactWorkspace:
         proc = subprocess.run(cmd.split(), cwd=str(self.dir), capture_output=True, text=True, timeout=300)
         return {"exit_code": proc.returncode, "output": ((proc.stdout or "") + (proc.stderr or "")).strip()[-2000:]}
 
+    def search_files(self, query: str, path: str = "sandboxes", max_hits: int = 40) -> Any:
+        """Case-insensitive substring search — the grep a normal agent would have."""
+        base = self._resolve(path)
+        needle = query.strip().lower()
+        if not needle:
+            return {"error": "query is required"}
+        max_hits = max(1, min(int(max_hits), 100))
+        hits: List[str] = []
+        for entry in sorted(base.rglob("*")):
+            if not entry.is_file() or entry.suffix not in {".ts", ".tsx", ".js", ".jsx", ".json"}:
+                continue
+            try:
+                text = entry.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if needle in line.lower():
+                    hits.append(f"{entry.relative_to(base)}:{number}: {line.strip()[:160]}")
+                    if len(hits) >= max_hits:
+                        return {"query": query, "hits": hits, "truncated": True}
+        return {"query": query, "hits": hits, "truncated": False}
+
+    # ---- OUMV -------------------------------------------------------------
+    def oumv(self, method: str, params: Dict[str, Any]) -> Any:
+        if self._rpc is None:
+            self._rpc = OumvStdio(self.dir)
+        return self._rpc.request(method, params)
+
     def cleanup(self) -> None:
+        if self._rpc is not None:
+            self._rpc.close()
+            self._rpc = None
         shutil.rmtree(self.dir.parent, ignore_errors=True)
 
 
@@ -200,6 +292,22 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "search_files",
+            "description": "Case-insensitive substring search across sandbox sources, returns path:line hits.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "path": {"type": "string", "description": "Relative directory, default 'sandboxes'"},
+                    "max_hits": {"type": "integer", "description": "Default 40, max 100"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": "Run the 12-assertion oracle (`npx tsx src/bin/oracle-runner.ts`).",
             "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
@@ -208,26 +316,115 @@ TOOLS: List[Dict[str, Any]] = [
 ]
 
 
-def registry(ws: ReactWorkspace) -> Dict[str, Any]:
-    return {
+def registry(ws: ReactWorkspace, arm: str = "baseline") -> Dict[str, Any]:
+    tools: Dict[str, Any] = {
         "list_files": ws.list_files,
         "read_file": ws.read_file,
         "write_file": ws.write_file,
+        "search_files": ws.search_files,
         "run_command": ws.run_command,
     }
+    if arm == "oumv":
+        tools.update({
+            "oumv_observe": lambda level, target="": ws.oumv("oumv/observe", {"level": level, "target": target}),
+            "oumv_getSource": lambda path, symbol="": ws.oumv("oumv/getSource", {"path": path, "symbol": symbol}),
+            "oumv_applyEdit": lambda path, replacement, expectedVersion: ws.oumv(
+                "oumv/applyEdit", {"path": path, "replacement": replacement, "expectedVersion": expectedVersion}
+            ),
+            "oumv_understand": lambda query, target: ws.oumv("oumv/understand", {"query": query, "target": target}),
+        })
+    return tools
+
+
+OUMV_TOOLS: List[Dict[str, Any]] = TOOLS + [
+    {
+        "type": "function",
+        "function": {
+            "name": "oumv_observe",
+            "description": "OUMV observe: L0 pulse, L1 component surface, L2 component contract, L3 source.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "string", "enum": ["L0", "L1", "L2", "L3"]},
+                    "target": {"type": "string", "description": "e.g. 'sandboxes/react-task-manager/src/store.ts'"},
+                },
+                "required": ["level"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "oumv_getSource",
+            "description": "OUMV source read with the sha256 OCC version token; pass `symbol` to get just that function, method or class.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "symbol": {"type": "string"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "oumv_applyEdit",
+            "description": "OUMV guarded edit: writes the replacement only if `expectedVersion` from getSource matches the file on disk.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "replacement": {"type": "string"},
+                    "expectedVersion": {"type": "string", "description": "sha256 version from getSource"},
+                },
+                "required": ["path", "replacement", "expectedVersion"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "oumv_understand",
+            "description": "OUMV understand: impact analysis (importers and components affected by a file or symbol).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "enum": ["impact", "causality"]},
+                    "target": {"type": "string"},
+                },
+                "required": ["query", "target"],
+            },
+        },
+    },
+]
 
 
 SYSTEM = (
-    "You are a senior React engineer working in a small sandbox. Use list_files/read_file to inspect the "
-    "component, store and adapters; write_file to fix the bug; run_command to run the 12-assertion oracle. "
+    "You are a senior React engineer working in a small sandbox. Use search_files to locate code, "
+    "read_file to inspect it, write_file to fix the bug, and run_command to run the 12-assertion oracle. "
     "The oracle output is JSON with `passed` and `failed` assertion ids. Tests and adapter.ts are read-only. "
     "Make the smallest correct change and stop as soon as the oracle reports 12."
 )
 
+SYSTEM_OUMV = (
+    "You are a senior React engineer working in a small sandbox that exposes the OUMV runtime. "
+    "Use this loop and stop as soon as the oracle reports 12: (1) search_files ONCE for the behaviour named in "
+    "the repro; only call oumv_observe L1 if that finds nothing; (2) oumv_getSource ONCE on the file, WITHOUT "
+    "`symbol` — it returns the full bytes and the sha256 OCC version (`symbol` is only for inspecting a single "
+    "function or method after you already have the file); (3) oumv_applyEdit with the full fixed file and that "
+    "version (it rejects a stale version); (4) run_command to run the oracle. Do not re-read a file you already "
+    "have in context, and do not use write_file unless an OUMV tool returns an error. Tests and adapter.ts are "
+    "read-only."
+)
+
 
 def task_prompt(task_id: str) -> str:
+    task = TASKS[task_id]
     return (
-        f"The task manager has a regression: {TASKS[task_id]['symptom']}\n"
+        f"The task manager has a regression: {task['symptom']}\n"
+        f"Repro: {task['repro']}\n"
         "Find the cause and fix the sandbox source. "
         "Verification: `npx tsx src/bin/oracle-runner.ts` must print {\"passed\":12,\"failed\":[]}. "
         "Do not modify the oracle, adapter.ts, or the test harness."

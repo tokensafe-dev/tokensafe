@@ -105,14 +105,10 @@ class TestReactTargetBreaks(unittest.TestCase):
 class TestGoTargetBreaks(unittest.TestCase):
     """Every task must start broken — otherwise it measures nothing."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.helper = go_target.build_helper()
-
     def test_each_task_fails_the_oracle_before_the_agent_runs(self):
         for task_id in go_target.TASKS:
             with self.subTest(task=task_id):
-                ws = go_target.GoWorkspace(task_id, self.helper)
+                ws = go_target.GoWorkspace(task_id)
                 try:
                     passed, failed, status = ws.oracle()
                     self.assertLess(passed, 12, f"{task_id} is not broken: {passed}/12")
@@ -121,7 +117,7 @@ class TestGoTargetBreaks(unittest.TestCase):
                     ws.cleanup()
 
     def test_oumv_tools_see_the_sandbox(self):
-        ws = go_target.GoWorkspace("order-conflict-status", self.helper)
+        ws = go_target.GoWorkspace("order-conflict-status")
         try:
             surface = ws.oumv("oumv/observe", {"level": "L1"})
             paths = [e["path"] for e in surface["data"]["endpoints"]]
@@ -131,6 +127,40 @@ class TestGoTargetBreaks(unittest.TestCase):
             verify = ws.oumv("oumv/verify", {"target": "POST /api/products", "payload": {"id": 1}})
             self.assertIn(verify.get("status"), ("passed", "failed"))
             self.assertIn("checked", verify.get("scope", {}))
+        finally:
+            ws.cleanup()
+
+    def test_l3_resolves_an_endpoint_to_its_handler(self):
+        ws = go_target.GoWorkspace("product-create-status")
+        try:
+            result = ws.oumv("oumv/observe", {"level": "L3", "target": "POST /api/products"})
+            self.assertNotIn("error", result)
+            data = result["data"]
+            self.assertEqual(data["path"], go_target.SANDBOX_FILE)
+            self.assertIn('r.POST("/api/products"', data["source"])
+            self.assertIn("StatusOK", data["source"])
+            self.assertTrue(data["version"].startswith("sha256:"))
+        finally:
+            ws.cleanup()
+
+    def test_verify_sees_edits_made_in_the_workspace(self):
+        """The runtime must serve the edited code, not a binary built from the pristine app."""
+        from pathlib import Path
+
+        ws = go_target.GoWorkspace("product-create-status")
+        try:
+            before = ws.oumv("oumv/verify", {"target": "POST /api/products", "payload": {"title": "x", "price": 1}})
+            self.assertEqual(before.get("statusCode"), 200)
+            source = ws.oumv("oumv/getSource", {"path": go_target.SANDBOX_FILE})
+            full = Path(ws.dir, go_target.SANDBOX_FILE).read_text(encoding="utf-8")
+            fixed = full.replace("c.JSON(http.StatusOK, p)", "c.JSON(http.StatusCreated, p)")
+            applied = ws.oumv(
+                "oumv/applyEdit",
+                {"path": go_target.SANDBOX_FILE, "replacement": fixed, "expectedVersion": source["version"]},
+            )
+            self.assertEqual(applied.get("status"), "APPLIED")
+            after = ws.oumv("oumv/verify", {"target": "POST /api/products", "payload": {"title": "x", "price": 1}})
+            self.assertEqual(after.get("statusCode"), 201)
         finally:
             ws.cleanup()
 

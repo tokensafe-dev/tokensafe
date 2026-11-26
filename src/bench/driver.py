@@ -77,7 +77,9 @@ class Usage:
 
 
 class BudgetExceeded(RuntimeError):
-    pass
+    def __init__(self, message: str, usage: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.usage = usage or {}
 
 
 class DeepSeekClient:
@@ -129,6 +131,7 @@ ToolFn = Callable[..., Any]
 class StepRecord:
     index: int
     tool_calls: List[str] = field(default_factory=list)
+    result_chars: List[int] = field(default_factory=list)
     duration_ms: float = 0.0
     oracle_passed: Optional[int] = None
     oracle_failed: List[str] = field(default_factory=list)
@@ -149,6 +152,8 @@ def run_agent(
     """Runs one tool loop. Returns messages-independent accounting + step log."""
     usage = Usage()
     steps: List[StepRecord] = []
+    tool_counts: Dict[str, int] = {}
+    tool_chars: Dict[str, int] = {}
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task_prompt},
@@ -179,10 +184,14 @@ def run_agent(
                 result = fn(**args) if fn else {"error": f"unknown tool {name}"}
             except Exception as exc:  # tool errors are observations, not crashes
                 result = {"error": f"{type(exc).__name__}: {exc}"}
+            content = json.dumps(result, ensure_ascii=False)[:6000]
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+            tool_chars[name] = tool_chars.get(name, 0) + len(content)
+            record.result_chars.append(len(content))
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", ""),
-                "content": json.dumps(result, ensure_ascii=False)[:6000],
+                "content": content,
             })
 
         if after_step:
@@ -195,7 +204,10 @@ def run_agent(
             break
 
         if usage.usd(client.model) > budget_usd:
-            raise BudgetExceeded(f"budget ${budget_usd} exceeded at step {index} (${usage.usd(client.model)})")
+            raise BudgetExceeded(
+                f"budget ${budget_usd} exceeded at step {index} (${usage.usd(client.model)})",
+                usage.as_dict(client.model),
+            )
     else:
         stop_reason = "max_steps"
 
@@ -206,10 +218,13 @@ def run_agent(
         "prices_usd_per_mtok": PRICES.get(client.model),
         "stop_reason": stop_reason,
         "usage": usage.as_dict(client.model),
+        "tool_calls": tool_counts,
+        "tool_result_chars": tool_chars,
         "steps": [
             {
                 "index": s.index,
                 "tools": s.tool_calls,
+                "result_chars": s.result_chars,
                 "oracle_passed": s.oracle_passed,
                 "oracle_failed": s.oracle_failed,
                 "note": s.note,
