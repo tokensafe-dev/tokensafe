@@ -921,6 +921,15 @@ def main(argv: Optional[List[str]] = None):
                     return arg.split("=", 1)[1]
             return default
 
+        if "--help" in args or "-h" in args:
+            print(
+                "\n  tokensafe bench-oumv [--target go|react] [--tasks all|id,id] [--arms baseline,oumv] "
+                "[--runs N] [--budget USD] [--model NAME] [--max-steps N] [--dry-run] [--json]\n"
+                "\n  Measured agent run against DeepSeek with a hard USD cap. --dry-run prints the\n"
+                "  matrix and the pricing without calling the provider.\n"
+            )
+            return
+
         target = _flag("--target", "go")
         catalogue = react_target.TASKS if target == "react" else go_target.TASKS
         tasks_arg = _flag("--tasks", "all")
@@ -930,6 +939,15 @@ def main(argv: Optional[List[str]] = None):
         budget = float(_flag("--budget", "1.0"))
         model = _flag("--model", "deepseek-chat")
         max_steps = int(_flag("--max-steps", "14"))
+
+        if "--dry-run" in args:
+            from src.bench.driver import PRICES
+
+            sessions = len(task_ids) * len(arms) * runs
+            print(f"\n  dry run: {target} · tasks={task_ids} · arms={arms} · runs={runs} → {sessions} sessions")
+            print(f"  model={model} prices={PRICES.get(model)} budget=${budget}")
+            print("  no provider call was made\n")
+            return
 
         print(f"\n⚡ OUMV bench ({target}): tasks={task_ids} runs={runs} model={model} budget=${budget}\n")
         if target == "react":
