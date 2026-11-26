@@ -137,7 +137,13 @@ def _run_git_query(pattern: str, cwd: str, timeout_sec: int = 5, max_results: in
         raw_out = strip_ansi(proc.stdout or "").strip()
         lines = [l for l in raw_out.splitlines() if l.strip()]
         limited = lines[:max_results]
-        return {"matches": limited, "count": len(limited), "raw": "\n".join(limited)}
+        return {
+            "matches": limited,
+            # count is the true number of matching lines; matches may be truncated.
+            "count": len(lines),
+            "truncated": len(lines) > len(limited),
+            "raw": "\n".join(limited),
+        }
     except subprocess.TimeoutExpired:
         return {"error": f"git query timed out after {timeout_sec}s", "matches": [], "count": 0}
     except Exception as e:
@@ -152,7 +158,8 @@ def _run_rg_query(
     case_sensitive: bool = False,
     file_type: Optional[str] = None,
     glob_filter: Optional[str] = None,
-    max_results: int = 25
+    max_results: int = 25,
+    scope: str = "all"
 ) -> Optional[List[Dict[str, Any]]]:
     """Attempts fast search via ripgrep if available."""
     rg_bin = shutil.which("rg")
@@ -195,6 +202,7 @@ def _run_rg_query(
         # rg exits 1 for "no matches" (not an error) and 2 for real failures.
         if proc.returncode not in (0, 1) and err_text:
             raise RuntimeError(f"ripgrep failed: {err_text.splitlines()[0]}")
+        scope_all = str(scope or "all").lower() in ("", "all")
         matches = []
         _rg_line_re = re.compile(r"^(.*):(\d+):(.*)$")
         for line in proc.stdout.splitlines():
@@ -204,6 +212,15 @@ def _run_rg_query(
             if m_line:
                 raw_file, raw_lnum, raw_txt = m_line.groups()
                 f_path = os.path.relpath(raw_file, cwd)
+                # ripgrep has no notion of TokenSafe scopes: apply the same matcher
+                # the Python fallback uses so results do not change with rg presence.
+                if not scope_all:
+                    try:
+                        from src.scoped_search import ScopedSearch
+                        if not ScopedSearch.is_match_file(f_path, f_path, str(scope).lower()):
+                            continue
+                    except Exception:
+                        pass
                 try:
                     l_num = int(raw_lnum)
                 except ValueError:
@@ -304,8 +321,16 @@ def _run_python_text_search(
             ext = os.path.splitext(full_path)[1].lower()
             if ext in IGNORED_EXTENSIONS:
                 continue
-            if scope == "code" and ext not in CODE_EXTENSIONS:
-                continue
+            # One matcher for every scope ("code", "config", extensions, globs):
+            # reusing ScopedSearch keeps the fallback identical to the rg path.
+            if str(scope or "all").lower() not in ("", "all"):
+                try:
+                    from src.scoped_search import ScopedSearch
+                    if not ScopedSearch.is_match_file(full_path, rel_p, str(scope).lower()):
+                        continue
+                except Exception:
+                    if scope == "code" and ext not in CODE_EXTENSIONS:
+                        continue
             if type_exts is not None and ext not in type_exts:
                 continue
             if glob_filter and not (fnmatch.fnmatch(os.path.basename(full_path), glob_filter) or fnmatch.fnmatch(rel_p, glob_filter)):
@@ -431,7 +456,8 @@ def _execute_single_query(query_dict: Dict[str, Any], cwd: str) -> Dict[str, Any
         case_sensitive=case_sensitive,
         file_type=file_type,
         glob_filter=glob_filter,
-        max_results=max_res
+        max_results=max_res,
+        scope=scope
     )
 
     try:

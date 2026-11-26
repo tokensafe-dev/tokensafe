@@ -452,6 +452,7 @@ def execute_batch_edits(
                 "allow_overwrite": overwrite,
                 "hunk_count": 0,
                 "noop_hunks": 0,
+                "clamped_hunks": 0,
             }
             continue
 
@@ -465,6 +466,7 @@ def execute_batch_edits(
             current_text = prior_prepared["new_content"]
             prev_hunk_count = prior_prepared["hunk_count"]
             prev_noop_count = prior_prepared.get("noop_hunks", 0)
+            prev_clamped_count = prior_prepared.get("clamped_hunks", 0)
             is_create = prior_prepared["is_create"]
         else:
             if not os.path.exists(abs_path):
@@ -486,11 +488,14 @@ def execute_batch_edits(
                 continue
             prev_hunk_count = 0
             prev_noop_count = 0
+            prev_clamped_count = 0
             is_create = False
 
         file_failed = False
         applied_hunk_count = 0
         noop_hunk_count = prev_noop_count
+        clamped_hunk_count = 0
+        hunk_clamped = False
 
         for hunk_idx, hunk in enumerate(hunks):
             if not isinstance(hunk, dict):
@@ -524,6 +529,15 @@ def execute_batch_edits(
                 file_failed = True
                 break
 
+            # Clamp end_line beyond EOF: clients routinely read N lines and pass
+            # start+limit, and a hard error costs a whole extra turn. The result
+            # reports clamped_hunks so a shrunken region is never silent.
+            if e_val is not None and e_val > 0:
+                line_count = len(current_text.splitlines(keepends=True))
+                if e_val > line_count:
+                    e_val = line_count
+                    hunk_clamped = True
+
             new_text, err = _apply_hunk_to_text(
                 current_text,
                 target=str(target),
@@ -544,6 +558,9 @@ def execute_batch_edits(
 
             current_text = new_text
             applied_hunk_count += 1
+            if hunk_clamped:
+                clamped_hunk_count += 1
+                hunk_clamped = False
 
         if not file_failed:
             prepared_files[abs_path] = {
@@ -552,6 +569,7 @@ def execute_batch_edits(
                 "is_create": is_create,
                 "hunk_count": prev_hunk_count + applied_hunk_count,
                 "noop_hunks": noop_hunk_count,
+                "clamped_hunks": prev_clamped_count + clamped_hunk_count,
             }
 
     # Atomic enforcement: if any file failed and not best_effort, reject all
@@ -589,6 +607,18 @@ def execute_batch_edits(
         write_aborted = False
         for abs_p, p_info in prepared_files.items():
             try:
+                if p_info["hunk_count"] == 0 and not p_info["is_create"]:
+                    # Pure no-op batch entry: report it, but never rewrite identical
+                    # bytes (that would bump mtime/inode and invalidate readers).
+                    applied_files_info.append({
+                        "path": p_info["rel_path"],
+                        "hunks": 0,
+                        "noop_hunks": p_info.get("noop_hunks", 0),
+                        "clamped_hunks": p_info.get("clamped_hunks", 0),
+                        "is_create": False,
+                        "unchanged": True,
+                    })
+                    continue
                 existed = os.path.exists(abs_p)
                 orig_bytes: Optional[bytes] = None
                 orig_mode: Optional[int] = None
@@ -610,6 +640,7 @@ def execute_batch_edits(
                     "path": p_info["rel_path"],
                     "hunks": p_info["hunk_count"],
                     "noop_hunks": p_info.get("noop_hunks", 0),
+                    "clamped_hunks": p_info.get("clamped_hunks", 0),
                     "is_create": not existed,
                 })
             except Exception as e:
@@ -627,14 +658,17 @@ def execute_batch_edits(
                 "path": p_info["rel_path"],
                 "hunks": p_info["hunk_count"],
                 "noop_hunks": p_info.get("noop_hunks", 0),
+                "clamped_hunks": p_info.get("clamped_hunks", 0),
                 "is_create": p_info["is_create"],
                 "dry_run": True
             })
 
+    total_changed_hunks = sum(int(p.get("hunk_count") or 0) for p in prepared_files.values())
     result: Dict[str, Any] = {
         "success": len(applied_files_info) > 0 and len(failed_files) == 0,
         "applied_count": len(applied_files_info),
         "applied_files": applied_files_info,
+        "changed_hunks": total_changed_hunks,
         "failed_count": len(failed_files),
         "failed_files": failed_files,
         "dry_run": dry_run,
@@ -655,8 +689,8 @@ def execute_batch_edits(
         if isinstance(result.get("verify"), dict):
             result["verify"]["rolled_back"] = True
 
-    # Execute inline verify command if requested and files were modified (shell=False, allowlisted argv)
-    if verified_argv and applied_files_info and not dry_run:
+    # Execute inline verify command if requested and at least one byte actually changed
+    if verified_argv and applied_files_info and not dry_run and total_changed_hunks > 0:
         cmd_str = str(verify).strip()
         t0 = time.time()
         try:

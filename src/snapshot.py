@@ -286,8 +286,9 @@ def build_workspace_snapshot(workspace_dir: str, max_bytes: int = 1400) -> Optio
 
     sections = ["[TokenSafe Workspace Snapshot]"]
 
-    # 1. Git summary
-    git_sum = _get_git_summary(workspace_dir)
+    # 1. Git summary. SessionStart blocks on this, and it issues three sequential
+    # git calls: keep the per-call budget at 0.6s (<=1.8s total), not 2s each.
+    git_sum = _get_git_summary(workspace_dir, timeout_sec=0.6)
     if git_sum:
         sections.append(git_sum)
 

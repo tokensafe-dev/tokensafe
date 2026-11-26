@@ -307,13 +307,26 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertTrue(noop["success"])
         self.assertEqual(noop["applied_files"][0]["hunks"], 0)
         self.assertEqual(noop["applied_files"][0]["noop_hunks"], 1)
+        self.assertEqual(noop["changed_hunks"], 0)
+        self.assertTrue(noop["applied_files"][0]["unchanged"])
 
-        for bad in ({"start_line": 0}, {"end_line": -1}, {"start_line": "abc"}, {"end_line": 99}):
+        for bad in ({"start_line": 0}, {"end_line": -1}, {"start_line": "abc"}):
             hunk = {"target": "a = 1", "replacement": "a = 2"}
             hunk.update(bad)
             res = execute_batch_edits(edits=[{"path": "noop.py", "hunks": [hunk]}], cwd=self.tmp_dir)
             self.assertFalse(res["success"], bad)
             self.assertTrue(res["failed_files"], bad)
+
+        # end_line past EOF is clamped (clients pass start+limit), never a hard failure,
+        # and the clamp is reported so the shrunken region is not silent.
+        clamped = execute_batch_edits(edits=[{
+            "path": "noop.py",
+            "hunks": [{"target": "b = 2", "replacement": "b = 3", "end_line": 99}],
+        }], cwd=self.tmp_dir)
+        self.assertTrue(clamped["success"], clamped)
+        self.assertEqual(clamped["applied_files"][0]["clamped_hunks"], 1)
+        with open(target, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "a = 1\nb = 3\n")
 
     def test_batch_editor_create_conflicts_with_hunks(self):
         """Regression: 'create' must not silently discard hunks already applied to the same path."""
