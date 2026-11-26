@@ -485,7 +485,13 @@ def execute_batch_edits(
             continue
 
         if os.path.isabs(rel_path):
-            failed_files.append({"path": rel_path, "error": "Absolute paths and traversal outside workspace root are disallowed."})
+            failed_files.append({
+                "path": rel_path,
+                "error": (
+                    "Absolute paths are disallowed: edit paths are resolved inside one working directory. "
+                    "Pass 'cwd' (the repo root, absolute) with repo-relative 'path' values instead."
+                ),
+            })
             continue
 
         abs_path = os.path.normpath(os.path.join(base_dir, rel_path))

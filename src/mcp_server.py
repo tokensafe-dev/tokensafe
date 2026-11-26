@@ -295,6 +295,9 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
         'inputSchema': {   'properties': {   'case_sensitive': {   'description': 'Case-sensitive search (default '
                                                                                   'false)',
                                                                    'type': 'boolean'},
+                                             'cwd': {   'description': 'Base directory for a relative path '
+                                                                       '(defaults to the active project)',
+                                                        'type': 'string'},
                                              'max_results': {   'description': 'Max matching lines (default 25, max '
                                                                                '100)',
                                                                 'type': 'integer'},
@@ -703,6 +706,9 @@ TOOLS = [{'name': 'smart_read_file',
                                  'scope': {'type': 'string',
                                            'description': "'code','config','all', ext or subfolder"},
                                  'path': {'type': 'string'},
+                                 'project_path': {'type': 'string', 'description': 'alias for path'},
+                                 'cwd': {'type': 'string',
+                                         'description': 'base dir for a relative path'},
                                  'use_regex': {'type': 'boolean'},
                                  'case_sensitive': {'type': 'boolean'},
                                  'max_results': {'type': 'integer', 'description': 'default 25, max 100'},
@@ -2526,13 +2532,35 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         raw_path = args.get("project_path") or args.get("path") or args.get("root_dir") or args.get("directory")
         active_ws = _workspace_root()
 
+        # `cwd` is the single-mode base as well, not just batch mode: agents editing a
+        # repo outside the session workspace pass cwd + a repo-relative path, and
+        # anchoring that path to the active workspace used to surface as a bare
+        # "Invalid project path" for a directory that exists under cwd.
+        raw_cwd = args.get("cwd")
+        if raw_cwd:
+            if not os.path.isabs(str(raw_cwd)) and active_ws and os.path.isdir(os.path.join(active_ws, str(raw_cwd))):
+                base_dir = os.path.abspath(os.path.join(active_ws, str(raw_cwd)))
+            else:
+                base_dir = os.path.abspath(str(raw_cwd))
+            if not os.path.isdir(base_dir):
+                return _fallback_error("scoped_search", f"invalid 'cwd': '{raw_cwd}' is not a directory")
+        else:
+            base_dir = active_ws
+
         # 1. Resolve base directory safely without scanning plugin or system roots
         if raw_path:
             if not os.path.isabs(raw_path):
-                if active_ws and os.path.isdir(os.path.join(active_ws, raw_path)):
-                    target_path = os.path.abspath(os.path.join(active_ws, raw_path))
+                if base_dir and os.path.isdir(os.path.join(base_dir, raw_path)):
+                    target_path = os.path.abspath(os.path.join(base_dir, raw_path))
                 else:
                     target_path = os.path.abspath(raw_path)
+                if not os.path.exists(target_path):
+                    scope_root = base_dir or active_ws or os.getcwd()
+                    return _fallback_error(
+                        "scoped_search",
+                        f"path '{raw_path}' does not exist (resolved to '{target_path}' from '{scope_root}'). "
+                        f"Pass the repo root as 'cwd' plus a repo-relative path, or an absolute path.",
+                    )
             else:
                 target_path = os.path.abspath(raw_path)
 
@@ -3031,8 +3059,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                         return _fallback_error(
                             "batch_search",
                             f"subquery path '{sub_p}' resolves to '{sub_abs}', outside project root "
-                            f"'{real_cwd}'. Pass the repo root as project_path and a repo-relative "
-                            f"path, or omit path entirely.",
+                            f"'{real_cwd}'. One call searches one root: pass that repo as cwd/project_path "
+                            f"with repo-relative paths, and split queries for other repos into separate calls.",
                         )
                 if is_quota_exceeded:
                     q_copy["max_results"] = min(_safe_int(q_copy.get("max_results"), 3, lo=1, hi=100), 3)

@@ -110,6 +110,31 @@ class TestScopedSearch(unittest.TestCase):
         text = res["content"][0]["text"]
         self.assertIn("ScopedSearch", text)
 
+    def test_mcp_scoped_search_cwd_outside_session_workspace(self):
+        # Agents editing an additional working directory pass cwd + a repo-relative
+        # path; that used to be joined to the session workspace and fail.
+        import shutil
+        import tempfile
+        repo = tempfile.mkdtemp(prefix="tokensafe_ss_cwd_")
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        os.makedirs(os.path.join(repo, "pkg"))
+        with open(os.path.join(repo, "pkg", "mod.py"), "w") as f:
+            f.write("def marker_cwd_probe():\n    return 1\n")
+        res = handle_tool_call("scoped_search", {"query": "marker_cwd_probe", "cwd": repo, "path": "pkg"})
+        self.assertNotIn("isError", res, res)
+        self.assertIn("mod.py", res["content"][0]["text"])
+
+    def test_mcp_scoped_search_missing_relative_path_names_the_resolution(self):
+        import shutil
+        import tempfile
+        repo = tempfile.mkdtemp(prefix="tokensafe_ss_missing_")
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        res = handle_tool_call("scoped_search", {"query": "anything", "cwd": repo, "path": "no_such_dir_xyz"})
+        self.assertTrue(res.get("isError"))
+        text = res["content"][0]["text"]
+        self.assertIn("does not exist", text)
+        self.assertIn("no_such_dir_xyz", text)
+
     def test_regex_modes_tmp_project(self):
         import shutil
         import tempfile
