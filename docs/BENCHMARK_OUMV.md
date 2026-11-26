@@ -56,13 +56,36 @@ Per task:
    `go test`. `VerifyParams` now carries `payload`/`method`, and `VerifyResult` returns
    canonical `status` + `scope {checked, notExecuted, notSupported}`.
 
+## React sandbox (measured pilot)
+
+The React sandbox was not React until 2026-11-26: its adapter projected markup with
+`innerHTML`, so the "React arm" exercised no hooks, no reconciliation and no
+stale-closure bugs. It now mounts `ReactTaskManager` with `createRoot`, renders a
+synchronous store through `useSyncExternalStore`, and is graded by the same
+12-assertion oracle executed headlessly (`src/bin/oracle-runner.ts`).
+
+Pilot (n = 1 per task, `deepseek-chat`, budget $0.20 · **spent $0.0165**):
+
+| Task (deliberate regression) | Oracle before | Oracle after | Steps | Cost |
+| :--- | :---: | :---: | ---: | ---: |
+| `search-filter` (query ignored) | 10/12 | **12/12** | 7 | $0.0064 |
+| `optimistic-rollback` (no rollback on sync failure) | 11/12 | **12/12** | 6 | $0.0060 |
+| `saving-indicator` (button never disabled) | 11/12 | **12/12** | 5 | $0.0041 |
+
+Arm: `baseline` only. The OUMV arm for React needs the Vite bridge (`tokensafe dev`)
+running against the edited sandbox; that harness is the next step, so this table
+does not compare the protocol against anything yet.
+
+Artifacts: [`docs/bench/react-pilot.json`](bench/react-pilot.json)
+Reproduce: `tokensafe bench-oumv --target react --tasks all --runs 1 --budget 0.2`
+
 ## Next (to make this publishable)
 
 - 3 runs per arm/task (18 sessions Go) with the same budget guard → report mean ± spread.
 - A target where context size matters (2–5k LOC service, not a 3.7 KB file), otherwise the
   benchmark measures the harness, not the protocol.
-- React target: `agent-dom/packages/benchmark/sandboxes/react-task-manager` currently renders
-  via `innerHTML` (not React); fix the mount, add a task set, run the same driver.
+- React target: OUMV arm over the Vite bridge (observe L1/L2, getSource, verify) against the
+  same three tasks; only then is a React comparison meaningful.
 - Add the TokenSafe-tools arm (scoped search/skeleton) so the three-way split is
   `baseline / tokensafe / oumv`.
 - CI: replay the recorded tool decisions against the same oracles (free, deterministic).

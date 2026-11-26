@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.bench import go_target
+from src.bench import go_target, react_target
 from src.bench.driver import BudgetExceeded, DeepSeekClient, run_agent
 
 
@@ -103,6 +103,83 @@ def run_matrix(
     }
 
 
+
+def run_react_one(
+    task_id: str,
+    model: str = "deepseek-chat",
+    max_steps: int = 14,
+    budget_usd: float = 1.0,
+) -> Dict[str, Any]:
+    ws = react_target.ReactWorkspace(task_id)
+    started = time.time()
+    try:
+        before = ws.oracle()
+        client = DeepSeekClient(model=model, temperature=0.0)
+        result = run_agent(
+            client=client,
+            system_prompt=react_target.SYSTEM,
+            task_prompt=react_target.task_prompt(task_id),
+            tools=react_target.TOOLS,
+            registry=react_target.registry(ws),
+            max_steps=max_steps,
+            budget_usd=budget_usd,
+            after_step=lambda _i: ws.oracle(),
+        )
+        after = ws.oracle()
+        return {
+            "arm": "baseline",
+            "task": task_id,
+            "oracle_before": {"passed": before[0], "failed": before[1]},
+            "oracle_after": {"passed": after[0], "failed": after[1]},
+            "solved": after[0] == 12,
+            "wall_clock_s": round(time.time() - started, 1),
+            **result,
+        }
+    except BudgetExceeded as exc:
+        return {"arm": "baseline", "task": task_id, "solved": False,
+                "stop_reason": "budget_exceeded", "error": str(exc),
+                "wall_clock_s": round(time.time() - started, 1)}
+    finally:
+        ws.cleanup()
+
+
+def run_react_matrix(
+    tasks: List[str],
+    runs: int = 1,
+    model: str = "deepseek-chat",
+    max_steps: int = 14,
+    budget_usd: float = 1.0,
+) -> Dict[str, Any]:
+    results: List[Dict[str, Any]] = []
+    spent = 0.0
+    aborted: Optional[str] = None
+    for run_idx in range(1, runs + 1):
+        for task_id in tasks:
+            if spent >= budget_usd:
+                aborted = f"global budget ${budget_usd} exhausted after ${spent:.4f}"
+                break
+            row = run_react_one(task_id, model=model, max_steps=max_steps,
+                                budget_usd=max(budget_usd - spent, 0.01))
+            row["run"] = run_idx
+            results.append(row)
+            spent += float((row.get("usage") or {}).get("usd") or 0.0)
+        if aborted:
+            break
+    return {
+        "target": "react",
+        "tasks": tasks,
+        "arms": ["baseline"],
+        "runs": runs,
+        "model": model,
+        "budget_usd": budget_usd,
+        "spent_usd": round(spent, 6),
+        "aborted": aborted,
+        "results": results,
+        "note": "React arm runs baseline only: the OUMV arm needs the Vite bridge (`tokensafe dev`).",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
 def summarize(report: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: Dict[str, Dict[str, Any]] = {}
     for result in report["results"]:
@@ -120,7 +197,7 @@ def summarize(report: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def render_markdown(report: Dict[str, Any]) -> str:
     lines = [
-        "# OUMV benchmark — Go sandbox (measured)",
+        f"# OUMV benchmark — {report.get('target', 'go')} sandbox (measured)",
         "",
         f"> Model: `{report['model']}` · runs: {report['runs']} · budget: ${report['budget_usd']} · "
         f"spent: ${report['spent_usd']} · {report['generated_at']}",
@@ -162,8 +239,9 @@ def write_artifacts(report: Dict[str, Any], out_dir: Optional[Path] = None) -> D
     base = Path(out_dir) if out_dir else Path(resolve_data_dir()) / "bench"
     base.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    json_path = base / f"go-{stamp}.json"
-    md_path = base / f"go-{stamp}.md"
+    target = report.get("target", "go")
+    json_path = base / f"{target}-{stamp}.json"
+    md_path = base / f"{target}-{stamp}.md"
     json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_markdown(report), encoding="utf-8")
     return {"json": str(json_path), "markdown": str(md_path)}

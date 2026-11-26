@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.bench import go_target
+from src.bench import go_target, react_target
 from src.bench.driver import PRICES, Usage, resolve_api_key
 from src.bench.runner import render_markdown, summarize
 
@@ -83,6 +83,22 @@ class TestReportRendering(unittest.TestCase):
         markdown = render_markdown(report)
         self.assertIn("measured", markdown.lower())
         self.assertIn("| `baseline` | 1 | 1/1 |", markdown)
+
+
+@unittest.skipUnless(shutil.which("npx") and react_target.PACKAGE.is_dir(), "node/npx or benchmark package missing")
+class TestReactTargetBreaks(unittest.TestCase):
+    """The React sandbox must be genuinely React and genuinely broken per task."""
+
+    def test_each_react_task_fails_the_oracle(self):
+        for task_id in react_target.TASKS:
+            with self.subTest(task=task_id):
+                ws = react_target.ReactWorkspace(task_id)
+                try:
+                    passed, failed, status = ws.oracle()
+                    self.assertLess(passed, 12, f"{task_id} is not broken: {passed}/12 {status}")
+                    self.assertTrue(failed, f"{task_id} produced no failing assertion ids")
+                finally:
+                    ws.cleanup()
 
 
 @unittest.skipUnless(shutil.which("go") and go_target.GO_ROOT.is_dir(), "go toolchain or module missing")
