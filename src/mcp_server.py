@@ -2598,7 +2598,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             lvl = str(args.get("level") or "L0").strip()
             tgt = str(args.get("target") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
-            res = OUMVGateway.observe(level=lvl, target=tgt, runtime=rt)
+            ws = str(args.get("workspace_dir") or "").strip() or None
+            res = OUMVGateway.observe(level=lvl, target=tgt, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_observe", f"failed to observe OUMV runtime: {e}")
@@ -2609,7 +2610,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             qry = str(args.get("query") or "causality").strip()
             tgt = str(args.get("target") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
-            res = OUMVGateway.understand(query=qry, target=tgt, runtime=rt)
+            ws = str(args.get("workspace_dir") or "").strip() or None
+            res = OUMVGateway.understand(query=qry, target=tgt, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_understand", f"failed to query OUMV understanding: {e}")
@@ -2622,7 +2624,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             rep = args.get("replacement")
             ev = str(args.get("expectedVersion") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
-            res = OUMVGateway.mutate(path=p, symbol=sym, replacement=rep, expected_version=ev, runtime=rt)
+            ws = str(args.get("workspace_dir") or "").strip() or None
+            res = OUMVGateway.mutate(path=p, symbol=sym, replacement=rep, expected_version=ev, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_mutate", f"failed to apply OUMV mutation: {e}")
@@ -2634,7 +2637,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             act = str(args.get("action") or "invoke").strip()
             payload = args.get("payload") if isinstance(args.get("payload"), dict) else None
             rt = str(args.get("runtime") or "auto").strip()
-            res = OUMVGateway.verify(target=tgt, action=act, payload=payload, runtime=rt)
+            ws = str(args.get("workspace_dir") or "").strip() or None
+            res = OUMVGateway.verify(target=tgt, action=act, payload=payload, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_verify", f"failed to verify OUMV action: {e}")
@@ -2644,7 +2648,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             from src.oumv_gateway import OUMVGateway
             qry = str(args.get("query") or "overview").strip()
             tgt = str(args.get("target") or "").strip() or None
-            res = OUMVGateway.graph(query=qry, target=tgt)
+            ws = str(args.get("workspace_dir") or "").strip() or None
+            res = OUMVGateway.graph(query=qry, target=tgt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_graph", f"failed to query cross-stack graph: {e}")

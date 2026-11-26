@@ -14,6 +14,10 @@ from typing import Dict, Any, Optional, Tuple, List
 from src.paths import get_active_workspace
 
 
+class OUMVRpcError(RuntimeError):
+    """Raised when a live OUMV runtime explicitly returns a JSON-RPC error."""
+
+
 class OUMVGateway:
     """Dispatches OUMV protocol calls to live DevServers with zero-config discovery."""
 
@@ -165,13 +169,16 @@ class OUMVGateway:
             data = json.loads(resp.read().decode("utf-8"))
             if "error" in data and data["error"]:
                 err = data["error"]
-                msg = err.get("message") if isinstance(err, dict) else str(err)
-                raise RuntimeError(f"JSON-RPC error from {endpoint_url}: {msg}")
+                if isinstance(err, dict):
+                    code = err.get("code")
+                    msg = err.get("message") or str(err)
+                    raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}")
+                raise OUMVRpcError(f"JSON-RPC error from {endpoint_url}: {err}")
             return data.get("result")
 
     @classmethod
-    def _resolve_client_url(cls, runtime: str = "auto", target: Optional[str] = None) -> str:
-        fe, be = cls.get_endpoints()
+    def _resolve_client_url(cls, runtime: str = "auto", target: Optional[str] = None, workspace_dir: Optional[str] = None) -> str:
+        fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
 
         if runtime == "frontend":
             if not fe:
@@ -295,8 +302,8 @@ class OUMVGateway:
 
     # 2. Tool: oumv_observe
     @classmethod
-    def observe(cls, level: str = "L0", target: Optional[str] = None, runtime: str = "auto") -> Any:
-        fe, be = cls.get_endpoints()
+    def observe(cls, level: str = "L0", target: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
 
         # Consolidated fullstack L0 pulse (~30 tokens)
         if level.upper() == "L0" and (not target or target == "fullstack") and (runtime in ("auto", "")):
@@ -315,7 +322,7 @@ class OUMVGateway:
             # Out-of-the-box fallback when both are offline
             if not fe and not be:
                 from src.graph_engine import GraphEngine
-                ws = get_active_workspace()
+                ws = workspace_dir or get_active_workspace()
                 graph = GraphEngine.get_instance(ws)
                 results["staticAnalysis"] = graph.get_static_oumv_slice(level="L0")
                 results["tip"] = "DevServers offline — static AST intelligence active out-of-the-box."
@@ -328,7 +335,7 @@ class OUMVGateway:
             return results
 
         try:
-            url = cls._resolve_client_url(runtime=runtime, target=target)
+            url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
             res = cls._rpc_call(url, "oumv/observe", {"level": level, "target": target, "componentId": target})
             if isinstance(res, dict) and "evidence" not in res:
                 res["evidence"] = {"provenance": "runtime", "confidence": "confirmed", "sourceAdapter": "live-devserver"}
@@ -336,17 +343,17 @@ class OUMVGateway:
         except RuntimeError:
             # Level 1 Static Fallback via GraphEngine
             from src.graph_engine import GraphEngine
-            ws = get_active_workspace()
+            ws = workspace_dir or get_active_workspace()
             graph = GraphEngine.get_instance(ws)
             return graph.get_static_oumv_slice(level=level, target=target)
 
     # 3. Tool: oumv_understand
     @classmethod
-    def understand(cls, query: str = "causality", target: Optional[str] = None, runtime: str = "auto") -> Any:
-        fe, be = cls.get_endpoints()
+    def understand(cls, query: str = "causality", target: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
 
         from src.graph_engine import GraphEngine
-        ws = get_active_workspace()
+        ws = workspace_dir or get_active_workspace()
         graph = GraphEngine.get_instance(ws)
 
         # Impact analysis: static cross-stack graph as the backbone, runtime answers attached when online
@@ -401,7 +408,7 @@ class OUMVGateway:
             return report
 
         try:
-            url = cls._resolve_client_url(runtime=runtime, target=target)
+            url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
             return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target, "componentId": target})
         except RuntimeError:
             if query == "impact":
@@ -431,9 +438,9 @@ class OUMVGateway:
 
     # 4. Tool: oumv_mutate
     @classmethod
-    def mutate(cls, path: str, symbol: Optional[str] = None, replacement: Optional[str] = None, expected_version: Optional[str] = None, runtime: str = "auto") -> Any:
+    def mutate(cls, path: str, symbol: Optional[str] = None, replacement: Optional[str] = None, expected_version: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
         # Check workspace permissions (enabled by default out-of-the-box unless explicitly opted out)
-        ws = get_active_workspace()
+        ws = workspace_dir or get_active_workspace()
         cfg_file = os.path.join(ws, ".tokensafe", "oumv.json")
         if os.path.isfile(cfg_file):
             try:
@@ -448,7 +455,7 @@ class OUMVGateway:
                 pass
 
         try:
-            url = cls._resolve_client_url(runtime=runtime, target=path)
+            url = cls._resolve_client_url(runtime=runtime, target=path, workspace_dir=workspace_dir)
             return cls._rpc_call(url, "oumv/applyEdit", {
                 "path": path,
                 "filePath": path,
@@ -457,6 +464,8 @@ class OUMVGateway:
                 "source": replacement,
                 "expectedVersion": expected_version,
             })
+        except OUMVRpcError:
+            raise
         except RuntimeError as e:
             # Out-of-the-box direct fallback when live dev-servers are offline
             if replacement is not None:
@@ -519,8 +528,8 @@ class OUMVGateway:
 
     # 5. Tool: oumv_verify
     @classmethod
-    def verify(cls, target: str, action: str = "invoke", payload: Optional[dict] = None, runtime: str = "auto") -> Any:
-        url = cls._resolve_client_url(runtime=runtime, target=target)
+    def verify(cls, target: str, action: str = "invoke", payload: Optional[dict] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
         res = cls._rpc_call(url, "oumv/verify", {
             "target": target,
             "componentId": target,
@@ -545,7 +554,7 @@ class OUMVGateway:
     @classmethod
     def graph(cls, query: str = "overview", target: Optional[str] = None, workspace_dir: Optional[str] = None) -> Any:
         """Unified graph over static + runtime evidence, with §11.4-style queries."""
-        fe, be = cls.get_endpoints()
+        fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
         from src.cross_stack import build_unified_graph, who_depends_on, impact_from_graph
 
         ws = workspace_dir or get_active_workspace()

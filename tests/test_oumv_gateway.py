@@ -9,7 +9,7 @@ import os
 import shutil
 from unittest.mock import patch, MagicMock
 
-from src.oumv_gateway import OUMVGateway
+from src.oumv_gateway import OUMVGateway, OUMVRpcError
 
 
 class TestOUMVGateway(unittest.TestCase):
@@ -234,6 +234,22 @@ class TestOUMVGateway(unittest.TestCase):
                 res["crossStack"]["frontendCallers"][0]["source"]["file"], "frontend/api.ts"
             )
             self.assertTrue(res["missingEvidence"])
+
+    @patch.object(OUMVGateway, "_rpc_call", side_effect=OUMVRpcError("JSON-RPC error (-32002): SYNTAX_ERROR"))
+    def test_mutate_propagates_live_rpc_error_without_offline_bypass(self, _mock_rpc):
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            OUMVGateway._last_scan_time = 9999999999.0
+            OUMVGateway._cached_fe = {"url": "http://localhost:5173/__oumv/rpc"}
+            file_path = "src/App.tsx"
+            full_path = os.path.join(self.test_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write("export const App = () => <div/>;")
+
+            with self.assertRaises(OUMVRpcError):
+                OUMVGateway.mutate(path=file_path, replacement="broken(", runtime="frontend")
+            with open(full_path, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "export const App = () => <div/>;")
 
 
 if __name__ == "__main__":
