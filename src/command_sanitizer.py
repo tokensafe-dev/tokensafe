@@ -683,11 +683,28 @@ class CommandSanitizer:
         return wrapped, saved, reason, None
 
     @classmethod
+    def _tokensafe_ui_available(cls, cwd: str) -> bool:
+        """True when a tokensafe-ui CLI is installed locally or globally.
+
+        Without it the rewrite would make `npm run dev` fetch the companion package
+        via npx at dev-server start (or fail offline), so the command must stay as-is.
+        """
+        try:
+            from src.retrofit import resolve_tokensafe_ui_cli
+            return resolve_tokensafe_ui_cli(cwd) is not None
+        except Exception:
+            return False
+
+    @classmethod
     def _optimize_vite_dev_stage(cls, stage: str, cwd: Optional[str] = None) -> Optional[Tuple[str, int, str, None]]:
         """
         Rewrites Vite+React dev server launches (`vite`, `npm run dev`, `bun run dev`, `pnpm dev`, `yarn dev`)
         to zero-footprint `tokensafe dev` when `tokensafe-ui` is not yet wired in the project's Vite config,
         so live OUMV RPC starts automatically without mutating repository files.
+
+        Only launches whose flags `tokensafe dev` can reproduce are rewritten: any other
+        flag (`--mode`, `--config`, `--`, …) means the original command is preserved,
+        because dropping it would silently start the dev server in a different config.
         """
         if not cwd or not os.path.isdir(cwd):
             return None
@@ -702,12 +719,20 @@ class CommandSanitizer:
 
         is_vite_dev = False
         passthrough: List[str] = []
+        unknown: List[str] = []
 
-        def _extract_vite_flags(args_list: List[str]) -> List[str]:
+        def _extract_vite_flags(args_list: List[str]) -> Tuple[List[str], List[str]]:
+            """Splits dev flags tokensafe-ui supports from everything it would drop."""
             out: List[str] = []
+            rest: List[str] = []
             i = 0
+            if args_list[:1] == ["--"]:
+                i = 1
             while i < len(args_list):
                 a = args_list[i]
+                if a == "--":
+                    rest.extend(args_list[i:])
+                    break
                 if a in ("--open",):
                     out.append(a)
                 elif a == "--host":
@@ -721,8 +746,10 @@ class CommandSanitizer:
                 elif a in ("--port", "-p") and i + 1 < len(args_list):
                     out.append(f"--port={args_list[i + 1]}")
                     i += 1
+                else:
+                    rest.append(a)
                 i += 1
-            return out
+            return out, rest
 
         pkg_json_path = os.path.join(cwd, "package.json")
         if not os.path.isfile(pkg_json_path):
@@ -751,10 +778,12 @@ class CommandSanitizer:
 
         if cmd_tok == "vite" and (not cmd_args or cmd_args[0].startswith("-") or cmd_args[0] in ("dev", "serve")):
             is_vite_dev = True
-            passthrough = _extract_vite_flags(cmd_args)
+            rest_args = cmd_args[1:] if cmd_args[:1] in (["dev"], ["serve"]) else cmd_args
+            passthrough, unknown = _extract_vite_flags(rest_args)
         elif cmd_tok in ("npx", "bunx") and cmd_args[:1] == ["vite"] and (len(cmd_args) == 1 or cmd_args[1].startswith("-") or cmd_args[1] in ("dev", "serve")):
             is_vite_dev = True
-            passthrough = _extract_vite_flags(cmd_args[1:])
+            rest_args = cmd_args[2:] if cmd_args[1:2] in (["dev"], ["serve"]) else cmd_args[1:]
+            passthrough, unknown = _extract_vite_flags(rest_args)
         elif cmd_tok in ("npm", "bun", "pnpm", "yarn"):
             sub = cmd_args[:2]
             is_dev_script = (sub == ["run", "dev"]) or (cmd_tok in ("pnpm", "yarn") and cmd_args[:1] == ["dev"])
@@ -763,9 +792,12 @@ class CommandSanitizer:
                 dev_script = str(scripts.get("dev") or "")
                 if re.search(r"(?:^|\s)vite(?:\s|$)", dev_script):
                     is_vite_dev = True
-                    passthrough = _extract_vite_flags(cmd_args)
+                    script_idx = 2 if sub == ["run", "dev"] else 1
+                    passthrough, unknown = _extract_vite_flags(cmd_args[script_idx:])
 
-        if not is_vite_dev or not cls._is_tokensafe_available():
+        if not is_vite_dev or unknown:
+            return None
+        if not cls._tokensafe_ui_available(cwd):
             return None
 
         flags_str = (" " + " ".join(passthrough)) if passthrough else ""

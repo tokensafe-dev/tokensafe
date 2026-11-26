@@ -26,6 +26,8 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
         self.test_dir = tempfile.mkdtemp(prefix="oumv_enforce_")
         self.tmp_home = tempfile.mkdtemp(prefix="oumv_home_")
         self.tmp_data = tempfile.mkdtemp(prefix="oumv_data_")
+        from src.retrofit import _UI_CLI_CACHE
+        _UI_CLI_CACHE.clear()
 
     def tearDown(self):
         OUMVGateway._cached_fe = None
@@ -114,13 +116,17 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
 
     def test_command_sanitizer_rewrites_vite_dev_to_tokensafe_dev(self):
         web_dir, _ = self._create_react_plus_node_monorepo()
-        with patch.object(CommandSanitizer, "_is_tokensafe_available", return_value=True):
+        with patch.object(CommandSanitizer, "_tokensafe_ui_available", return_value=True):
             rewritten, _, reason = CommandSanitizer.sanitize("bun run dev --port=5175", cwd=web_dir)
             self.assertEqual(rewritten, "tokensafe dev --port=5175")
             self.assertIn("zero-footprint", reason.lower())
 
             vite_direct, _, _ = CommandSanitizer.sanitize("vite --host", cwd=web_dir)
             self.assertEqual(vite_direct, "tokensafe dev --host")
+
+            # Space-separated port is normalized instead of becoming a directory
+            spaced, _, _ = CommandSanitizer.sanitize("vite --port 5175", cwd=web_dir)
+            self.assertEqual(spaced, "tokensafe dev --port=5175")
 
             # Do NOT rewrite vite build as dev server
             build_cmd, _, _ = CommandSanitizer.sanitize("vite build", cwd=web_dir)
@@ -131,6 +137,24 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
                 f.write("import { tokensafeReact } from 'tokensafe-ui/vite';\nexport default { plugins: [tokensafeReact()] };\n")
             skipped, _, _ = CommandSanitizer.sanitize("bun run dev", cwd=web_dir)
             self.assertIsNone(skipped)
+
+    def test_command_sanitizer_keeps_dev_flags_it_cannot_reproduce(self):
+        web_dir, _ = self._create_react_plus_node_monorepo()
+        with patch.object(CommandSanitizer, "_tokensafe_ui_available", return_value=True):
+            for cmd in (
+                "npm run dev -- --mode staging",
+                "vite --mode staging --port 3000",
+                "vite --config vite.enterprise.ts",
+                "npx vite dev --mode=staging",
+            ):
+                out, _, _ = CommandSanitizer.sanitize(cmd, cwd=web_dir)
+                self.assertNotIn("tokensafe dev", out or "", f"{cmd} must not be rewritten")
+
+        # Without the companion CLI the command stays untouched: rewriting would
+        # make the dev server fetch tokensafe-ui via npx (or fail offline).
+        with patch.object(CommandSanitizer, "_tokensafe_ui_available", return_value=False):
+            out2, _, _ = CommandSanitizer.sanitize("npm run dev", cwd=web_dir)
+            self.assertNotIn("tokensafe dev", out2 or "")
 
     def test_guard_blocks_raw_localhost_curl_when_live_oumv_active(self):
         port = self._start_listener()

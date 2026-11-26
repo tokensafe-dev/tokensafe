@@ -577,6 +577,63 @@ class OUMVProjectContext:
         return "auto"
 
 
+_UI_CLI_CACHE: Dict[str, Tuple[float, Optional[Tuple[List[str], str]]]] = {}
+_UI_CLI_CACHE_TTL: float = 60.0
+
+
+def _resolve_tokensafe_ui_cli_uncached(workspace_dir: str) -> Optional[Tuple[List[str], str]]:
+    """Finds an installed tokensafe-ui CLI without touching the network.
+
+    Returns (argv prefix, human source) or None when the companion CLI is absent.
+    """
+    import shutil
+    import subprocess
+
+    ws = os.path.abspath(workspace_dir)
+
+    # 1. Explicit override wins: lets CI pin a checkout without a global install.
+    env_cli = os.environ.get("TOKENSAFE_UI_CLI")
+    if env_cli and os.path.isfile(env_cli):
+        return (["node", env_cli], "TOKENSAFE_UI_CLI")
+
+    # 2. Local project node_modules/.bin/tokensafe-ui (if present)
+    local_bin = os.path.join(ws, "node_modules", ".bin", "tokensafe-ui")
+    if os.path.isfile(local_bin):
+        return ([local_bin], "local node_modules")
+
+    # 3. Global tokensafe-ui binary on PATH
+    global_bin = shutil.which("tokensafe-ui")
+    if global_bin:
+        return ([global_bin], "global PATH")
+
+    # 4. npm global root package (nvm-style installs whose bin dir is not on PATH)
+    try:
+        res = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0:
+            cli_js = os.path.join(res.stdout.strip(), "tokensafe-ui", "bin", "cli.js")
+            if os.path.isfile(cli_js):
+                return (["node", cli_js], "npm global root")
+    except Exception:
+        pass
+    return None
+
+
+def resolve_tokensafe_ui_cli(workspace_dir: str) -> Optional[Tuple[List[str], str]]:
+    """Cached resolver for the tokensafe-ui CLI (60s TTL per workspace).
+
+    Called from the command sanitizer, which runs per shell command; the npm-root
+    probe alone costs ~200 ms, so it must not repeat on every invocation.
+    """
+    ws = os.path.abspath(workspace_dir)
+    now = time.time()
+    hit = _UI_CLI_CACHE.get(ws)
+    if hit and (now - hit[0]) < _UI_CLI_CACHE_TTL:
+        return hit[1]
+    resolved = _resolve_tokensafe_ui_cli_uncached(ws)
+    _UI_CLI_CACHE[ws] = (now, resolved)
+    return resolved
+
+
 def resolve_zero_footprint_vite_command(
     workspace_dir: str,
     port: Optional[int] = None,
@@ -585,7 +642,6 @@ def resolve_zero_footprint_vite_command(
 ) -> Tuple[List[str], str]:
     """Resolves zero-footprint tokensafe-ui Vite+React runner command without editing repo files."""
     import shutil
-    import subprocess
 
     ws = os.path.abspath(workspace_dir)
     cli_flags: List[str] = []
@@ -596,32 +652,13 @@ def resolve_zero_footprint_vite_command(
     if open_browser:
         cli_flags.append("--open")
 
-    # 1. Local project node_modules/.bin/tokensafe-ui (if present)
-    local_bin = os.path.join(ws, "node_modules", ".bin", "tokensafe-ui")
-    if os.path.isfile(local_bin):
-        return ([local_bin, "dev", ws, *cli_flags], "local node_modules")
+    resolved = resolve_tokensafe_ui_cli(ws)
+    if resolved:
+        prefix, source = resolved
+        return ([*prefix, "dev", ws, *cli_flags], source)
 
-    # 2. Global tokensafe-ui binary on PATH
-    global_bin = shutil.which("tokensafe-ui")
-    if global_bin:
-        return ([global_bin, "dev", ws, *cli_flags], "global PATH")
-
-    # 3. npm global root package
-    try:
-        res = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=3)
-        if res.returncode == 0:
-            global_root = res.stdout.strip()
-            cli_js = os.path.join(global_root, "tokensafe-ui", "bin", "cli.js")
-            if os.path.isfile(cli_js):
-                return (["node", cli_js, "dev", ws, *cli_flags], "npm global root")
-    except Exception:
-        pass
-
-    # 4. Explicit override or npx fallback (zero edits to workspace package.json)
-    env_cli = os.environ.get("TOKENSAFE_UI_CLI")
-    if env_cli and os.path.isfile(env_cli):
-        return (["node", env_cli, "dev", ws, *cli_flags], "TOKENSAFE_UI_CLI")
-
+    # Explicit `tokensafe dev` may bootstrap the companion package via npx; the
+    # command sanitizer never rewrites to this path (see CommandSanitizer).
     npx_bin = shutil.which("npx") or "npx"
     return ([npx_bin, "--yes", "tokensafe-ui", "dev", ws, *cli_flags], "npx tokensafe-ui")
 

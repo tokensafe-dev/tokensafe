@@ -97,7 +97,7 @@ def summarize_unittest_output(raw: str, full_traceback: bool = False) -> str:
 def _print_help():
     print("TokenSafe CLI — usage: tokensafe <command> [args]\n")
     print("Commands:")
-    print("  dev [dir] [--port=5173]         Start Vite+React DevServer with OUMV (zero repo footprint)")
+    print("  dev [dir] [--port N] [--host H] [--open]  Start Vite+React DevServer with OUMV (zero repo footprint)")
     print("  integrate [--dry-run]          Retrofit OUMV into existing project (React, Vue, FastAPI, Go)")
     print("  adapters [list]                Catalog of frontend/backend OUMV runtime adapters")
     print("  oumv doctor / status           Diagnose OUMV configuration, ports, and permissions")
@@ -747,20 +747,42 @@ def main(argv: Optional[List[str]] = None):
         port_val: Optional[int] = None
         host_val: Optional[str] = None
         open_browser = False
-        for a in args[1:]:
+        unknown_flags: List[str] = []
+        i = 1
+        while i < len(args):
+            a = args[i]
+            nxt = args[i + 1] if i + 1 < len(args) else None
             if a.startswith("--port="):
                 try:
                     port_val = int(a.split("=", 1)[1])
                 except ValueError:
                     pass
+            elif a == "--port":
+                if nxt is not None:
+                    try:
+                        port_val = int(nxt)
+                        i += 1
+                    except ValueError:
+                        unknown_flags.append(a)
+                else:
+                    unknown_flags.append(a)
             elif a.startswith("--host="):
                 host_val = a.split("=", 1)[1]
             elif a == "--host":
-                host_val = "true"
+                if nxt is not None and not nxt.startswith("-"):
+                    host_val = nxt
+                    i += 1
+                else:
+                    host_val = "true"
             elif a == "--open":
                 open_browser = True
-            elif not a.startswith("-"):
+            elif a.startswith("-"):
+                unknown_flags.append(a)
+            else:
                 target_dir = os.path.abspath(a)
+            i += 1
+        if unknown_flags:
+            print(f"⚠ Ignoring unsupported 'tokensafe dev' flag(s): {' '.join(unknown_flags)}")
         cmd, source = resolve_zero_footprint_vite_command(
             target_dir, port=port_val, host=host_val, open_browser=open_browser
         )
