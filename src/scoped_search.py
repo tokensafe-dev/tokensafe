@@ -89,6 +89,18 @@ class ScopedSearch:
         return False
 
     @classmethod
+    def _resolve_per_file(cls, per_file: int, max_results: int) -> int:
+        """Hits kept per file. One hot file must not eat the whole result budget:
+        a 20-hit query used to render 2 KB of near-identical lines from 2 files."""
+        try:
+            per_file = int(per_file or 0)
+        except (TypeError, ValueError):
+            per_file = 0
+        if per_file > 0:
+            return per_file
+        return max(6, min(12, max_results // 2))
+
+    @classmethod
     def search(
         cls,
         query: str,
@@ -96,7 +108,8 @@ class ScopedSearch:
         scope: str = "all",
         max_results: int = 25,
         case_sensitive: bool = False,
-        use_regex: Optional[bool] = None
+        use_regex: Optional[bool] = None,
+        per_file: int = 0
     ) -> Dict[str, Any]:
         """
         Executes a bounded code/config search and returns structured results and compact markdown.
@@ -172,14 +185,22 @@ class ScopedSearch:
                 fts = CodeFTSIndex(root_dir)
                 fts_results = fts.search(query, limit=max_results)
                 if fts_results:
+                    per_file_cap = cls._resolve_per_file(per_file, max_results)
+                    per_file_counts: Dict[str, int] = {}
+                    overflow: Dict[str, int] = {}
                     fts_matches = []
                     fts_hit_files = set()
                     for r in fts_results:
                         f_rel = r["file"]
                         if cls.is_match_file(os.path.basename(f_rel), f_rel, scope):
+                            seen = per_file_counts.get(f_rel, 0)
+                            if seen >= per_file_cap:
+                                overflow[f_rel] = overflow.get(f_rel, 0) + 1
+                                continue
                             clean_line = str(r.get("content") or "").strip()
                             if len(clean_line) > 100:
                                 clean_line = clean_line[:97] + "..."
+                            per_file_counts[f_rel] = seen + 1
                             fts_matches.append({
                                 "file": f_rel,
                                 "line": r["line"],
@@ -194,11 +215,14 @@ class ScopedSearch:
                             "files_matched": len(fts_hit_files),
                             "scanned_files": len(fts_hit_files),
                             "total_matches": len(fts_matches),
+                            "overflow_matches": sum(overflow.values()),
+                            "per_file_cap": per_file_cap,
                             "timed_out": False,
                             "matches": fts_matches,
                             "markdown": cls._render_markdown(
                                 query, fts_matches, len(fts_hit_files), False, max_results,
                                 hit_files=fts_hit_files, scope=scope, root_dir=root_dir,
+                                overflow=overflow, per_file_cap=per_file_cap,
                             ),
                         }
             except Exception:
@@ -207,6 +231,9 @@ class ScopedSearch:
         matches: List[Dict[str, Any]] = []
         total_scanned_files = 0
         hit_files = set()
+        per_file_cap = cls._resolve_per_file(per_file, max_results)
+        per_file_counts: Dict[str, int] = {}
+        overflow: Dict[str, int] = {}
         start_time = time.monotonic()
         timeout_seconds = 4.0
         max_scanned_files = 2500
@@ -262,6 +289,11 @@ class ScopedSearch:
                                 if len(clean_line) > 100:
                                     clean_line = clean_line[:97] + "..."
 
+                                seen_in_file = per_file_counts.get(rel_path, 0)
+                                if seen_in_file >= per_file_cap:
+                                    overflow[rel_path] = overflow.get(rel_path, 0) + 1
+                                    continue
+                                per_file_counts[rel_path] = seen_in_file + 1
                                 matches.append({
                                     "file": rel_path,
                                     "line": line_idx,
@@ -292,6 +324,8 @@ class ScopedSearch:
             regex_mode=regex_mode,
             timeout_seconds=timeout_seconds,
             max_scanned_files=max_scanned_files,
+            overflow=overflow,
+            per_file_cap=per_file_cap,
         )
 
         return {
@@ -299,6 +333,8 @@ class ScopedSearch:
             "query": query,
             "scope": scope,
             "total_matches": len(matches),
+            "overflow_matches": sum(overflow.values()),
+            "per_file_cap": per_file_cap,
             "files_matched": len(hit_files),
             "scanned_files": total_scanned_files,
             "timed_out": timed_out,
@@ -321,26 +357,52 @@ class ScopedSearch:
         regex_mode: bool = False,
         timeout_seconds: float = 4.0,
         max_scanned_files: int = 2500,
+        overflow: Optional[Dict[str, int]] = None,
+        per_file_cap: int = 0,
     ) -> str:
-        """Generates compact bounded Markdown output for both FTS5 and disk search paths."""
+        """Generates compact bounded Markdown output for both FTS5 and disk search paths.
+
+        Hits are grouped per file: the path is printed once per file instead of on
+        every line, which keeps a 20-hit query near 1 KB instead of 2 KB.
+        """
         if hit_files is None:
             hit_files = {m["file"] for m in matches if "file" in m}
+        overflow = overflow or {}
         display_root = os.path.basename(root_dir) or root_dir or "."
         mode_suffix = ", auto-regex" if auto_regex and regex_mode else ""
+        more_hidden = sum(overflow.values())
+        count_label = f"{len(matches)} match{'es' if len(matches) != 1 else ''}"
+        if more_hidden:
+            count_label = f"{len(matches)} shown, {more_hidden} more"
         lines = [
-            f"### TokenSafe Scoped Search: '{query}' ({len(matches)} match{'es' if len(matches) != 1 else ''} in {len(hit_files)} file{'s' if len(hit_files) != 1 else ''}, dir: `{display_root}`, scope: {scope}{mode_suffix})"
+            f"### TokenSafe Scoped Search: '{query}' ({count_label} in {len(hit_files)} file{'s' if len(hit_files) != 1 else ''}, dir: `{display_root}`, scope: {scope}{mode_suffix})"
         ]
         if not matches:
             lines.append(f"_No matches found across {total_scanned_files} scanned files in `{root_dir}`._")
             if auto_regex and regex_mode:
                 lines.append("_Auto-regex mode found nothing; pass use_regex=false to force a literal search._")
         else:
+            by_file: Dict[str, List[Dict[str, Any]]] = {}
             for m in matches:
-                txt = m.get("text") if "text" in m else m.get("content", "")
-                lines.append(f"- `{m['file']}:{m['line']}`: `{txt}`")
+                by_file.setdefault(m.get("file", ""), []).append(m)
+            multi_file = len(by_file) > 1
+            for fpath, file_matches in by_file.items():
+                if multi_file:
+                    lines.append(f"**{fpath}**")
+                for m in file_matches:
+                    txt = m.get("text") if "text" in m else m.get("content", "")
+                    if multi_file:
+                        lines.append(f"  - L{m['line']}: `{txt}`")
+                    else:
+                        lines.append(f"- `{fpath}:{m['line']}`: `{txt}`")
+                hidden = overflow.get(fpath, 0)
+                if hidden:
+                    lines.append(f"  … +{hidden} more in this file")
 
         if len(matches) >= max_results:
             lines.append(f"_Results capped at {max_results} matches._")
+        elif more_hidden:
+            lines.append(f"_Kept at most {per_file_cap} hits per file; raise `per_file` for every occurrence._")
         elif timed_out:
             lines.append(f"_Search bounded at {timeout_seconds}s safety limit ({total_scanned_files} files scanned). Narrow 'project_path' for exhaustive scan._")
         elif total_scanned_files >= max_scanned_files:

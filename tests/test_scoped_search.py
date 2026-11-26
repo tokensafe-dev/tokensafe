@@ -146,6 +146,41 @@ class TestScopedSearch(unittest.TestCase):
         self.assertNotIn("isError", res)
         self.assertIn("auto-regex", res["content"][0]["text"])
 
+    def test_per_file_cap_keeps_results_diverse_and_compact(self):
+        import shutil
+        import tempfile
+        root = tempfile.mkdtemp(prefix="tokensafe_ss_cap_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        with open(os.path.join(root, "hot.py"), "w", encoding="utf-8") as f:
+            f.write("".join(f"needle_{i} = 'needle'\n" for i in range(30)))
+        with open(os.path.join(root, "cold.py"), "w", encoding="utf-8") as f:
+            f.write("value = 'needle'\n")
+        res = ScopedSearch.search("needle", project_path=root, scope="code", max_results=20, per_file=3)
+        self.assertTrue(res["success"])
+        self.assertEqual(res["per_file_cap"], 3)
+        hot = [m for m in res["matches"] if m["file"] == "hot.py"]
+        self.assertEqual(len(hot), 3)
+        self.assertGreater(res["overflow_matches"], 0)
+        self.assertIn("+", res["markdown"])
+        self.assertIn("more in this file", res["markdown"])
+        self.assertTrue(any(m["file"] == "cold.py" for m in res["matches"]))
+
+    def test_render_groups_hits_per_file(self):
+        import shutil
+        import tempfile
+        root = tempfile.mkdtemp(prefix="tokensafe_ss_group_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for name in ("a.py", "b.py"):
+            with open(os.path.join(root, name), "w", encoding="utf-8") as f:
+                f.write("token = 1\ntoken = 2\n")
+        res = ScopedSearch.search("token", project_path=root, scope="code")
+        md = res["markdown"]
+        self.assertIn("**a.py**", md)
+        self.assertIn("**b.py**", md)
+        self.assertIn("L1:", md)
+        # the path is printed once per file, not on every hit line
+        self.assertEqual(md.count("a.py"), 1)
+
     def test_scoped_search_fts_fast_path_renders_markdown(self):
         import shutil
         import tempfile
