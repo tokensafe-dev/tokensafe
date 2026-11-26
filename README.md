@@ -233,6 +233,27 @@ Full matrix and details: [docs/OUMV.md](docs/OUMV.md).
 
 ## Benchmarks
 
+### Measured agent matrix (Go, DeepSeek — 3 tasks × 5 runs × 3 arms)
+
+Real 12-assertion oracle re-run after every step; tokens and cost from the provider's `usage`
+payload. `baseline` = file/search/command tools, `tokensafe` = this product's MCP server
+(`scoped_search` → `smart_read_file` → `apply_edits` with inline `verify="auto"`), `oumv` = the
+OUMV protocol runtime. All three arms solve every session.
+
+| Arm | Solved | Mean steps | Mean input | Mean output | Cost/run |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| `baseline` | 15/15 | 4.5 | 19,538 | 1,599 | $0.0035 |
+| `tokensafe` | 15/15 | 4.7 | 17,616 | **750** | **$0.0025** |
+| `oumv` | 15/15 | 4.3 | **12,323** | 1,735 | $0.0032 |
+
+**vs baseline: −9.8% input tokens, −53.1% output tokens, −28.7% cost.** The output column is
+where the product's advantage is structural: `apply_edits` sends the hunk and its target
+snippet, so a one-line fix never resends the file — the other arms reread and rewrite whole
+files. Full method, per-task table, artifacts and limits (including the ±5% run-to-run noise at
+this sample size): [`OUMV_AGENT_MATRIX_V4.md`](https://github.com/tokensafe-dev/tokensafe-backend/blob/main/go/benchmark/OUMV_AGENT_MATRIX_V4.md)
+in the backend repo, generated from the run JSON by
+`go/benchmark/render_agent_matrix.py`.
+
 ### Agent Usability Benchmarks (AUB) — Full-Stack Agent Velocity
 
 > ⚠️ **Simulated, not measured.** These AER figures are computed from fixture traces in the
