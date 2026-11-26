@@ -545,7 +545,7 @@ SYSTEM_TOKENSAFE = (
     "(2) ts_smart_read_file with that path and the identifier from the hit as `symbol` — it returns the "
     "enclosing handler body (or a window around the hit) with line numbers, which is what you edit; "
     "(3) ts_apply_edits with one hunk {target: the exact snippet, replacement: the fix} plus "
-    "verify=<the task's verification command> — it edits and verifies in one call; "
+    'verify="auto" (the project\'s own test command) — it edits and verifies in one call; '
     "(4) if verify fails, read the reported line and repeat (2)-(3). "
     "ts_repo_map is for an unfamiliar repository; skip it when the repro already names the endpoint. "
     "Prefer these tools over list_files/read_file. Tests and the oracle are read-only. "

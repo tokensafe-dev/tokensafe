@@ -512,7 +512,7 @@ SYSTEM_TOKENSAFE = (
     "in the repro to get file:line hits; (2) ts_smart_read_file with that path and the identifier from the hit "
     "as `symbol` — it returns the enclosing component/handler body (or a window around the hit) with line numbers; "
     "(3) ts_apply_edits with one hunk {target: the exact snippet, replacement: the fix} plus "
-    "verify=<the task's oracle command> — it edits and verifies in one call; (4) if verify fails, read the "
+    'verify="auto" (the declared test command) — it edits and verifies in one call; (4) if verify fails, read the '
     "reported line and repeat (2)-(3). ts_repo_map is for an unfamiliar repository; skip it when the repro "
     "already names the component. Prefer these tools over list_files/read_file. Tests and adapter.ts are "
     "read-only. Do not rewrite whole files."

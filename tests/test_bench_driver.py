@@ -164,6 +164,14 @@ class TestGoTargetBreaks(unittest.TestCase):
         finally:
             ws.cleanup()
 
+    def test_each_run_gets_its_own_mcp_session(self):
+        """A constant clientInfo.name made run 2 inherit run 1's dedup/pointer state."""
+        from pathlib import Path
+        from src.bench.tokensafe_mcp import _client_name
+        self.assertNotEqual(_client_name(Path("/tmp/run-a")), _client_name(Path("/tmp/run-b")))
+        self.assertEqual(_client_name(Path("/tmp/run-a")), _client_name(Path("/tmp/run-a")))
+        self.assertLessEqual(len(_client_name(Path("/tmp/run-a"))), 30)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ strawman reimplementation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -18,7 +19,7 @@ TOKENSAFE_BIN = Path(__file__).resolve().parents[2] / "bin" / "tokensafe"
 
 
 class TokenSafeMcp:
-    def __init__(self, workspace: Path, timeout: float = 120.0):
+    def __init__(self, workspace: Path, timeout: float = 120.0, client_name: str = "oumv-bench"):
         self.timeout = timeout
         self.proc = subprocess.Popen(
             [sys.executable, str(TOKENSAFE_BIN), "mcp"],
@@ -34,7 +35,7 @@ class TokenSafeMcp:
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "oumv-bench", "version": "0"},
+                "clientInfo": {"name": client_name, "version": "0"},
             },
         )
         self._notify("notifications/initialized", {})
@@ -87,11 +88,23 @@ class TokenSafeMcp:
                 pass
 
 
+def _client_name(workspace: Path) -> str:
+    """One MCP session per benchmark run.
+
+    The server keys its dedup cache, loop guard and pointer state by session, and the
+    session id is derived from `clientInfo.name`. A constant name would make run 2 of
+    the same task inherit run 1's "you already read this" state — the agent would get
+    a pointer to content it never saw.
+    """
+    digest = hashlib.sha1(str(workspace).encode("utf-8")).hexdigest()[:10]
+    return f"oumv-bench-{digest}"
+
+
 def open_client(workspace: Path) -> Optional[TokenSafeMcp]:
     """Best-effort: a missing CLI means the arm cannot run, not that the bench crashes."""
     if not TOKENSAFE_BIN.exists():
         return None
     try:
-        return TokenSafeMcp(workspace)
+        return TokenSafeMcp(workspace, client_name=_client_name(workspace))
     except Exception:
         return None
