@@ -2902,8 +2902,59 @@ def _redact_result_secrets(result):
     return redacted
 
 
+_ENVELOPE_HEADROOM_BYTES = 200
+
+
+def _wire_bytes(text: str) -> int:
+    """Bytes this text costs on the wire after json.dumps(..., ensure_ascii=False).
+
+    The MCP boundary serializes with ensure_ascii=False, so every newline, tab,
+    quote and backslash is escaped to two characters. Measuring raw UTF-8
+    undercounts newline-heavy output (logs) by up to 2x, which used to let a
+    "capped" payload spill to disk anyway.
+    """
+    try:
+        return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
+    except Exception:
+        return len(str(text).encode("utf-8"))
+
+
+def _fit_prefix(text: str, limit_bytes: int) -> str:
+    """Longest-ish prefix of `text` whose wire cost fits `limit_bytes` (never raises)."""
+    if limit_bytes <= 0 or not text:
+        return ""
+    cost = _wire_bytes(text)
+    if cost <= limit_bytes:
+        return text
+    n = len(text)
+    guess = max(1, int(n * limit_bytes / max(1, cost)))
+    for _ in range(8):
+        candidate = text[:guess]
+        if _wire_bytes(candidate) <= limit_bytes:
+            return candidate
+        guess = max(1, int(guess * 0.8))
+    return text[:1]
+
+
+def _fit_suffix(text: str, limit_bytes: int) -> str:
+    """Longest-ish suffix of `text` whose wire cost fits `limit_bytes` (never raises)."""
+    if limit_bytes <= 0 or not text:
+        return ""
+    cost = _wire_bytes(text)
+    if cost <= limit_bytes:
+        return text
+    n = len(text)
+    guess = max(1, int(n * limit_bytes / max(1, cost)))
+    for _ in range(8):
+        candidate = text[-guess:]
+        if _wire_bytes(candidate) <= limit_bytes:
+            return candidate
+        guess = max(1, int(guess * 0.8))
+    return text[-1:]
+
+
 def _fold_text_for_guard(text: str, limit_bytes: int, tool_name: str) -> str:
-    """Folds `text` into at most `limit_bytes` UTF-8 bytes.
+    """Folds `text` into at most `limit_bytes` WIRE bytes (JSON-escaped cost).
 
     Never raises and never returns an over-budget string: if the stash write is
     unavailable the content is truncated with an explicit marker instead of
@@ -2916,8 +2967,7 @@ def _fold_text_for_guard(text: str, limit_bytes: int, tool_name: str) -> str:
         clean_text = strip_ansi(text)
     except Exception:
         clean_text = text
-    raw = clean_text.encode("utf-8")
-    if len(raw) <= limit_bytes:
+    if _wire_bytes(clean_text) <= limit_bytes:
         return clean_text
 
     marker = ""
@@ -2930,10 +2980,9 @@ def _fold_text_for_guard(text: str, limit_bytes: int, tool_name: str) -> str:
         marker = "[TokenSafe Zero-Spill Guard: content folded; stash copy unavailable]"
 
     footer = "\n" + marker
-    footer_bytes = len(footer.encode("utf-8"))
-    budget = limit_bytes - footer_bytes
+    budget = limit_bytes - _wire_bytes(footer)
     if budget <= 40:
-        return marker.encode("utf-8")[:limit_bytes].decode("utf-8", errors="ignore")
+        return _fit_prefix(marker, limit_bytes)
 
     lines = clean_text.splitlines()
     if len(lines) > 35:
@@ -2942,41 +2991,39 @@ def _fold_text_for_guard(text: str, limit_bytes: int, tool_name: str) -> str:
         omitted = len(lines) - (len(head) + len(tail))
         msg = f"\n... [{omitted} lines / {len(clean_text)} chars folded by TokenSafe Zero-Spill Guard] ...\n"
         tail_str = "\n".join(tail)
-        tail_bytes = len(tail_str.encode("utf-8"))
-        msg_bytes = len(msg.encode("utf-8"))
+        msg_bytes = _wire_bytes(msg)
+        tail_bytes = _wire_bytes(tail_str)
         if msg_bytes + tail_bytes < budget:
             head_budget = budget - msg_bytes - tail_bytes
             head_str = ""
             for line in head:
                 candidate = head_str + line + "\n"
-                if len(candidate.encode("utf-8")) <= head_budget:
+                if _wire_bytes(candidate) <= head_budget:
                     head_str = candidate
                 else:
                     break
             folded = f"{head_str.rstrip()}{msg}{tail_str}{footer}"
-            if len(folded.encode("utf-8")) <= limit_bytes:
+            if _wire_bytes(folded) <= limit_bytes:
                 return folded
 
     msg = "\n... [content folded by TokenSafe Zero-Spill Guard] ...\n"
-    avail = budget - len(msg.encode("utf-8"))
+    avail = budget - _wire_bytes(msg)
     if avail <= 40:
-        return marker.encode("utf-8")[:limit_bytes].decode("utf-8", errors="ignore")
-    head_n = avail // 2
-    tail_n = avail - head_n
-    head_s = raw[:head_n].decode("utf-8", errors="ignore")
-    tail_s = raw[len(raw) - tail_n:].decode("utf-8", errors="ignore") if tail_n else ""
+        return _fit_prefix(marker, limit_bytes)
+    head_s = _fit_prefix(clean_text, max(1, avail // 2))
+    tail_s = _fit_suffix(clean_text[len(head_s):], max(0, avail - _wire_bytes(head_s)))
     folded = f"{head_s}{msg}{tail_s}{footer}"
-    if len(folded.encode("utf-8")) > limit_bytes:
-        folded = folded.encode("utf-8")[:limit_bytes].decode("utf-8", errors="ignore")
+    if _wire_bytes(folded) > limit_bytes:
+        folded = _fit_prefix(folded, limit_bytes)
     return folded
 
 
 def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 8800) -> Any:
     """Zero-Spill Guard: keeps the whole tools/call payload under `max_bytes`.
 
-    The budget is per RESPONSE, not per text block: several medium blocks used
-    to slip through and spill to disk. Only ~90% of `max_bytes` is spent on
-    text, leaving headroom for the JSON escaping the JSON-RPC envelope adds.
+    The budget is per RESPONSE, not per text block, and it is measured in the
+    bytes the JSON-RPC envelope will actually carry (JSON-escaped), leaving a
+    fixed headroom for the envelope itself.
     """
     if not isinstance(result, dict):
         return result
@@ -2988,8 +3035,8 @@ def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 
     if not text_idx:
         return result
 
-    budget = max(256, int(max_bytes * 0.9))
-    sizes = {i: len(str(content[i].get("text") or "").encode("utf-8")) for i in text_idx}
+    budget = max(256, max_bytes - _ENVELOPE_HEADROOM_BYTES)
+    sizes = {i: _wire_bytes(str(content[i].get("text") or "")) for i in text_idx}
     total = sum(sizes.values())
     if total <= budget:
         return result
@@ -3005,7 +3052,7 @@ def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 
             continue
         folded = _fold_text_for_guard(str(content[i].get("text") or ""), target, tool_name)
         new_content[i] = {**content[i], "text": folded}
-        total = total - sizes[i] + len(folded.encode("utf-8"))
+        total = total - sizes[i] + _wire_bytes(folded)
 
     if total > budget:
         # Last resort: keep only the first block, folded to the full budget.
@@ -3013,6 +3060,9 @@ def _cap_mcp_output_size(result: Any, tool_name: str = "tool", max_bytes: int = 
         kept = _fold_text_for_guard(str(content[first].get("text") or ""), budget, tool_name)
         for i in text_idx[1:]:
             new_content[i] = {**new_content[i], "text": ""}
+        # Final guarantee on the wire budget even if the fold overshot.
+        if _wire_bytes(kept) > budget:
+            kept = _fit_prefix(kept, budget)
         new_content[first] = {**content[first], "text": kept}
 
     new_res = dict(result)

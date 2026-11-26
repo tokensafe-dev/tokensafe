@@ -686,6 +686,25 @@ class TestAcceleratorFeatures(unittest.TestCase):
         self.assertLessEqual(len(text.encode("utf-8")), 8800)
         self.assertIn("Zero-Spill", text)
 
+    @staticmethod
+    def _envelope_bytes(result) -> int:
+        """Size of the JSON-RPC tools/call envelope that actually goes over stdio."""
+        return len(json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}, ensure_ascii=False).encode("utf-8"))
+
+    def test_zero_spill_guard_counts_json_escaping(self):
+        """Newline-heavy output used to pass the cap raw and then double on the wire."""
+        text = "a\n" * 3900  # 7800 raw UTF-8 bytes, ~11700 bytes JSON-escaped
+        capped = _cap_mcp_output_size({"content": [{"type": "text", "text": text}]}, tool_name="nl")
+        self.assertLessEqual(self._envelope_bytes(capped), 8800)
+        self.assertNotEqual(capped["content"][0]["text"], text)
+
+    def test_zero_spill_guard_handles_multibyte_text(self):
+        text = ("строка вывода — тест\n" * 900)
+        capped = _cap_mcp_output_size({"content": [{"type": "text", "text": text}]}, tool_name="ru")
+        self.assertLessEqual(self._envelope_bytes(capped), 8800)
+        kept = capped["content"][0]["text"]
+        self.assertTrue(kept.startswith("строка") or kept.startswith("...") or "folded" in kept)
+
     def test_transcript_analyzer(self):
         """Tests parsing of JSONL transcript and A/B comparison."""
         transcript_a = os.path.join(self.tmp_dir, "transcript_a.jsonl")
