@@ -2799,6 +2799,12 @@ WantedBy=default.target
         ui_sync = cls._ensure_tokensafe_ui_global(npm_bins=target_npm_bins, install_if_missing=False)
         if ui_sync.get("ok"):
             print(f"    {GREEN}✔{RESET} tokensafe-ui {ui_sync['action']} globally ({ui_sync['npm']}).")
+        else:
+            # `tokensafe dev` and the vite-dev rewrite both need this companion CLI.
+            print(
+                f"    {YELLOW}⚠{RESET} tokensafe-ui not installed — run "
+                f"`tokensafe install` to enable zero-footprint live Vite+React OUMV."
+            )
         for npm_bin in target_npm_bins:
             npm_env = cls._npm_subprocess_env(npm_bin)
             for pkg in ("create-tokensafe-ui",):

@@ -733,9 +733,28 @@ def format_oumv_workspace_brief(workspace_dir: str, include_live: bool = False) 
     return "[TokenSafe OUMV Workspace Matrix | " + " | ".join(parts) + "]"
 
 
-def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str) -> Optional[Dict[str, Any]]:
-    """Returns the supported stack entry owning `file_path`, or None if unsupported (e.g. backend/node)."""
+_STACK_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_STACK_CACHE_TTL: float = 60.0
 
+
+def detect_project_stack_cached(workspace_dir: str, ttl: float = _STACK_CACHE_TTL) -> Dict[str, Any]:
+    """Short-TTL cache for hot paths (read/edit hooks run per tool call).
+
+    Direct callers keep using detect_project_stack() so tests that mutate
+    manifests between calls always see fresh results.
+    """
+    ws = os.path.realpath(os.path.abspath(workspace_dir))
+    now = time.time()
+    hit = _STACK_CACHE.get(ws)
+    if hit and (now - hit[0]) < ttl:
+        return hit[1]
+    stack = detect_project_stack(workspace_dir)
+    _STACK_CACHE[ws] = (now, stack)
+    return stack
+
+
+def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str, use_cache: bool = False) -> Optional[Dict[str, Any]]:
+    """Returns the supported stack entry owning `file_path`, or None if unsupported (e.g. backend/node)."""
     if not workspace_dir or not file_path:
         return None
     ws_abs = os.path.realpath(os.path.abspath(workspace_dir))
@@ -744,7 +763,7 @@ def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str) -> Optio
         return None
 
     rel = os.path.relpath(f_abs, ws_abs).replace(os.sep, "/")
-    stack = detect_project_stack(ws_abs)
+    stack = detect_project_stack_cached(ws_abs) if use_cache else detect_project_stack(ws_abs)
     packages = stack.get("packages") or []
     # Match most specific package path first
     sorted_pkgs = sorted(

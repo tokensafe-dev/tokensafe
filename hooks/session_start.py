@@ -105,10 +105,8 @@ def main():
     try:
         if workspace_paths:
             from src.graph_engine import GraphEngine
-            from src.retrofit import format_oumv_workspace_brief
             graph = GraphEngine.get_instance(workspace_root)
             banner = graph.format_topology_banner()
-            oumv_brief = format_oumv_workspace_brief(workspace_root, include_live=True)
             extra = []
             if banner:
                 extra.append(
@@ -116,8 +114,14 @@ def main():
                     "⚡ Core God Nodes and dependency hubs mapped above. "
                     "Call 'tokensafe:repo_map(view=\"graph\", project_path=...)' for full dependency trees."
                 )
-            if oumv_brief:
-                extra.append(oumv_brief)
+            # Separate try: an OUMV brief failure must not drop the God-Nodes banner.
+            try:
+                from src.retrofit import format_oumv_workspace_brief
+                oumv_brief = format_oumv_workspace_brief(workspace_root, include_live=True)
+                if oumv_brief:
+                    extra.append(oumv_brief)
+            except Exception:
+                pass
             if extra:
                 directives = f"{directives}\n\n" + "\n".join(extra)
     except Exception:

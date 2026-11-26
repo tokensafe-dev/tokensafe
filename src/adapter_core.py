@@ -457,6 +457,26 @@ def _extract_path(tool_input: Dict[str, Any]) -> str:
     return ""
 
 
+_NUDGE_GC_AGE_SEC = 7 * 86400
+
+
+def _gc_oumv_markers(data_dir: str) -> None:
+    """Drops one-shot OUMV markers older than a week: one accrues per session forever."""
+    try:
+        now = time.time()
+        for name in os.listdir(data_dir):
+            if not name.startswith((".oumv_nudge_", ".oumv_used_")):
+                continue
+            marker_path = os.path.join(data_dir, name)
+            try:
+                if now - os.path.getmtime(marker_path) > _NUDGE_GC_AGE_SEC:
+                    os.unlink(marker_path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def get_oumv_read_edit_advisory(workspace_dir: str, file_path: str, session_id: str = "") -> Optional[str]:
     """One-shot per-session advisory when reading/editing files inside an OUMV-supported stack
     (React+Vite, Vue, Solid, Go, FastAPI) without having called `tokensafe:oumv` recently.
@@ -475,17 +495,21 @@ def get_oumv_read_edit_advisory(workspace_dir: str, file_path: str, session_id: 
         ws = workspace_dir or get_active_workspace()
         if not ws or not os.path.isdir(ws):
             return None
-        pkg = is_path_in_supported_oumv_scope(ws, file_path)
-        if not pkg:
-            return None
+        # Cheap marker first: resolving the owning stack walks every manifest in
+        # the monorepo, and this runs on every read/write hook.
         if OUMVGateway.was_recently_used(ws):
+            return None
+        pkg = is_path_in_supported_oumv_scope(ws, file_path, use_cache=True)
+        if not pkg:
             return None
 
         sess_key = hashlib.sha256(f"{session_id or 'default'}:{os.path.realpath(ws)}".encode("utf-8")).hexdigest()[:16]
-        marker = os.path.join(resolve_data_dir(), f".oumv_nudge_{sess_key}")
+        data_dir = resolve_data_dir()
+        marker = os.path.join(data_dir, f".oumv_nudge_{sess_key}")
         if os.path.isfile(marker):
             return None
-        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        os.makedirs(data_dir, exist_ok=True)
+        _gc_oumv_markers(data_dir)
         with open(marker, "w", encoding="utf-8") as f:
             f.write(str(time.time()))
 
