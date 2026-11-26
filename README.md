@@ -18,7 +18,7 @@
   <a href="https://www.npmjs.com/package/tokensafe"><img src="https://img.shields.io/npm/dw/tokensafe.svg?color=10B981&label=npm%20downloads&style=flat-square" alt="npm downloads"></a>
   <a href="https://pypi.org/project/tokensafe/"><img src="https://img.shields.io/pypi/v/tokensafe.svg?color=38BDF8&style=flat-square" alt="PyPI"></a>
   <a href="https://github.com/tokensafe-dev/tokensafe/stargazers"><img src="https://img.shields.io/github/stars/tokensafe-dev/tokensafe?style=flat-square&color=334155" alt="Stars"></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-0F766E?style=flat-square" alt="License"></a>
+  <a href="https://github.com/tokensafe-dev/tokensafe/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-0F766E?style=flat-square" alt="License"></a>
   <a href="https://tokensafe.dev#pricing"><img src="https://img.shields.io/badge/Team_Trial-7_Days_Free-10B981?style=flat-square" alt="Trial"></a>
 </p>
 
@@ -594,4 +594,8 @@ tokensafe tests
 - Security policy and vulnerability reporting: [SECURITY.md](SECURITY.md)
 - Metrics and honesty contract: [METRICS.md](METRICS.md)
 
-MIT License. Commercial licenses are available for self-hosted B2B and enterprise VPC deployments. Questions: [corp@tokensafe.dev](mailto:corp@tokensafe.dev) · [tokensafe.dev](https://tokensafe.dev)
+Apache-2.0 for versions 4.7.0 and newer. Versions up to and including 4.6.4 were released under MIT and remain MIT forever — that grant cannot be withdrawn, and those tags stay forkable.
+
+Commercial licenses are available for self-hosted B2B and enterprise VPC deployments, support and indemnity. Questions: [corp@tokensafe.dev](mailto:corp@tokensafe.dev) · [tokensafe.dev](https://tokensafe.dev)
+
+"TokenSafe" and "OUMV Certified" are trademarks of Oleg Savelev. Apache-2.0 section 6 excludes trademark rights: the code is open, the names are not.

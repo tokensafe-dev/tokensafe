@@ -1,5 +1,5 @@
 {
-  "version": "4.6.4",
+  "version": "4.7.0",
   "name": "tokensafe",
   "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall & zero-loss context optimizer for AI coding agents.",
   "author": {
@@ -8,7 +8,7 @@
   },
   "homepage": "https://tokensafe.dev",
   "repository": "https://github.com/tokensafe-dev/tokensafe",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "tokensafe",
     "token-optimizer",

@@ -1,7 +1,7 @@
 {
   "name": "tokensafe",
   "mcpName": "dev.tokensafe/tokensafe",
-  "version": "4.6.4",
+  "version": "4.7.0",
   "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall & zero-loss context optimizer for AI coding agents.",
   "main": "bin/tokensafe.js",
   "bin": {
@@ -55,7 +55,7 @@
     "zero-trust"
   ],
   "author": "TokenSafe",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tokensafe-dev/tokensafe.git"

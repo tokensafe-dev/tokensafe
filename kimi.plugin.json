@@ -1,9 +1,9 @@
 {
   "name": "tokensafe",
-  "version": "4.6.4",
+  "version": "4.7.0",
   "description": "Your AI agent is smart enough to code all day. Now it actually can. Local runtime firewall & zero-loss context optimizer for AI coding agents.",
   "homepage": "https://tokensafe.dev",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "logo": "https://tokensafe.dev/ts-logo-black-256.png",
   "icon": "https://tokensafe.dev/ts-logo-black-256.png",
   "iconUrl": "https://tokensafe.dev/ts-logo-black-256.png",

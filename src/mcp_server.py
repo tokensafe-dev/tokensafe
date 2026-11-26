@@ -43,7 +43,7 @@ from src.session_context import current_root, current_session_id
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
-    "version": "4.6.4"
+    "version": "4.7.0"
 }
 
 # MCP client attribution: the initialize handshake carries clientInfo, which
