@@ -23,6 +23,64 @@ from src.command_sanitizer import CommandSanitizer
 
 _TOKENSAFE_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# --------------------------------------------------------------------------- #
+# Network data-exfiltration detection (shell-flow aware)
+#
+# The previous single regex matched `-d` inside `tokensafe-dev` together with the
+# word `token` inside `tokensafe-python`, across a `;` separator, so read-only
+# checks like `curl … https://pypi.org/… ; gh secret list -R org/repo` were
+# blocked. It also flagged any script that merely quoted such a command in a
+# heredoc. Detection is now per shell segment and only fires on a sensitive
+# *file* actually being uploaded.
+# --------------------------------------------------------------------------- #
+
+_EXFIL_SENSITIVE_PATH = (
+    r"(?:\.env(?:\.[\w-]+)?|id_rsa|id_ed25519|credentials\.json|service_account\.json|"
+    r"\.npmrc|\.pypirc|[\w.-]*\.(?:pem|key)|secrets?\.(?:json|ya?ml|toml|env))"
+)
+_EXFIL_FILE = rf"(?:[\w./~-]*/)?{_EXFIL_SENSITIVE_PATH}"
+_EXFIL_NET = r"(?:sudo\s+)?(?:curl|wget|nc|ncat|netcat)"
+
+_EXFIL_PATTERNS = (
+    rf"\b{_EXFIL_NET}\b[^;|&\n]*(?:--data(?:-binary|-raw)?|--post-file|-d|-T|--upload-file)(?:[=\s]+)@?['\"]?{_EXFIL_FILE}",
+    rf"\b{_EXFIL_NET}\b[^;|&\n]*(?:-F|--form)\s+[^=\s]*=@['\"]?{_EXFIL_FILE}",
+    rf"\b{_EXFIL_NET}\b[^;|&\n]*<\s*['\"]?{_EXFIL_FILE}",
+    rf"\bcat\s+['\"]?{_EXFIL_FILE}['\"]?\s*\|\s*{_EXFIL_NET}\b",
+    # command substitution / backticks reading a sensitive file into the URL
+    rf"\b{_EXFIL_NET}\b[^;|&\n]*\$\(\s*(?:cat\s+)?['\"]?{_EXFIL_FILE}",
+    rf"\b{_EXFIL_NET}\b[^;|&\n]*`cat\s+['\"]?{_EXFIL_FILE}",
+)
+_EXFIL_COMPILED = tuple(re.compile(p, re.IGNORECASE) for p in _EXFIL_PATTERNS)
+
+
+def _strip_heredocs(command: str) -> str:
+    """Drops heredoc bodies: their text is data for an interpreter, not shell flow."""
+    lines = command.splitlines()
+    kept = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_]\w*)['\"]?", line)
+        if match:
+            tag = match.group(1)
+            i += 1
+            while i < len(lines) and lines[i].strip() != tag:
+                i += 1
+        i += 1
+    return "\n".join(kept)
+
+
+def _detect_shell_exfiltration(command: str):
+    """Returns the offending fragment when a sensitive file is sent to a network client."""
+    shell = _strip_heredocs(command or "")
+    for pattern in _EXFIL_COMPILED:
+        match = pattern.search(shell)
+        if match:
+            return match.group(0)
+    return None
+
+
 class GuardResult(NamedTuple):
     blocked: bool
     reason: Optional[str] = None
@@ -536,20 +594,15 @@ class TokenSafeGuard:
                     ),
                 )
 
-        # 3. Network Data Exfiltration Prevention (piping or posting secrets to curl/wget/nc)
-        _SENS_EXFIL = r"(?:\.env(?:\.[\w-]+)?|id_rsa|id_ed25519|\.key|\.pem|credentials\.json|service_account\.json|secret|password|token)"
-        exfil_pattern = re.search(
-            rf"""(?:\b(?:curl|wget|nc|ncat|netcat)\b.*?(?:\$\(\s*(?:cat\s+)?<?\s*[^)]*{_SENS_EXFIL}[^)]*\)|`cat\s+[^`]*{_SENS_EXFIL}[^`]*`|(?:-d|--data|--data-binary|--data-raw|-T|--upload-file)[=\s]*@?[^\s]*{_SENS_EXFIL}|-F\s+[^=]*=@[^\s]*{_SENS_EXFIL}|--post-file[=\s]+[^\s]*{_SENS_EXFIL}|<\s*[^\s]*{_SENS_EXFIL})|\bcat\s+[^\s|]*{_SENS_EXFIL}\s*\|\s*(?:curl|wget|nc|ncat|netcat)\b)""",
-            cmd,
-            re.IGNORECASE
-        )
-        if exfil_pattern:
+        # 3. Network Data Exfiltration Prevention (uploading sensitive FILES to a network client)
+        exfil_hit = _detect_shell_exfiltration(cmd)
+        if exfil_hit:
             return GuardResult(
                 blocked=True,
                 check_name="DATA_EXFILTRATION",
                 reason=(
-                    f"Blocked potential credential exfiltration via network command: '{cmd}'. "
-                    f"Piping or posting local sensitive files (.env / private keys) to remote endpoints is prohibited."
+                    f"Blocked potential credential exfiltration via network command: '{exfil_hit}'. "
+                    f"Uploading local sensitive files (.env / private keys) to remote endpoints is prohibited."
                 )
             )
 
