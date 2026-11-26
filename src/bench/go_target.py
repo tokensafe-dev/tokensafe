@@ -376,6 +376,35 @@ TOKENSAFE_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [
     {
         "type": "function",
         "function": {
+            "name": "ts_apply_edits",
+            "description": (
+                "TokenSafe surgical editor: replaces exact snippets (hunks of {target, replacement}) "
+                "and runs `verify` after the edit, returning a one-line pass/fail."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target": {"type": "string", "description": "Exact snippet to replace"},
+                                "replacement": {"type": "string", "description": "Replacement snippet"},
+                            },
+                            "required": ["target", "replacement"],
+                        },
+                    },
+                    "verify": {"type": "string", "description": "Shell command to run after the edit"},
+                },
+                "required": ["path", "edits"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ts_repo_map",
             "description": "TokenSafe architecture map: god nodes / high-dependency files, or an API surface.",
             "parameters": {
@@ -480,6 +509,13 @@ def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
             "ts_scoped_search": lambda query, path=".": ws.tokensafe(
                 "scoped_search", {"query": query, "path": path, "max_results": 20}
             ),
+            "ts_apply_edits": lambda path, edits, verify="": ws.tokensafe(
+                "apply_edits",
+                {
+                    "edits": [{"path": path, "hunks": edits}],
+                    **({"verify": verify} if verify else {}),
+                },
+            ),
             "ts_repo_map": lambda view="graph": ws.tokensafe("repo_map", {"view": view, "project_path": "."}),
         })
     if arm == "oumv":
@@ -503,11 +539,17 @@ SYSTEM_BASELINE = (
     "read-only. Make the smallest correct change; stop as soon as the oracle passes."
 )
 SYSTEM_TOKENSAFE = (
-    "You are a senior Go engineer working in a small Go module. The workspace has TokenSafe tools: "
-    "ts_smart_read_file returns a compact AST view of a symbol, ts_scoped_search finds code by substring, "
-    "ts_repo_map shows high-dependency files. Use them before reading whole files; write_file for edits and "
-    "run_command to verify. Tests and the oracle are read-only. Make the smallest correct change and stop "
-    "as soon as the oracle passes."
+    "You are a senior Go engineer working in a small Go module. The workspace has TokenSafe tools. "
+    "The bug report includes a repro; use this loop and stop as soon as the oracle passes: "
+    "(1) ts_scoped_search for the status code or error text named in the repro — it returns file:line hits; "
+    "(2) ts_smart_read_file with that path and the identifier from the hit as `symbol` — it returns the "
+    "enclosing handler body (or a window around the hit) with line numbers, which is what you edit; "
+    "(3) ts_apply_edits with one hunk {target: the exact snippet, replacement: the fix} plus "
+    "verify=<the task's verification command> — it edits and verifies in one call; "
+    "(4) if verify fails, read the reported line and repeat (2)-(3). "
+    "ts_repo_map is for an unfamiliar repository; skip it when the repro already names the endpoint. "
+    "Prefer these tools over list_files/read_file. Tests and the oracle are read-only. "
+    "Do not rewrite whole files; stop as soon as the oracle passes."
 )
 
 SYSTEM_OUMV = (

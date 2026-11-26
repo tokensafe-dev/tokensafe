@@ -346,6 +346,13 @@ def registry(ws: ReactWorkspace, arm: str = "baseline") -> Dict[str, Any]:
                 "scoped_search", {"query": query, "path": path, "max_results": 20}
             ),
             "ts_repo_map": lambda view="graph": ws.tokensafe("repo_map", {"view": view, "project_path": "."}),
+            "ts_apply_edits": lambda path, edits, verify="": ws.tokensafe(
+                "apply_edits",
+                {
+                    "edits": [{"path": path, "hunks": edits}],
+                    **({"verify": verify} if verify else {}),
+                },
+            ),
         })
     if arm == "oumv":
         tools.update({
@@ -393,6 +400,35 @@ TOKENSAFE_TOOLS: List[Dict[str, Any]] = TOOLS + [
                 "type": "object",
                 "properties": {"view": {"type": "string", "enum": ["graph", "api", "tree"]}},
                 "required": ["view"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ts_apply_edits",
+            "description": (
+                "TokenSafe surgical editor: replaces exact snippets (hunks of {target, replacement}) "
+                "and runs `verify` after the edit, returning a one-line pass/fail."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target": {"type": "string", "description": "Exact snippet to replace"},
+                                "replacement": {"type": "string", "description": "Replacement snippet"},
+                            },
+                            "required": ["target", "replacement"],
+                        },
+                    },
+                    "verify": {"type": "string", "description": "Shell command to run after the edit"},
+                },
+                "required": ["path", "edits"],
             },
         },
     },
@@ -471,11 +507,15 @@ SYSTEM = (
 )
 
 SYSTEM_TOKENSAFE = (
-    "You are a senior React engineer working in a small sandbox. The workspace has TokenSafe tools: "
-    "ts_smart_read_file returns a compact AST view of a symbol, ts_scoped_search finds code by substring, "
-    "ts_repo_map shows high-dependency files. Use them before reading whole files; write_file for edits and "
-    "run_command for the 12-assertion oracle. Tests and adapter.ts are read-only. Make the smallest correct "
-    "change and stop as soon as the oracle reports 12."
+    "You are a senior React engineer working in a small sandbox. The workspace has TokenSafe tools. "
+    "Use this loop and stop as soon as the oracle reports 12: (1) ts_scoped_search for the behaviour named "
+    "in the repro to get file:line hits; (2) ts_smart_read_file with that path and the identifier from the hit "
+    "as `symbol` — it returns the enclosing component/handler body (or a window around the hit) with line numbers; "
+    "(3) ts_apply_edits with one hunk {target: the exact snippet, replacement: the fix} plus "
+    "verify=<the task's oracle command> — it edits and verifies in one call; (4) if verify fails, read the "
+    "reported line and repeat (2)-(3). ts_repo_map is for an unfamiliar repository; skip it when the repro "
+    "already names the component. Prefer these tools over list_files/read_file. Tests and adapter.ts are "
+    "read-only. Do not rewrite whole files."
 )
 
 SYSTEM_OUMV = (
