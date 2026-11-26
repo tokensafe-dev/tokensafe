@@ -309,7 +309,17 @@ def _apply_hunk_to_text(
             return None, f"Target not found in lines {s_idx+1}..{e_idx}: {hint}"
         count = sub_text.count(match_target)
         if count > 1 and not replace_all:
-            return None, f"Target occurs {count} times within lines {s_idx+1}..{e_idx}. Specify replace_all=True or narrow the range."
+            # Report where: the caller just narrowed to a window and needs the exact
+            # sub-range (or a longer unique snippet) to finish the edit in one retry.
+            occ, scan = [], 0
+            while len(occ) < 5:
+                pos = sub_text.find(match_target, scan)
+                if pos < 0:
+                    break
+                occ.append(str(s_idx + sub_text.count("\n", 0, pos) + 1))
+                scan = pos + 1
+            locs = f" (near lines {', '.join(occ)})" if occ else ""
+            return None, f"Target occurs {count} times within lines {s_idx+1}..{e_idx}{locs}. Specify replace_all=True or narrow the range."
         prepared_replacement = _normalize_eol(replacement, nl)
         new_sub = sub_text.replace(match_target, prepared_replacement) if replace_all else sub_text.replace(match_target, prepared_replacement, 1)
         new_lines = lines[:s_idx] + [new_sub] + lines[e_idx:]
