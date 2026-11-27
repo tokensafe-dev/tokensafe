@@ -63,6 +63,58 @@ def run_one(
         ws.cleanup()
 
 
+def _matrix_report(
+    tasks: List[str],
+    arms: List[str],
+    runs: int,
+    model: str,
+    budget_usd: float,
+    files: int,
+    results: List[Dict[str, Any]],
+    spent: float,
+    aborted: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "target": "go",
+        "sandbox_files": files,
+        "tasks": tasks,
+        "arms": arms,
+        "runs": runs,
+        "model": model,
+        "budget_usd": budget_usd,
+        "spent_usd": round(spent, 6),
+        "aborted": aborted,
+        "results": results,
+        "provenance": _provenance("go", tasks, arms),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def checkpoint_path(files: int = 0) -> Path:
+    from src.paths import resolve_data_dir
+
+    label = f"go-{files}f" if files else "go"
+    return Path(resolve_data_dir()) / "bench" / f"{label}-checkpoint.json"
+
+
+def _write_checkpoint(files: int, report: Dict[str, Any]) -> None:
+    """Persist every finished session immediately.
+
+    The first v5 attempt spent ~$0.14 and lost all 45 rows to a socket timeout in
+    the last provider call, because the artifact was only written once at the end.
+    A checkpoint per row costs nothing and makes a crash resumable by reading the
+    finished rows instead of paying for them twice.
+    """
+    path = checkpoint_path(files)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({**report, "partial": True}, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 def run_matrix(
     tasks: List[str],
     arms: List[str],
@@ -87,24 +139,13 @@ def run_matrix(
                 row["run"] = run_idx
                 results.append(row)
                 spent += float((row.get("usage") or {}).get("usd") or 0.0)
+                _write_checkpoint(files, _matrix_report(tasks, arms, runs, model, budget_usd, files,
+                                                        results, spent, aborted))
             if aborted:
                 break
         if aborted:
             break
-    return {
-        "target": "go",
-        "sandbox_files": files,
-        "tasks": tasks,
-        "arms": arms,
-        "runs": runs,
-        "model": model,
-        "budget_usd": budget_usd,
-        "spent_usd": round(spent, 6),
-        "aborted": aborted,
-        "results": results,
-        "provenance": _provenance("go", tasks, arms),
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
+    return _matrix_report(tasks, arms, runs, model, budget_usd, files, results, spent, aborted)
 
 
 
@@ -342,4 +383,9 @@ def write_artifacts(report: Dict[str, Any], out_dir: Optional[Path] = None) -> D
     md_path = base / f"{label}-{stamp}.md"
     json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_markdown(report), encoding="utf-8")
+    # The final artifact supersedes the per-row checkpoint.
+    try:
+        checkpoint_path(files).unlink()
+    except OSError:
+        pass
     return {"json": str(json_path), "markdown": str(md_path)}

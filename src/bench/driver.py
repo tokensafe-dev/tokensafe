@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -83,23 +84,32 @@ class BudgetExceeded(RuntimeError):
 
 
 class DeepSeekClient:
+    _RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
     def __init__(
         self,
         model: str = "deepseek-chat",
         temperature: float = 0.0,
         base_url: Optional[str] = None,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
+        retries: int = 4,
     ):
         self.model = model
         self.temperature = temperature
         self.base_url = (base_url or os.environ.get("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         self.timeout = timeout
+        self.retries = max(1, int(retries))
         self.api_key = resolve_api_key()
         if not self.api_key:
             raise RuntimeError(
                 "no DeepSeek API key: set DEEPSEEK_API_KEY or write deepseek_api_key "
                 "into ~/.tokensafe/data/config.json"
             )
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
+        # 5s, 15s, 30s: a paid matrix must survive a flaky read, not restart.
+        return min(30.0, 5.0 * (3 ** (attempt - 1)))
 
     def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         body: Dict[str, Any] = {
@@ -110,18 +120,35 @@ class DeepSeekClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                payload = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"provider HTTP {exc.code}: {exc.read().decode()[:300]}") from exc
-        return payload["choices"][0]["message"], payload.get("usage") or {}
+        data = json.dumps(body).encode()
+        last_error = ""
+        for attempt in range(1, self.retries + 1):
+            req = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=data,
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    payload = json.loads(resp.read().decode())
+                return payload["choices"][0]["message"], payload.get("usage") or {}
+            except urllib.error.HTTPError as exc:
+                last_error = f"provider HTTP {exc.code}: {exc.read().decode()[:300]}"
+                if exc.code not in self._RETRY_STATUS or attempt == self.retries:
+                    raise RuntimeError(last_error) from exc
+            except (TimeoutError, urllib.error.URLError, ConnectionResetError, json.JSONDecodeError) as exc:
+                # A long generation can outlive the socket read, and a truncated body is
+                # not valid JSON. Both are transient and must not kill a paid matrix
+                # mid-run: the first v5 attempt died after ~$0.14 with 45 sessions
+                # collected and nothing written.
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt == self.retries:
+                    raise RuntimeError(
+                        f"provider call failed after {self.retries} attempts — {last_error}"
+                    ) from exc
+            time.sleep(self._backoff(attempt))
+        raise RuntimeError(f"provider call failed — {last_error}")
 
 
 ToolFn = Callable[..., Any]
