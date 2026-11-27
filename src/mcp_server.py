@@ -430,7 +430,8 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                              'target': {   'description': "Target component ID, route (e.g. 'POST "
                                                                           "/api/products'), or DOM element "
                                                                           "('#submit-btn')",
-                                                           'type': 'string'}},
+                                                           'type': 'string'},
+                                             'workspace_dir': {'type': 'string'}},
                            'type': 'object'},
         'name': 'oumv_observe'},
     {   'annotations': {'readOnlyHint': True},
@@ -448,7 +449,8 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                             'type': 'string'},
                                              'target': {   'description': 'Target component ID, state key, endpoint, '
                                                                           'or UI element',
-                                                           'type': 'string'}},
+                                                           'type': 'string'},
+                                             'workspace_dir': {'type': 'string'}},
                            'type': 'object'},
         'name': 'oumv_understand'},
     {   'annotations': {'destructiveHint': False, 'readOnlyHint': False},
@@ -467,7 +469,8 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                                            "'backend', or 'auto')",
                                                             'enum': ['frontend', 'backend', 'auto'],
                                                             'type': 'string'},
-                                             'symbol': {'description': 'Target symbol to edit', 'type': 'string'}},
+                                             'symbol': {'description': 'Target symbol to edit', 'type': 'string'},
+                                             'workspace_dir': {'type': 'string'}},
                            'required': ['path'],
                            'type': 'object'},
         'name': 'oumv_mutate'},
@@ -488,7 +491,8 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                             'type': 'string'},
                                              'target': {   'description': "Action target (component ID, e.g. 'cart', "
                                                                           "or 'POST /api/v1/orders' or '#submit-btn')",
-                                                           'type': 'string'}},
+                                                           'type': 'string'},
+                                             'workspace_dir': {'type': 'string'}},
                            'required': ['target'],
                            'type': 'object'},
         'name': 'oumv_verify'},
@@ -503,7 +507,8 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                           'type': 'string'},
                                              'target': {   'description': "Target resource (e.g. '/api/orders' or "
                                                                           "'POST /api/orders')",
-                                                          'type': 'string'}},
+                                                          'type': 'string'},
+                                             'workspace_dir': {'type': 'string'}},
                            'type': 'object'},
         'name': 'oumv_graph'},
     {   'annotations': {'readOnlyHint': False, 'destructiveHint': False},
@@ -780,7 +785,11 @@ TOOLS = [{'name': 'smart_read_file',
                                  'replacement': {'type': 'string'},
                                  'expectedVersion': {'type': 'string'},
                                  'verify_action': {'type': 'string'},
-                                 'payload': {'type': 'object'}}}},
+                                 'payload': {'type': 'object'},
+                                 'workspace_dir': {'type': 'string',
+                                                   'description': 'Target repo root; for '
+                                                                  'status/observe/understand/verify/graph '
+                                                                  'also accepted as path'}}}},
  {'name': 'run_helper',
   'annotations': {'readOnlyHint': False},
   'description': "Utilities: 'sanitize','guard','diff','deps','web','expand','image','compress'.",
@@ -1006,6 +1015,68 @@ def _resolve_project_root(args: dict) -> Tuple[Optional[str], Optional[str]]:
             pass
 
     return None, "Error: Invalid or root project_path. Please specify an explicit 'project_path' pointing to your project directory (e.g. project_path='/path/to/project')."
+
+
+def _shared_batch_root(paths: List[str], real_cwd: str) -> Optional[str]:
+    """Narrowest project directory that contains every absolute sub-query path.
+
+    Batch search is one root per call. When every explicit sub-query path lives
+    outside the current root but inside one repo, that repo IS the root: rebasing
+    there beats failing the call (agents batch a second checkout this way). Paths
+    that share only a wide parent — the directory that also holds the current
+    root, or two sibling repos — return None so the caller keeps the split rule.
+    """
+    try:
+        shared = os.path.commonpath(paths)
+    except ValueError:
+        return None
+    if os.path.isfile(shared):
+        shared = os.path.dirname(shared)
+    if not shared or shared == os.path.abspath(os.sep) or not os.path.isdir(shared):
+        return None
+
+    def _swallows_cwd(candidate: str) -> bool:
+        try:
+            return os.path.commonpath([real_cwd, candidate]) == candidate
+        except ValueError:
+            return False
+
+    if _swallows_cwd(shared):
+        return None
+    # Prefer the enclosing project root, so a batch of sub-paths searches its
+    # repo instead of just their common sub-directory.
+    try:
+        from src.graph_engine import GraphEngine
+        shared = GraphEngine.find_project_root(shared)
+    except Exception:
+        pass
+    if not os.path.isdir(shared) or _swallows_cwd(shared) or is_plugin_or_system_dir(shared):
+        return None
+    return shared
+
+
+def _oumv_workspace_arg(args: dict, allow_path: bool = False) -> Tuple[Optional[str], Optional[str]]:
+    """Validated workspace root for an OUMV call; None means "use the active one".
+
+    The MCP server inherits the host process cwd, so without this an explicit
+    target repo was either dropped (unadvertised property) or ignored, and the
+    answer described the bound workspace. A root that does not exist now fails
+    closed instead of reporting another repo's stack.
+    """
+    raw = str(args.get("workspace_dir") or "").strip()
+    if not raw and allow_path:
+        raw = str(args.get("path") or "").strip()
+    if not raw:
+        return None, None
+    ws = os.path.abspath(raw)
+    if os.path.isfile(ws):
+        ws = os.path.dirname(ws)
+    if not os.path.isdir(ws):
+        return None, f"workspace_dir not found or not a directory: '{raw}'"
+    if is_plugin_or_system_dir(ws):
+        return None, f"refusing to use system root or plugin dir as workspace: '{ws}'"
+    return ws, None
+
 
 MCP_TOOL_TIMEOUT = float(os.environ.get("TOKENSAFE_MCP_TIMEOUT", "8.0"))
 
@@ -1869,6 +1940,18 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         action = str(args.get("action") or "status").strip().lower()
         if action not in _OUMV_ACTIONS:
             return _fallback_error("oumv", f"unknown action '{action}'")
+        # Target-repo routing: the MCP server inherits the host's cwd, so an agent
+        # inspecting a second repo (workspace_dir, or `path` for the read actions)
+        # used to get the bound workspace's stack back with no error — a silently
+        # wrong answer. Resolve the explicit root here and fail closed on a bad one.
+        ws, ws_err = _oumv_workspace_arg(
+            args,
+            allow_path=action in ("status", "observe", "understand", "verify", "graph"),
+        )
+        if ws_err:
+            return _fallback_error("oumv", ws_err)
+        if ws:
+            args = dict(args, workspace_dir=ws)
         mapped = _OUMV_ACTIONS[action]
         if action == "verify":
             args = dict(args, action=args.get("verify_action") or "invoke")
@@ -3149,7 +3232,10 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
     elif name == "oumv_status":
         try:
             from src.oumv_gateway import OUMVGateway
-            ws = str(args.get("workspace_dir") or "").strip() or get_active_workspace() or os.getcwd()
+            ws, ws_err = _oumv_workspace_arg(args, allow_path=True)
+            if ws_err:
+                return _fallback_error("oumv_status", ws_err)
+            ws = ws or get_active_workspace() or os.getcwd()
             res = OUMVGateway.status(workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -3161,7 +3247,9 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             lvl = str(args.get("level") or "L0").strip()
             tgt = str(args.get("target") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
-            ws = str(args.get("workspace_dir") or "").strip() or None
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_observe", ws_err)
             res = OUMVGateway.observe(level=lvl, target=tgt, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -3173,7 +3261,9 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             qry = str(args.get("query") or "causality").strip()
             tgt = str(args.get("target") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
-            ws = str(args.get("workspace_dir") or "").strip() or None
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_understand", ws_err)
             res = OUMVGateway.understand(query=qry, target=tgt, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -3187,7 +3277,9 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             rep = args.get("replacement")
             ev = str(args.get("expectedVersion") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
-            ws = str(args.get("workspace_dir") or "").strip() or None
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_mutate", ws_err)
             res = OUMVGateway.mutate(path=p, symbol=sym, replacement=rep, expected_version=ev, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -3200,7 +3292,9 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             act = str(args.get("action") or "invoke").strip()
             payload = args.get("payload") if isinstance(args.get("payload"), dict) else None
             rt = str(args.get("runtime") or "auto").strip()
-            ws = str(args.get("workspace_dir") or "").strip() or None
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_verify", ws_err)
             res = OUMVGateway.verify(target=tgt, action=act, payload=payload, runtime=rt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -3211,7 +3305,9 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             from src.oumv_gateway import OUMVGateway
             qry = str(args.get("query") or "overview").strip()
             tgt = str(args.get("target") or "").strip() or None
-            ws = str(args.get("workspace_dir") or "").strip() or None
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_graph", ws_err)
             res = OUMVGateway.graph(query=qry, target=tgt, workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -3370,9 +3466,15 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
 
             safe_queries: List[Dict[str, Any]] = []
             real_cwd = os.path.realpath(cwd)
+            # Pass 1: resolve every sub-query path. A relative path that climbs out
+            # of the root is still a hard error (traversal); absolute paths are an
+            # explicit intent to search elsewhere, so they may be rebased below.
+            q_copies: List[Any] = []
+            path_abs: Dict[int, str] = {}
+            outside: List[str] = []
             for q_item in queries:
                 if not isinstance(q_item, dict):
-                    safe_queries.append(q_item)
+                    q_copies.append(q_item)
                     continue
                 q_copy = dict(q_item)
                 sub_p = q_copy.get("path")
@@ -3389,18 +3491,54 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                     except ValueError:
                         inside = False
                     if not inside:
-                        return _fallback_error(
-                            "batch_search",
-                            f"subquery path '{sub_p}' resolves to '{sub_abs}', outside project root "
-                            f"'{real_cwd}'. One call searches one root: pass that repo as cwd/project_path "
-                            f"with repo-relative paths, and split queries for other repos into separate calls.",
-                        )
+                        if not os.path.isabs(str(sub_p)):
+                            return _fallback_error(
+                                "batch_search",
+                                f"subquery path '{sub_p}' resolves to '{sub_abs}', outside project root "
+                                f"'{real_cwd}'. One call searches one root: pass that repo as cwd/project_path "
+                                f"with repo-relative paths, and split queries for other repos into separate calls.",
+                            )
+                        outside.append(sub_abs)
+                    path_abs[len(q_copies)] = sub_abs
+                q_copies.append(q_copy)
+
+            rebased_from: Optional[str] = None
+            if outside:
+                shared_root = _shared_batch_root(outside, real_cwd) if len(outside) == len(path_abs) else None
+                if not shared_root:
+                    detail = (
+                        "queries mix paths inside and outside it"
+                        if len(outside) != len(path_abs)
+                        else "they share no single enclosing project directory"
+                    )
+                    return _fallback_error(
+                        "batch_search",
+                        f"subquery paths resolve outside project root '{real_cwd}' and {detail}. "
+                        f"One call searches one root: pass that repo as cwd/project_path with "
+                        f"repo-relative paths, and split queries for other repos into separate calls.",
+                    )
+                rebased_from = cwd
+                cwd = shared_root
+                real_cwd = os.path.realpath(shared_root)
+                for idx, sub_abs in path_abs.items():
+                    if isinstance(q_copies[idx], dict):
+                        q_copies[idx]["path"] = os.path.relpath(sub_abs, shared_root)
+
+            for q_copy in q_copies:
+                if not isinstance(q_copy, dict):
+                    safe_queries.append(q_copy)
+                    continue
                 if is_quota_exceeded:
                     q_copy["max_results"] = min(_safe_int(q_copy.get("max_results"), 3, lo=1, hi=100), 3)
                 safe_queries.append(q_copy)
 
             res = execute_batch_search(queries=safe_queries, cwd=cwd)
             summary_md = res.get("summary_md", "")
+            if rebased_from:
+                summary_md = (
+                    f"// [TokenSafe: batch root auto-rebased to '{cwd}' (was '{rebased_from}') — "
+                    f"every subquery path lives there]\n" + summary_md
+                )
             if is_quota_exceeded:
                 banner = _quota_banner_if_due(quota, tracker, _mcp_session_id())
                 current_tier = str(quota.get("tier") or "guest").lower()

@@ -160,5 +160,111 @@ class TestSearchRootResolution(unittest.TestCase):
         self.assertIn(REPO_ROOT, text)
 
 
+class TestBatchRootRebase(unittest.TestCase):
+    """A batch whose absolute paths all live in one other repo is that repo's batch.
+
+    The reported failure: an agent searched a second checkout with
+    queries=[{path: '/other/repo'}, {path: '/other/repo/src'}] and the handler
+    rejected the whole call ("outside project root"), spending a turn on an error
+    that named the one thing the caller had already told it.
+    """
+
+    def setUp(self):
+        self._tmp_data = tempfile.mkdtemp(prefix="tokensafe_rebase_data_")
+        self.addCleanup(shutil.rmtree, self._tmp_data, ignore_errors=True)
+        self._orig_data = os.environ.get("TOKENSAFE_DATA_DIR")
+        os.environ["TOKENSAFE_DATA_DIR"] = self._tmp_data
+
+        self.base = tempfile.mkdtemp(prefix="tokensafe_rebase_")
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.session_repo = os.path.join(self.base, "session-repo")
+        self.other_repo = os.path.join(self.base, "other-repo")
+        os.makedirs(os.path.join(self.session_repo, "src"))
+        os.makedirs(os.path.join(self.other_repo, "src"))
+        with open(os.path.join(self.session_repo, "src", "app.py"), "w", encoding="utf-8") as f:
+            f.write("spin_session = 1\n")
+        for rel in ("a.py", os.path.join("src", "b.py")):
+            with open(os.path.join(self.other_repo, rel), "w", encoding="utf-8") as f:
+                f.write("spinWheel()\n")
+        # Project marker so the rebase lands on the repo root, not src/.
+        open(os.path.join(self.other_repo, "pyproject.toml"), "w").close()
+
+    def tearDown(self):
+        if self._orig_data is None:
+            os.environ.pop("TOKENSAFE_DATA_DIR", None)
+        else:
+            os.environ["TOKENSAFE_DATA_DIR"] = self._orig_data
+
+    def test_all_absolute_paths_in_one_other_repo_rebases(self):
+        res = handle_tool_call(
+            "scoped_search",
+            {
+                "queries": [
+                    {"pattern": "spinWheel", "type": "text", "path": self.other_repo},
+                    {"pattern": "spinWheel", "type": "text", "path": os.path.join(self.other_repo, "src")},
+                ],
+                "project_path": self.session_repo,
+            },
+        )
+        self.assertNotIn("isError", res, res["content"][0]["text"])
+        text = res["content"][0]["text"]
+        self.assertIn("auto-rebased", text)
+        self.assertIn("b.py", text)
+
+    def test_mixed_roots_still_rejected(self):
+        res = handle_tool_call(
+            "scoped_search",
+            {
+                "queries": [
+                    {"pattern": "x", "type": "text", "path": os.path.join(self.session_repo, "src")},
+                    {"pattern": "x", "type": "text", "path": self.other_repo},
+                ],
+                "project_path": self.session_repo,
+            },
+        )
+        self.assertTrue(res.get("isError"))
+        self.assertIn("outside project root", res["content"][0]["text"])
+
+
+class TestOumvWorkspaceRouting(unittest.TestCase):
+    """`oumv` must answer for the repo the caller named, never for the bound cwd."""
+
+    def setUp(self):
+        self._tmp_data = tempfile.mkdtemp(prefix="tokensafe_oumv_route_")
+        self.addCleanup(shutil.rmtree, self._tmp_data, ignore_errors=True)
+        self._orig_data = os.environ.get("TOKENSAFE_DATA_DIR")
+        os.environ["TOKENSAFE_DATA_DIR"] = self._tmp_data
+        self.repo = tempfile.mkdtemp(prefix="tokensafe_oumv_repo_")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        with open(os.path.join(self.repo, "package.json"), "w", encoding="utf-8") as f:
+            f.write('{"dependencies": {"react": "^18.0.0"}, "devDependencies": {"vite": "^5.0.0"}}')
+
+    def tearDown(self):
+        if self._orig_data is None:
+            os.environ.pop("TOKENSAFE_DATA_DIR", None)
+        else:
+            os.environ["TOKENSAFE_DATA_DIR"] = self._orig_data
+
+    def test_path_is_the_workspace_for_status(self):
+        import json
+        res = handle_tool_call("oumv", {"action": "status", "path": self.repo})
+        self.assertNotIn("isError", res, res["content"][0]["text"])
+        payload = json.loads(res["content"][0]["text"])
+        self.assertEqual(payload["workspace"], self.repo)
+        self.assertEqual(payload["detectedStack"]["workspace"], self.repo)
+        self.assertEqual(payload["detectedStack"]["frontend"]["framework"], "react")
+
+    def test_workspace_dir_is_honored(self):
+        import json
+        res = handle_tool_call("oumv", {"action": "status", "workspace_dir": os.path.join(self.repo, "package.json")})
+        self.assertNotIn("isError", res, res["content"][0]["text"])
+        self.assertEqual(json.loads(res["content"][0]["text"])["workspace"], self.repo)
+
+    def test_missing_workspace_fails_closed(self):
+        res = handle_tool_call("oumv", {"action": "status", "path": os.path.join(self.repo, "nope")})
+        self.assertTrue(res.get("isError"))
+        self.assertIn("not found or not a directory", res["content"][0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()
