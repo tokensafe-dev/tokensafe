@@ -18,8 +18,9 @@ The sign-off adds `Signed-off-by: Your Name <you@example.com>`; PRs without it a
 
 ## 🎯 Core Philosophy & Guidelines
 
-1. **Minimal Runtime Dependencies (`cryptography>=42.0` + stdlib)**:
-   - Core AST, proxy, MCP, guard, and SQLite modules run strictly on the Python standard library; `cryptography>=42.0` (`pyproject.toml` / `requirements.txt`) is the single required runtime dependency for Ed25519/RS256 cryptographic verification.
+1. **Minimal Runtime Dependencies (`cryptography>=42.0` required, AST grammars optional)**:
+   - Core AST, proxy, MCP, guard, and SQLite modules run strictly on the Python standard library; `cryptography>=42.0` (`pyproject.toml` / `requirements.txt`) is the single *required* runtime dependency for Ed25519/RS256 cryptographic verification.
+   - `tree-sitter` plus grammar wheels and `Pillow` are optional accelerators. `src/treesitter_backend.py` and `src/image_downscale.py` must keep their stdlib fallbacks working when those packages are absent.
    - Do not add other third-party runtime dependencies without approval.
 2. **Deterministic Token Economy**:
    - Every modification to compactor, slicer, or AST skeletonizer must be benchmarked for token savings and verified for zero code semantics loss.

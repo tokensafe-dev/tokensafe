@@ -77,12 +77,14 @@ For team workspaces, `tokensafe install --project --agents-plugin <path-to-token
 - Stale `agy-token-optimizer` symlinks from older versions are removed automatically: Antigravity keys plugin enable-state by folder name, and a leftover copy would run every hook twice.
 - Once the plugin ships its own `mcp_config.json`, any leftover user-level `tokensafe` MCP entry in Antigravity's configs is migrated away (backed up first) so the server is not registered twice.
 
-## 6. Runtime Dependency: `cryptography`
+## 6. Runtime Dependencies
 
-TokenSafe's AST, MCP, proxy, and guard modules use Python's standard library only, with [`cryptography>=42.0`](https://pypi.org/project/cryptography/) as the single required runtime dependency:
+TokenSafe's AST, MCP, proxy, and guard modules use Python's standard library only. [`cryptography>=42.0`](https://pypi.org/project/cryptography/) is the single *required* runtime dependency:
 
 - `pip install tokensafe` installs `cryptography>=42.0` automatically via `pyproject.toml`.
 - `npx tokensafe` and `install.sh` check for `cryptography` on startup and auto-install it (`--user` or isolated `~/.tokensafe/venv` under PEP 668) if absent.
+- If no CPython 3.10+ exists at all, the npm launcher downloads a pinned build (`bin/python-runtime.json`, CPython 3.12.16 from `astral-sh/python-build-standalone`) into `~/.tokensafe/runtime`, verifies its SHA-256 before extraction, and installs the dependencies into that private prefix. `TOKENSAFE_NO_DOWNLOAD=1` disables the download; `TOKENSAFE_PYTHON` pins an interpreter.
+- Optional accelerators: `tree-sitter` plus grammar wheels (AST-accurate slicing; without them the slicer uses stdlib heuristics, and `TOKENSAFE_TREESITTER=off` forces that path) and `Pillow` (image downscaling; macOS `sips` is the fallback).
 
 | Component | Behavior |
 |---|---|

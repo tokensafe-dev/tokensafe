@@ -11,6 +11,7 @@
     "bin/tokensafe.js",
     "bin/tokensafe",
     "bin/agy-tokens",
+    "bin/python-runtime.json",
     "src/",
     "!src/cloud_backend.py",
     "!src/mailer.py",

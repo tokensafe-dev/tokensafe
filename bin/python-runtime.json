@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "python": "3.12.16",
+  "release": "20261124",
+  "source": "astral-sh/python-build-standalone",
+  "base_url": "https://github.com/astral-sh/python-build-standalone/releases/download",
+  "targets": {
+    "darwin-arm64": {
+      "asset": "cpython-3.12.16+20261124-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "431b99a9c2cdd37ad9b06e425be0e520d2dbce0552abe454257abef592fe3634",
+      "size": 25399370
+    },
+    "darwin-x64": {
+      "asset": "cpython-3.12.16+20261124-x86_64-apple-darwin-install_only.tar.gz",
+      "sha256": "ccce24cfd3f56f62561d2c9480fcc567ca3a9bac68450cd73e11aeb631befa1f",
+      "size": 25113881
+    },
+    "linux-x64": {
+      "asset": "cpython-3.12.16+20261124-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "6774c7f49ee21c1723f7ac91961a5bf9f3ee3ae6e4d82ff58bd358958b546461",
+      "size": 68209387
+    },
+    "linux-arm64": {
+      "asset": "cpython-3.12.16+20261124-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "2e6b3576f96d5b8861e4c265ea6db3d19eb24027bbd6c22f044544989444b20b",
+      "size": 53286223
+    },
+    "win32-x64": {
+      "asset": "cpython-3.12.16+20261124-x86_64-pc-windows-msvc-install_only.tar.gz",
+      "sha256": "8152ff5b6c6c044ddbbaa3531dda59cb9ce5bd6cb670d4c9ac2e3ab91afa8778",
+      "size": 47497711
+    }
+  }
+}

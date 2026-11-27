@@ -40,6 +40,10 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13"
 ]
+# Required: cryptography. Everything below it is optional at runtime
+# (tree-sitter grammars -> src/treesitter_backend.py stdlib fallback,
+# Pillow -> macOS sips), but stays in the default install so
+# `pip install tokensafe` ships the complete tool.
 dependencies = [
     "cryptography>=42.0",
     "tree-sitter>=0.23",
@@ -58,9 +62,6 @@ dependencies = [
     "tree-sitter-swift",
     "Pillow>=10.0.0",
 ]
-
-[project.optional-dependencies]
-treesitter_extra = []
 
 [project.urls]
 Homepage = "https://tokensafe.dev"

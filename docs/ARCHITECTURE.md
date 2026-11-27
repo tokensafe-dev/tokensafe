@@ -14,7 +14,7 @@ Every request from a coding agent passes through the same local pipeline in mill
 
 ## 2. Polyglot AST Engine (10+ Languages)
 
-The deterministic local AST state machine folds non-target function bodies in **< 30ms** using the Python standard library (`cryptography>=42.0` is the single runtime dependency for Ed25519/RS256 verification), preserving target symbols and 1-hop dependencies with full executable bodies.
+The deterministic local AST state machine folds non-target function bodies in **< 30ms** using the Python standard library, with tree-sitter grammars as an optional accelerator for AST-exact symbol extraction (the stdlib heuristics remain the fallback when no grammar is installed). `cryptography>=42.0` is the only *required* third-party runtime dependency (Ed25519/RS256 verification). When no CPython 3.10+ exists, the npm launcher provisions a pinned build from `bin/python-runtime.json` into `~/.tokensafe/runtime`, SHA-256 verified before extraction, preserving target symbols and 1-hop dependencies with full executable bodies.
 
 | Language / Framework | File Extensions | Preserved Structures | Folding Mechanism |
 |---|---|---|---|

@@ -1,9 +1,13 @@
 # TokenSafe runtime dependencies.
 #
-# `cryptography>=42.0` is a required runtime dependency for:
-#   - Client: fast Ed25519 signature verification & signing (<1ms per validation)
-#   - Cloud backend: fail-closed RS256 verification of Clerk session tokens
-#   - Release tooling: MCP Registry DNS Ed25519 key loading
+# Required: `cryptography>=42.0` (Ed25519 client signing/verification, fail-closed
+# RS256 verification of Clerk session tokens, MCP Registry DNS key loading).
+# Everything below it is optional at runtime: tree-sitter grammars power the AST
+# backend (src/treesitter_backend.py is skipped and stdlib heuristics take over
+# when they are missing) and Pillow powers image downscaling (macOS falls back
+# to `sips`). They stay in the default install so `pip install tokensafe` ships
+# the full tool. The npm launcher installs the same set; when no CPython 3.10+
+# exists it provisions a pinned runtime from bin/python-runtime.json.
 cryptography>=42.0
 
 # Tree-sitter AST & code intelligence engines (pre-compiled binary wheels)

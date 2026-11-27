@@ -69,6 +69,13 @@ curl -fsSL https://tokensafe.dev/install.sh | bash
 
 The installer detects which agents live on your machine, registers the TokenSafe MCP server, injects project rules, and wires lifecycle hooks where the agent supports them.
 
+### Runtime requirements
+
+- **CPython 3.10+** (3.11+ recommended). If no suitable interpreter is found, the npm launcher provisions a pinned, SHA-256-verified CPython 3.12 build into `~/.tokensafe/runtime` and installs the dependencies there, so TokenSafe works on a machine without Python. One-time download: 25 MB on macOS, 47 MB on Windows, 53-68 MB on Linux. Opt out with `TOKENSAFE_NO_DOWNLOAD=1`, force a specific interpreter with `TOKENSAFE_PYTHON=/path/to/python3`, relocate the whole tree with `TOKENSAFE_HOME`.
+- **`cryptography>=42.0`** is the only required Python dependency (Ed25519 license checks, under 1 ms per validation).
+- **Optional accelerators**, installed by default but not required: `tree-sitter` plus grammar wheels for AST-accurate slicing across 10 languages (without them the slicer falls back to stdlib heuristics; disable with `TOKENSAFE_TREESITTER=off`), and `Pillow` for cross-platform image downscaling (macOS falls back to `sips`).
+- The managed runtime is pinned in [`bin/python-runtime.json`](bin/python-runtime.json): CPython 3.12.16 from `astral-sh/python-build-standalone`, five platform builds, every archive verified against a hardcoded SHA-256 before extraction.
+
 | Agent | Integration |
 |---|---|
 | **Google Antigravity** | Plugin symlink + hooks + skills + MCP (loaded automatically on startup) |
@@ -604,7 +611,7 @@ More documentation: [docs/OUMV.md](docs/OUMV.md) · [docs/AGENT_SETUP.md](docs/A
 
 ## Development and License
 
-The client runs on Python 3.10+ with `cryptography>=42.0` as its sole runtime dependency for Ed25519 license checks; all AST slicing, SQLite metrics, MCP tooling, and guardrails run on the standard library ([details](docs/AGENT_SETUP.md#6-runtime-dependency-cryptography)).
+The client runs on CPython 3.10+ with `cryptography>=42.0` as its only *required* runtime dependency for Ed25519 license checks and fail-closed RS256 session verification. `tree-sitter` grammars and `Pillow` are optional accelerators with stdlib fallbacks, so the engine still slices, guards, and records metrics when they are absent. If no Python 3.10+ exists, the npm launcher downloads a pinned, SHA-256-verified CPython into `~/.tokensafe/runtime`; all AST slicing, SQLite metrics, MCP tooling, and guardrails run on the standard library ([details](docs/AGENT_SETUP.md#6-runtime-dependencies)).
 
 ```bash
 # Run the unit test suite (compact failure report; full: --traceback / -v)

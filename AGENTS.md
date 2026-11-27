@@ -32,7 +32,7 @@ Run unit tests with:
 ```bash
 python3 -m unittest discover tests
 ```
-Before submitting changes, keep new dependencies minimal: the AST, proxy, MCP, and telemetry engines run strictly on the Python standard library, with `cryptography>=42.0` (see `requirements.txt` / `pyproject.toml`) as the single required runtime dependency for Ed25519 offline license verification and fail-closed RS256 Clerk session verification.
+Before submitting changes, keep new dependencies minimal: the AST, proxy, MCP, and telemetry engines run strictly on the Python standard library, with `cryptography>=42.0` (see `requirements.txt` / `pyproject.toml`) as the single *required* runtime dependency for Ed25519 offline license verification and fail-closed RS256 Clerk session verification. `tree-sitter` grammars and `Pillow` are optional accelerators and must keep their stdlib fallbacks (`src/treesitter_backend.py`, `src/image_downscale.py`) working when absent. Installed interpreters come from `bin/tokensafe.js`: system CPython, then `~/.tokensafe/venv`, then the pinned managed runtime in `bin/python-runtime.json` (SHA-256 verified, downloaded only when no CPython 3.10+ exists).
 
 <!-- tokensafe -->
 ## TOKENSAFE GRAPH-FIRST OPTIMIZATION PROTOCOL
