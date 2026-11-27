@@ -3,7 +3,7 @@
   "name": "dev.tokensafe/tokensafe",
   "title": "TokenSafe",
   "description": "Your AI agent is smart enough to code all day. Local firewall & zero-loss runtime.",
-  "version": "4.7.7",
+  "version": "4.7.8",
   "websiteUrl": "https://tokensafe.dev",
   "repository": {
     "url": "https://github.com/tokensafe-dev/tokensafe",
@@ -23,7 +23,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "tokensafe",
-      "version": "4.7.7",
+      "version": "4.7.8",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -39,7 +39,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "tokensafe",
-      "version": "4.7.7",
+      "version": "4.7.8",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
