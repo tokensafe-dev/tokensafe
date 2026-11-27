@@ -43,3 +43,13 @@ jobs:
       - name: Verify CLI Syntax
         run: |
           node -c bin/tokensafe.js
+
+      # `help` is forwarded to src/cli.py:_print_help(), so a command that ships
+      # in the dispatcher can never be missing from the npm help screen again.
+      - name: Verify help matches the dispatcher
+        run: |
+          out=$(node bin/tokensafe.js --help)
+          printf '%s\n' "$out" | head -5
+          for cmd in "dev [dir]" "inject [status|apply|revert]" "adapters [list]" "bench-oumv"; do
+            printf '%s\n' "$out" | grep -qF "$cmd" || { echo "::error::tokensafe help is missing: $cmd"; exit 1; }
+          done

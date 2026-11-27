@@ -353,14 +353,16 @@ function printInstallGuidance() {
   console.error('Managed runtime downloads can be disabled: TOKENSAFE_NO_DOWNLOAD=1\n');
 }
 
-async function findPython() {
+async function findPython(options = {}) {
+  const { allowProvision = true, requireDeps = true } = options;
   const pinned = (process.env.TOKENSAFE_PYTHON || '').trim();
   if (pinned) {
     if (probePython(pinned, true)) return pinned;
-    if (probePython(pinned, false)) {
+    if (requireDeps && probePython(pinned, false)) {
       const bootstrapped = bootstrapDependencies(pinned);
       if (bootstrapped) return bootstrapped;
     }
+    if (!requireDeps && probePython(pinned, false)) return pinned;
     fail(`TOKENSAFE_PYTHON=${pinned} is not a usable CPython ${MIN_PYTHON[0]}.${MIN_PYTHON[1]}+ with 'cryptography'.`);
   }
 
@@ -368,6 +370,15 @@ async function findPython() {
   const venvPy = venvPythonPath();
   if (fs.existsSync(venvPy)) candidates.push(venvPy);
   candidates.push('python3', 'python');
+
+  if (!requireDeps) {
+    // `help` only prints: a bare interpreter is enough, and a dependency
+    // bootstrap there would turn a two-line reference into a pip install.
+    for (const cmd of candidates) {
+      if (probePython(cmd, false)) return cmd;
+    }
+    return allowProvision ? await ensureManagedRuntime() : null;
+  }
 
   for (const cmd of candidates) {
     if (probePython(cmd, true)) return cmd;
@@ -379,54 +390,45 @@ async function findPython() {
     }
   }
 
-  return await ensureManagedRuntime();
+  return allowProvision ? await ensureManagedRuntime() : null;
 }
 
 const firstArg = args[0] || '';
+const wantsHelp = firstArg === 'help' || firstArg === '--help' || firstArg === '-h';
 
-if (firstArg === 'help' || firstArg === '--help' || firstArg === '-h') {
+// The command reference lives in src/cli.py:_print_help(). This launcher used
+// to carry its own copy and fell behind: `dev`, `inject`, `adapters` and
+// `bench-oumv` were missing, so `tokensafe help` advertised a subset of the
+// real dispatcher. Help is forwarded to the Python CLI now, so one list feeds
+// both entrypoints. This fallback only prints when no interpreter exists yet.
+function printHelpFallback() {
   console.log(`
 ⚡ TokenSafe - Local-First AI Coding Guardrails & Context Optimizer
 Website: https://tokensafe.dev
+Docs:    https://tokensafe.dev/docs
 
-Usage:
-  tokensafe [command] [options]
+The command reference is printed by the Python CLI, which is not available yet.
+Install CPython ${MIN_PYTHON[0]}.${MIN_PYTHON[1]}+ once and rerun 'tokensafe help':
+  macOS:          brew install python3
+  Debian/Ubuntu:  sudo apt-get install python3 python3-venv
+  Fedora:         sudo dnf install python3
+  Windows:        winget install Python.Python.3.12
 
-Commands:
-  tokensafe init               Initialize TokenSafe ecosystem in current directory
-  tokensafe login              Sign in to unlock 500k free monthly tokens
-  tokensafe logout             Sign out and revert to Guest 50k mode
-  tokensafe stats              Show token economy savings & performance metrics
-  tokensafe sync               Synchronize local token metrics with Cloud Dashboard
-  tokensafe html               Generate and open interactive browser dashboard
-  tokensafe test "<prompt>"    Test prompt compression on custom input
-  tokensafe expand-ref <hash>  Restore folded tool/command/file result by its 8-char hash
-  tokensafe wrap <command>     Run command with compact output folding (e.g. tests/logs)
-  tokensafe web <url>          Fetch web page/docs and print clean compact Markdown
-  tokensafe doctor             Audit MCP servers & skills context token tax
-  tokensafe providers          List active LLM distillation models & keys
-  tokensafe benchmark          Run zero-loss verification benchmark suite
-  tokensafe mcp                Manage MCP servers (list, disable <name>, enable <name>)
-  tokensafe proxy [port]       Start Transparent Local AI Proxy (default: 8765)
-  tokensafe graph              Analyze repository God Nodes & dependency topology
-  tokensafe map                Generate tokensafe-out/API_SURFACE.md interface snapshot
-  tokensafe vacuum             Compact SQLite metrics database storage
-  tokensafe prune              Prune granular telemetry events into lifetime rollup
-  tokensafe digest             Preview or send weekly team ROI digest email
-  tokensafe tests              Run the unit test suite (compact failure report)
-  tokensafe activate <key>     Activate commercial Solo or Team seat license key
-  tokensafe license            Show current license status and active tier
-  tokensafe update             One-click self-update for npm, pip & all AI agent rules
-  tokensafe install            Interactive installer for Cursor, Antigravity, Claude, etc.
-  tokensafe uninstall          Uninstall TokenSafe from AI agents, unwire proxy & clean rules
-  tokensafe --help             Show this help screen
+No interpreter at hand? The launcher can provision a pinned build on the first
+real command (network required), or accept an existing one:
+  TOKENSAFE_PYTHON=/path/to/python3 tokensafe help
 `);
-  process.exit(0);
 }
 
 async function main() {
-  const python = await findPython();
+  // Help must never trigger the managed-runtime download: it is a print, not a
+  // run. Probe what is already installed; the fallback covers the rest.
+  const python = await findPython({ allowProvision: !wantsHelp, requireDeps: !wantsHelp });
   if (!python) {
+    if (wantsHelp) {
+      printHelpFallback();
+      process.exit(0);
+    }
     printInstallGuidance();
     process.exit(1);
   }
