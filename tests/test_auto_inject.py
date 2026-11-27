@@ -280,6 +280,11 @@ func main() {
         self.assertEqual(reverted["status"], "reverted")
         self.assertEqual(open(program, "rb").read(), original)
 
+        # A .NET manifest must never be consumed by the Go/Node reverters: they
+        # used to share one manifest.json and stole each other's backups.
+        self.assertEqual(auto_inject.revert_go_patch(self.tmp)["status"], "nothing-to-revert")
+        self.assertEqual(auto_inject.revert_node_patch(self.tmp)["status"], "clean")
+
     def test_dotnet_patch_rolls_back_when_build_fails(self):
         program = self._write_dotnet_project()
         original = open(program, "rb").read()

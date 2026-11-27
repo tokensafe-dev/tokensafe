@@ -18,6 +18,7 @@ Two very different injection strategies live here, because the runtimes differ:
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -61,6 +62,51 @@ def _workspace_id(workspace: str) -> str:
 
 def _inject_dir(workspace: str) -> str:
     return os.path.join(_tokensafe_home(), _INJECT_DIRNAME, _workspace_id(workspace))
+
+
+def _manifest_path(workspace: str, kind: str) -> str:
+    """One manifest per adapter kind: a monorepo can carry a Go patch and a .NET
+    patch at once, and a single shared file would lose the first one's backup."""
+    return os.path.join(_inject_dir(workspace), "manifests", f"{kind}.json")
+
+
+def _write_manifest(workspace: str, kind: str, payload: Dict[str, Any]) -> str:
+    path = _manifest_path(workspace, kind)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return path
+
+
+def _read_manifest(workspace: str, kind: str, legacy_modes: tuple) -> Optional[Dict[str, Any]]:
+    """Own manifest first; a legacy single manifest.json only when its mode belongs
+    to this adapter (the old file was shared by every kind)."""
+    own = _manifest_path(workspace, kind)
+    if os.path.isfile(own):
+        try:
+            with open(own, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["_manifest"] = own
+            return data
+        except Exception:
+            return None
+    legacy = os.path.join(_inject_dir(workspace), "manifest.json")
+    if os.path.isfile(legacy):
+        try:
+            with open(legacy, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        if data.get("mode") in legacy_modes:
+            data["_manifest"] = legacy
+            return data
+    return None
+
+
+def _delete_manifest(manifest: Dict[str, Any]) -> None:
+    path = manifest.get("_manifest")
+    if path and os.path.isfile(path):
+        os.unlink(path)
 
 
 def pyhooks_dir() -> str:
@@ -454,17 +500,12 @@ def apply_go_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
             "build_output": build_output[-1200:],
         }
 
-    with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "entrypoint": path,
-                "backup": backup_path,
-                "framework": framework,
-                "mode": "serve" if wrapped is not None else "mount",
-            },
-            f,
-            indent=2,
-        )
+    _write_manifest(workspace, "go", {
+        "entrypoint": path,
+        "backup": backup_path,
+        "framework": framework,
+        "mode": "serve" if wrapped is not None else "mount",
+    })
 
     return {
         "status": "patched",
@@ -494,17 +535,15 @@ def _go_build(workspace: str) -> Tuple[bool, str]:
 
 
 def revert_go_patch(workspace: str) -> Dict[str, Any]:
-    manifest_path = os.path.join(_inject_dir(workspace), "manifest.json")
-    if not os.path.isfile(manifest_path):
+    manifest = _read_manifest(workspace, "go", ("serve", "mount", "go_patch"))
+    if manifest is None:
         return {"status": "nothing-to-revert"}
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
     target = manifest.get("entrypoint")
     backup = manifest.get("backup")
     if not target or not backup or not os.path.isfile(backup):
         return {"status": "error", "reason": "backup missing"}
     shutil.copy2(backup, target)
-    os.remove(manifest_path)
+    _delete_manifest(manifest)
     return {"status": "reverted", "entrypoint": os.path.relpath(target, workspace)}
 
 
@@ -612,8 +651,7 @@ def apply_node_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
     shutil.copy2(path, backup_path)
     with open(path, "w", encoding="utf-8") as f:
         f.write(patched)
-    with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({"entrypoint": path, "backup": backup_path, "framework": framework, "mode": "node_mount"}, f, indent=2)
+    _write_manifest(workspace, "node", {"entrypoint": path, "backup": backup_path, "framework": framework})
     return {
         "status": "patched",
         "entrypoint": os.path.relpath(path, workspace),
@@ -625,22 +663,15 @@ def apply_node_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
 
 
 def revert_node_patch(workspace: str) -> Dict[str, Any]:
-    manifest_path = os.path.join(_inject_dir(workspace), "manifest.json")
-    if not os.path.isfile(manifest_path):
+    manifest = _read_manifest(workspace, "node", ("node_mount",))
+    if manifest is None:
         return {"status": "clean", "reason": "no Node patch manifest"}
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-    except Exception as exc:
-        return {"status": "error", "reason": f"cannot read manifest: {exc}"}
-    if manifest.get("mode") != "node_mount":
-        return {"status": "clean", "reason": "manifest is not a Node patch"}
     entrypoint = manifest.get("entrypoint")
     backup = manifest.get("backup")
     if not (entrypoint and backup and os.path.isfile(backup)):
         return {"status": "error", "reason": "backup missing; restore manually"}
     shutil.copy2(backup, entrypoint)
-    os.unlink(manifest_path)
+    _delete_manifest(manifest)
     return {"status": "reverted", "entrypoint": os.path.relpath(entrypoint, workspace)}
 
 
@@ -851,12 +882,8 @@ def apply_dotnet_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
             "build": build_output[-800:],
         }
 
-    with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as handle:
-        json.dump(
-            {"entrypoint": entrypoint, "backup": backup_path, "framework": "aspnetcore", "mode": "dotnet_mount"},
-            handle,
-            indent=2,
-        )
+    _write_manifest(workspace, "dotnet",
+                    {"entrypoint": entrypoint, "backup": backup_path, "framework": "aspnetcore"})
     return {
         "status": "patched",
         "entrypoint": os.path.relpath(entrypoint, workspace),
@@ -869,22 +896,15 @@ def apply_dotnet_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
 
 
 def revert_dotnet_patch(workspace: str) -> Dict[str, Any]:
-    manifest_path = os.path.join(_inject_dir(workspace), "manifest.json")
-    if not os.path.isfile(manifest_path):
+    manifest = _read_manifest(workspace, "dotnet", ("dotnet_mount",))
+    if manifest is None:
         return {"status": "clean", "reason": "no .NET patch manifest"}
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
-    except Exception as exc:
-        return {"status": "error", "reason": f"cannot read manifest: {exc}"}
-    if manifest.get("mode") != "dotnet_mount":
-        return {"status": "clean", "reason": "manifest is not a .NET patch"}
     entrypoint = manifest.get("entrypoint")
     backup = manifest.get("backup")
     if not (entrypoint and backup and os.path.isfile(backup)):
         return {"status": "error", "reason": "backup missing; restore manually"}
     shutil.copy2(backup, entrypoint)
-    os.unlink(manifest_path)
+    _delete_manifest(manifest)
     return {"status": "reverted", "entrypoint": os.path.relpath(entrypoint, workspace)}
 
 
@@ -1103,7 +1123,8 @@ def plan(workspace: str) -> Dict[str, Any]:
         "profiles": [p for p in ("frontend", "backend") if stack.get(p)],
         "actions": actions,
         "python_autoload_present": python_autoload_present(),
-        "revertable": os.path.isfile(os.path.join(_inject_dir(workspace), "manifest.json")),
+        "revertable": bool(glob.glob(os.path.join(_inject_dir(workspace), "manifests", "*.json")))
+        or os.path.isfile(os.path.join(_inject_dir(workspace), "manifest.json")),
     }
 
 
