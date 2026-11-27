@@ -57,6 +57,7 @@ MCP server's `initialize.instructions` receive a short routing brief:
 
 ```
 [TokenSafe OUMV routing brief]
+- tools: tokensafe:oumv(action='status'|'observe'|'understand'|'verify'|'mutate'|'graph'|'index'|'preview'|'build', workspace_dir='<repo>') — wire 1.6.0; index/preview/build are honest-first (index works offline on the static graph, preview/build need a live runtime and say so otherwise).
 - scope: per-root verdicts below; for any unlisted repo call tokensafe:oumv(action='status', workspace_dir='<repo>').
 - frontend react/react: OUMV live via `tokensafe dev` ... Call tokensafe:oumv(...)
 - backend fastapi/fastapi: OUMV auto-mounts via `tokensafe run-backend uvicorn ...`
