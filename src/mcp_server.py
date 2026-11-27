@@ -37,6 +37,7 @@ from src.agent_firewall import AgentFirewall
 from src.diff_slicer import DiffSlicer
 from src.guard import TokenSafeGuard
 from src.scoped_search import ScopedSearch
+from src import route_index
 from src.license_manager import LicenseManager
 from src.paths import get_active_workspace, is_plugin_or_system_dir
 from src.session_context import current_root, current_session_id
@@ -674,10 +675,12 @@ _LEAN_TOOL_NAMES = frozenset({"smart_read_file", "scoped_search", "apply_edits",
 # previous literal: this schema is re-sent in every request of every session.
 TOOLS = [{'name': 'smart_read_file',
   'annotations': {'readOnlyHint': True},
-  'description': 'AST-skeleton reader. path+symbol for one file, targets=[{path,symbol}] for 2-8 at once, '
-                 'package_name+symbol for .d.ts.',
+  'description': 'AST-skeleton reader. endpoint="POST /api/x" resolves route→handler body + path + lines + version in one call; '
+                 'path+symbol for one file; targets=[{path,symbol}] for 2-8 at once; package_name+symbol for .d.ts.',
   'inputSchema': {'type': 'object',
-                  'properties': {'path': {'type': 'string', 'description': 'File path'},
+                  'properties': {'endpoint': {'type': 'string',
+                                              'description': "'METHOD /path' repo route target"},
+                                 'path': {'type': 'string', 'description': 'File path'},
                                  'symbol': {'type': 'string',
                                             'description': "Identifier, 'Type.Method', endpoint or schema "
                                                            'model; a non-declaration returns the enclosing '
@@ -694,45 +697,24 @@ TOOLS = [{'name': 'smart_read_file',
                                                                       'symbol': {'type': 'string'}},
                                                        'required': ['path']}},
                                  'package_name': {'type': 'string', 'description': '.d.ts npm package'}},
-                  'required': ['path']}},
+                  'anyOf': [{'required': ['path']}, {'required': ['endpoint']}, {'required': ['package_name']}]}},
  {'name': 'scoped_search',
   'annotations': {'readOnlyHint': True},
-  'description': 'Bounded search replacing grep/find. Single query+scope, or '
-                 'queries=[{pattern,type,path,glob}] for up to 20.',
+  'description': 'Search replacing grep/find: query+scope, or queries=[{pattern,type,path,glob}] batch (max 20).',
   'inputSchema': {'type': 'object',
                   'properties': {'query': {'type': 'string'},
                                  'mode': {'type': 'string',
-                                          'enum': ['auto', 'text', 'regex', 'glob', 'fuzzy', 'git']},
+                                          'description': 'auto|text|regex|glob|fuzzy|git'},
                                  'scope': {'type': 'string',
-                                           'description': "'code','config','all', ext or subfolder"},
+                                           'description': "code|config|all|ext|subfolder"},
                                  'path': {'type': 'string'},
-                                 'project_path': {'type': 'string', 'description': 'alias for path'},
-                                 'cwd': {'type': 'string',
-                                         'description': 'base dir for a relative path'},
-                                 'use_regex': {'type': 'boolean'},
-                                 'case_sensitive': {'type': 'boolean'},
-                                 'max_results': {'type': 'integer', 'description': 'default 25, max 100'},
-                                 'per_file': {'type': 'integer',
-                                              'description': 'hits per file (default auto)'},
+                                 'cwd': {'type': 'string'},
+                                 'max_results': {'type': 'integer', 'description': 'default 25'},
+                                 'per_file': {'type': 'integer'},
                                  'queries': {'type': 'array',
                                              'maxItems': 20,
-                                             'items': {'type': 'object',
-                                                       'properties': {'pattern': {'type': 'string'},
-                                                                      'type': {'type': 'string',
-                                                                               'enum': ['text',
-                                                                                        'regex',
-                                                                                        'glob',
-                                                                                        'fuzzy',
-                                                                                        'git']},
-                                                                      'path': {'type': 'string'},
-                                                                      'glob': {'type': 'string'},
-                                                                      'file_type': {'type': 'string'},
-                                                                      'output_mode': {'type': 'string',
-                                                                                      'enum': ['content',
-                                                                                               'files_with_matches',
-                                                                                               'count']},
-                                                                      'max_results': {'type': 'integer'}},
-                                                       'required': ['pattern']}}}}},
+                                             'description': 'batch items: {pattern, type?, path?, glob?}',
+                                             'items': {'type': 'object'}}}}},
  {'name': 'apply_edits',
   'annotations': {'readOnlyHint': False, 'destructiveHint': False},
   'description': 'Multi-hunk editor (up to 50 files) with optional inline verify: the edit and its verdict '
@@ -1298,6 +1280,36 @@ def _symbol_scope(graph: Any, rel_path: str, symbol: str, code: str) -> Dict[str
     return plan
 
 
+def _cross_file_declaration(plan: Dict[str, Any], from_path: str) -> Tuple[str, str]:
+    """(header, body) for the one declaration that lives in another file.
+
+    A miss used to end with "call smart_read_file(path=..., symbol=...)" — which
+    the measured runs did, or worse, replaced with a raw read of the whole file.
+    When the declaration is small the answer fits in this response, so the
+    follow-up call disappears.
+    """
+    elsewhere = plan.get("elsewhere")
+    if not elsewhere:
+        return "", ""
+    rel, start, end, name = elsewhere
+    if end < start or (end - start + 1) > _SYMBOL_MISS_FULL_DECL_LINES:
+        return "", ""
+    try:
+        root = GraphEngine.find_project_root(from_path)
+        full = os.path.join(root, rel)
+        if os.path.getsize(full) > 2_000_000:
+            return "", ""
+        with open(full, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, ValueError):
+        return "", ""
+    if start > len(lines):
+        return "", ""
+    version = route_index.file_version(full)
+    header = f"// --- L{start}-L{end} ({rel}, {name}, ver={version})"
+    return header, "\n".join(lines[start - 1:end])
+
+
 def _render_symbol_scope_miss(plan: Dict[str, Any], path: str, symbol: str, code: str) -> str:
     """Honest, actionable replacement for a skeleton that folded the requested symbol away."""
     base = os.path.basename(path)
@@ -1305,17 +1317,24 @@ def _render_symbol_scope_miss(plan: Dict[str, Any], path: str, symbol: str, code
     probe = plan.get("probe")
     probe_note = f" (matched '{probe}')" if probe and probe != symbol else ""
     elsewhere = plan["elsewhere"]
+    decl_header, decl_body = _cross_file_declaration(plan, path)
     pointer = ""
-    if elsewhere:
+    if elsewhere and not decl_body:
         r, es, ee, _n = elsewhere
         pointer = (
             f"\n// ['{symbol}' is declared in {r} L{es}-L{ee} — call smart_read_file(path=\"{r}\", symbol=\"{symbol}\")"
             f" if you need that declaration instead]"
         )
+    tail = f"\n{decl_header}\n{decl_body}" if decl_body else ""
 
     if plan["status"] == "absent":
         decl_txt = ", ".join(f"{n} L{s}-L{e}" for n, s, e in plan["decls"][:12]) or "none indexed"
-        return f"// [TokenSafe: '{symbol}' does not occur in {base}. Declarations in this file: {decl_txt}]{pointer}"
+        head = f"// [TS: '{symbol}' does not occur in {base}"
+        if decl_body:
+            head += f"; declared in {elsewhere[0]} L{elsewhere[1]}-L{elsewhere[2]}, shown below]"
+        else:
+            head += f". Declarations here: {decl_txt}]"
+        return f"{head}{pointer}{tail}"
 
     lines = code.splitlines()
     enclosing = plan["enclosing"]
@@ -1325,8 +1344,8 @@ def _render_symbol_scope_miss(plan: Dict[str, Any], path: str, symbol: str, code
         name, start, end = enclosing
         windows = [(start, end)]
         head = (
-            f"// [TokenSafe Text-Anchor Slice: '{symbol}' is not a declaration in {base}; "
-            f"it occurs at {hits}{probe_note} inside {name} (L{start}-L{end}) — that declaration is shown in full]"
+            f"// [TS: '{symbol}' at {base} {hits}{probe_note} inside {name} L{start}-L{end}"
+            f" — full declaration below]"
         )
     else:
         pad = _SYMBOL_MISS_WINDOW_PAD
@@ -1340,21 +1359,14 @@ def _render_symbol_scope_miss(plan: Dict[str, Any], path: str, symbol: str, code
             else:
                 merged.append((s, e))
         windows = merged
-        if enclosing:
-            name, ds, de = enclosing
-            head = (
-                f"// [TokenSafe Text-Anchor Slice: '{symbol}' is not a declaration in {base}; "
-                f"it occurs at {hits}{probe_note} inside {name} (L{ds}-L{de}) — showing ±{pad} lines around each hit]"
-                f"\n// {lines[ds - 1].strip()}"
-            )
-        else:
-            head = (
-                f"// [TokenSafe Text-Anchor Slice: '{symbol}' is not a declaration in {base}; "
-                f"it occurs at {hits}{probe_note} outside any indexed declaration — showing ±{pad} lines around each hit]"
-            )
+        where = f"inside {enclosing[0]} L{enclosing[1]}-L{enclosing[2]}" if enclosing else "outside any declaration"
+        head = (
+            f"// [TS: '{symbol}' is not a declaration in {base}; hits {hits}{probe_note} {where}"
+            f" — ±{pad} lines per hit]"
+        )
 
     if not windows:
-        return f"{head}{pointer}"
+        return f"{head}{pointer}{tail}"
 
     budget = _SYMBOL_MISS_MAX_LINES
     chunks: List[str] = []
@@ -1371,7 +1383,7 @@ def _render_symbol_scope_miss(plan: Dict[str, Any], path: str, symbol: str, code
         if e < windows[i][1]:
             chunks.append("// [window truncated]")
 
-    return f"{head}{pointer}\n" + "\n".join(chunks)
+    return f"{head}{pointer}\n" + "\n".join(chunks) + tail
 
 
 def _resolve_dep_mode(args: dict) -> Tuple[bool, str]:
@@ -1383,6 +1395,151 @@ def _resolve_dep_mode(args: dict) -> Tuple[bool, str]:
     if raw_mode in ("signature", "full"):
         return True, raw_mode
     return True, "signature"
+
+
+def _endpoint_symbol_index(graph: Any) -> Dict[str, List[Tuple[str, str, int, int]]]:
+    """name -> [(file, qualified, start, end)] for resolving named route handlers."""
+    index: Dict[str, List[Tuple[str, str, int, int]]] = {}
+    for key, sym in getattr(graph, "symbols", {}).items():
+        qualified = key.split("::", 1)[-1]
+        index.setdefault(sym.name, []).append(
+            (sym.file_path, qualified, sym.line_start, sym.line_end)
+        )
+    return index
+
+
+def _endpoint_callee_line(
+    names: List[str], hit: Any, index: Dict[str, List[Tuple[str, str, int, int]]], limit: int = 2
+) -> str:
+    """`name -> path Ls-Le` for the handler's cross-file callees, capped.
+
+    This is the second half of the one-call promise: the route call says where
+    the work continues, so the follow-up read is a direct path+symbol hit
+    instead of another search. Callees in the handler's own top-level directory
+    come first — a framework helper three trees away is not where the fix lives.
+    """
+    top = lambda file: file.split("/", 1)[0].lower()
+    ranked: List[Tuple[int, str]] = []
+    for name in names:
+        entries = index.get(name) or []
+        if len(entries) != 1:
+            continue
+        file, _qualified, start, end = entries[0]
+        if file == hit.file:
+            continue
+        ranked.append((0 if top(file) == top(hit.file) else 1, f"{name} → {file} L{start}-L{end}"))
+    ranked.sort()
+    return "; ".join(entry for _rank, entry in ranked[:limit])
+
+
+def _render_endpoint_slice(
+    endpoint: Any,
+    prefer_path: str,
+    tracker: Any,
+    max_lines: int = 160,
+    fallback_on_miss: bool = False,
+) -> Optional[str]:
+    """Route → handler body in one response: path, line range, whole-file version."""
+    verb, route = endpoint
+    root = os.path.abspath(_workspace_root() or os.getcwd())
+    if prefer_path:
+        # The caller named the file: its own project root is the honest scan root,
+        # even when the MCP workspace points somewhere else.
+        try:
+            root = GraphEngine.find_project_root(prefer_path)
+        except Exception:
+            pass
+    graph = None
+    files: Optional[List[str]] = None
+    try:
+        graph = GraphEngine.get_instance(root)
+        files = list(graph.file_stats.keys())
+    except Exception:
+        files = None
+    prefer_rel = ""
+    if prefer_path and files is not None:
+        try:
+            root_real = os.path.realpath(root)
+            real = os.path.realpath(prefer_path)
+            if real == root_real or real.startswith(root_real + os.sep):
+                prefer_rel = os.path.relpath(real, root_real).replace("\\", "/")
+                files = [prefer_rel] + [f for f in files if f != prefer_rel]
+        except ValueError:
+            prefer_rel = ""
+    hits, scanned = route_index.find_registrations(root, verb, route, files=files)
+    label = f"{verb} {route}".strip()
+    if prefer_rel and hits:
+        # The caller named a file: expand it first even though the repo answer is
+        # sorted independently of the caller's context.
+        hits.sort(key=lambda h: (h.file != prefer_rel, not h.exact, h.file, h.line))
+    if not hits:
+        if fallback_on_miss:
+            return None
+        others, _ = route_index.find_registrations(root, "", route, files=files, max_hits=3)
+        if others:
+            verbs = ", ".join(sorted({f"{h.verb} {h.route} L{h.line} in {h.file}" for h in others}))
+            return (
+                f"// [TS endpoint: no registration for '{label}' — the path exists as {verbs};"
+                f" retry with one of those verbs]"
+            )
+        return (
+            f"// [TS endpoint: no registration for '{label}' among {scanned} code files."
+            f" Find the literal with scoped_search(query=\"{route}\") or pass the file path.]"
+        )
+    index = _endpoint_symbol_index(graph) if graph is not None else {}
+    entries: List[str] = []
+    total = 0
+    for pos, hit in enumerate(hits, 1):
+        full = os.path.join(root, hit.file)
+        version = route_index.file_version(full)
+        prefix = f"[{pos}] " if len(hits) > 1 else ""
+        head = (
+            f"// [TS endpoint {prefix}{verb} {route} → {hit.file} L{hit.line}-L{hit.end_line} "
+            f"ver={version} via {hit.via}]"
+        )
+        body_lines, first, last = hit.body, hit.line, hit.end_line
+        if hit.handler_kind == "named" and hit.handler:
+            short = hit.handler.split(".")[-1]
+            decls = [d for d in index.get(short, []) if d[0] != hit.file] or index.get(short, [])
+            if decls:
+                file, _qualified, start, end = decls[0]
+                try:
+                    with open(os.path.join(root, file), "r", encoding="utf-8", errors="replace") as handle:
+                        src = handle.read().splitlines()
+                    body_lines, first, last = src[start - 1:end], start, end
+                    head = (
+                        f"// [TS endpoint {prefix}{verb} {route} → handler {short} in {file} "
+                        f"L{start}-L{end} ver={route_index.file_version(os.path.join(root, file))}]"
+                    )
+                except OSError:
+                    pass
+        if total + (last - first + 1) > max_lines:
+            entries.append(f"// [... {len(hits) - pos + 1} more registration(s) suppressed; pass path= to pick one]")
+            break
+        total += last - first + 1
+        entries.append(head)
+        names = hit.callees() if hit.handler_kind == "inline" else route_index.extract_callees("\n".join(body_lines))
+        callees = _endpoint_callee_line(names, hit, index)
+        if callees:
+            entries.append(f"// calls: {callees}")
+        entries.append(f"// --- L{first}-L{last}")
+        entries.extend(body_lines)
+    delivered = "\n".join(entries) + "\n"
+    if tracker is not None:
+        try:
+            orig_chars = 0
+            for file in {h.file for h in hits}:
+                orig_chars += os.path.getsize(os.path.join(root, file))
+            tracker.record_event(
+                session_id=_mcp_session_id(),
+                event_type="ENDPOINT_SLICE",
+                original_tokens=max(1, orig_chars // 4),
+                optimized_tokens=count_tokens(delivered),
+                details={"endpoint": label, "hits": len(hits), "scanned": scanned},
+            )
+        except Exception:
+            pass
+    return delivered
 
 
 def _repo_fingerprint(graph) -> str:
@@ -1614,6 +1771,19 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             return _fallback_error("smart_read_file", "end_line must be >= 1")
         if start_line is not None:
             start_line = max(1, start_line)
+
+        # A route target ("POST /api/products") is resolved across the repo in one
+        # call: registration site → handler body → path + line range + version.
+        # Without this the caller spent two calls to find the file and a third to
+        # read the handler (measured: 6.3 discovery calls per edit in matrix v4).
+        endpoint_target = str(args.get("endpoint") or "").strip()
+        if not endpoint_target:
+            endpoint_target = str(symbol or "").strip()
+        endpoint = route_index.parse_endpoint(endpoint_target) if endpoint_target else None
+        if endpoint:
+            rendered = _render_endpoint_slice(endpoint, path, tracker, fallback_on_miss=bool(path))
+            if rendered is not None:
+                return {"content": [{"type": "text", "text": rendered}]}
 
         active_ws = _workspace_root()
         if path and not os.path.isabs(path):

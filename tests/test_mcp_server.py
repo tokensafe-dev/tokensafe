@@ -301,7 +301,8 @@ class TestMCPServer(unittest.TestCase):
                 with session_scope(root=tmpdir, session_id=f"test:anchor:{uuid.uuid4().hex[:8]}"):
                     res = handle_tool_call("smart_read_file", {"path": app, "symbol": "items7"})
                 txt = res["content"][0]["text"]
-                self.assertIn("Text-Anchor Slice", txt)
+                self.assertIn("is not a declaration", txt)
+                self.assertIn("±8", txt)
                 self.assertNotIn("Full body", txt)
                 self.assertIn("NewApp", txt)
                 self.assertIn("items7", txt)
@@ -343,10 +344,16 @@ class TestMCPServer(unittest.TestCase):
                 with session_scope(root=tmpdir, session_id=f"test:anchor:{uuid.uuid4().hex[:8]}"):
                     res = handle_tool_call("smart_read_file", {"path": app, "symbol": "POST /api/orders"})
                 txt = res["content"][0]["text"]
-                self.assertIn("Text-Anchor Slice", txt)
-                # exactly one route matched (not every HandleFunc line)
-                self.assertRegex(txt, r"it occurs at L\d+ \(matched")
+                # One call now answers route -> registration -> handler body ->
+                # path, line range and whole-file version; no second read follows.
+                self.assertIn("TS endpoint", txt)
                 self.assertIn("/api/orders", txt)
+                self.assertIn("routes.go", txt)
+                self.assertRegex(txt, r"L\d+-L\d+")
+                self.assertRegex(txt, r"ver=[0-9a-f]{12}")
+                self.assertIn("WriteHeader", txt)
+                # exactly one registration reported (not every HandleFunc line)
+                self.assertNotIn("[2]", txt)
                 self.assertLess(len(txt), len("\n".join(lines)) * 0.6)
             finally:
                 if old_db is None:

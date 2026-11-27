@@ -91,14 +91,16 @@ class ScopedSearch:
     @classmethod
     def _resolve_per_file(cls, per_file: int, max_results: int) -> int:
         """Hits kept per file. One hot file must not eat the whole result budget:
-        a 20-hit query used to render 2 KB of near-identical lines from 2 files."""
+        a 20-hit query used to render 2 KB of near-identical lines from 2 files.
+        The cap is what the model actually pays for, so it is set to the number
+        of hits a caller can still act on (4-8), not to the result budget."""
         try:
             per_file = int(per_file or 0)
         except (TypeError, ValueError):
             per_file = 0
         if per_file > 0:
             return per_file
-        return max(6, min(12, max_results // 2))
+        return max(4, min(8, max_results // 3))
 
     @classmethod
     def search(

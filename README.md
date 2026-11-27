@@ -472,7 +472,7 @@ All hook adapters fail open: an internal error never stalls your agent. Failures
 |---|---|
 | `get_architecture_graph` | Architectural hotspots, dependency topology, and God Nodes detection before multi-file reading (persisted in SQLite cache) |
 | `get_api_surface` | Compact markdown map of all exported interfaces, classes, and types |
-| `smart_read_file` | AST-skeletonized file read preserving a target symbol and 1-hop dependencies; OpenAPI/Prisma/GraphQL/SQL auto-slice; lockfiles/CSV/TSV/SQL dump auto-reduction with reversible stash |
+| `smart_read_file` | AST-skeletonized file read preserving a target symbol and 1-hop dependencies; `endpoint="POST /api/x"` resolves route → handler body + path + line range + whole-file version in one call; OpenAPI/Prisma/GraphQL/SQL auto-slice; lockfiles/CSV/TSV/SQL dump auto-reduction with reversible stash |
 | `smart_bundle` | 3–8 related symbols across files in one call: merged skeletons, deduplicated shared imports, unified 1-hop signatures |
 | `scoped_search` | Sub-millisecond keyword and symbol search powered by native SQLite FTS5 trigram index with BM25 relevance ranking (<1ms) |
 | `expand_ref` | Reversible stash expansion: recovers original un-truncated content by its 8-char hex hash anchor (`#a1b2c3d4`) without re-running tools |

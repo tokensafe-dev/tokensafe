@@ -25,6 +25,9 @@ class AgentFirewall:
     _PRUNE_INTERVAL = 3600.0       # amortized hourly prune of the persistent layer
     _PRUNE_KEEP = 500
     _last_prune = 0.0
+    # Render revision for cached symbol slices (see _cache_symbol): bump when the
+    # shape of a slice changes, so unchanged bytes do not serve the old shape.
+    _SLICE_REVISION = "r3"
     # Content this process has actually delivered. The cache is keyed by session_id,
     # and host session ids like "mcp:<client>" outlive one process — so a DB hit alone
     # does not mean the caller already has the bytes in context, and saying "reused
@@ -60,6 +63,19 @@ class AgentFirewall:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_subagent_cache ON subagent_file_cache(session_id, file_path);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_subagent_hash ON subagent_file_cache(file_path, symbol, content_hash);")
         cls._INITIALIZED_DBS.add(tracker.db_path)
+
+    @staticmethod
+    def _cache_symbol(symbol: str) -> str:
+        """Namespace the cached slice by its render revision.
+
+        The cache is content-addressed by file bytes, which says nothing about
+        the *shape* of the answer: changing how a symbol slice is rendered (the
+        v1.3 headers, inlined cross-file declarations) must not serve the old
+        shape for unchanged bytes. Bump the revision instead of truncating the
+        table, so whole-file skeleton entries stay valid.
+        """
+        key = (symbol or "").strip()
+        return f"{key}#{AgentFirewall._SLICE_REVISION}" if key else ""
 
     @staticmethod
     def _file_content_hash(file_path: str) -> str:
@@ -126,7 +142,7 @@ class AgentFirewall:
             return False, None, 0
 
         abs_path = os.path.abspath(file_path)
-        symbol_key = (symbol or "").strip()
+        symbol_key = cls._cache_symbol(symbol)
         current_hash = ""
 
         hit_data = None
@@ -259,7 +275,7 @@ class AgentFirewall:
             mtime = time.time()
 
         abs_path = os.path.abspath(file_path)
-        symbol_key = (symbol or "").strip()
+        symbol_key = cls._cache_symbol(symbol)
         tokens = count_tokens(content)
         now = int(time.time())
         content_hash = cls._file_content_hash(abs_path)

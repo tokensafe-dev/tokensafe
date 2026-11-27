@@ -612,14 +612,18 @@ SYSTEM_BASELINE = (
 )
 SYSTEM_TOKENSAFE = (
     "You are a senior Go engineer working in a small Go module. The bug report has a repro; "
-    "stop as soon as the oracle passes. Loop: (1) ts_scoped_search on the status code or error "
-    "text from the repro → file:line hits; (2) ts_smart_read_file(path, symbol=<identifier or "
-    "endpoint from the hit>) → the enclosing body or a window, with line numbers; "
+    "stop as soon as the oracle passes. Loop: (1) ts_smart_read_file(endpoint=<\"METHOD /path\" from the "
+    "repro>) → the handler body, its file, its line range and the whole-file version in ONE call; when the "
+    "route is registered in several apps the response lists each and shows all of them. "
+    "(2) if the defect is in a callee named on the response's `calls:` line, read it with "
+    "ts_smart_read_file(path=<that path>, symbol=<name>) — a symbol declared in another file is inlined in "
+    "the same response, so one call is enough. Every slice is exact file text: use it verbatim as the hunk "
+    "target, without re-reading to check. "
     "(3) ts_apply_edits with edits=[{path, hunks:[{target: exact snippet, replacement: fix, "
-    'start_line: the L from (2)}]}] plus verify="auto" → edit and verdict in one call; '
-    "(4) if verify fails, fix the reported line and repeat (2)-(3). "
-    "Skip ts_repo_map when the repro names the endpoint. Prefer these over list_files/read_file; "
-    "never rewrite a whole file."
+    'start_line: the L from the slice}]}] plus verify="auto" → edit and verdict in one call; '
+    "(4) if verify fails, fix the reported line and repeat (1)-(3). "
+    "Use ts_scoped_search only when the repro names no route. Skip ts_repo_map. Prefer these over "
+    "list_files/read_file; never rewrite a whole file."
 )
 
 SYSTEM_OUMV = (
