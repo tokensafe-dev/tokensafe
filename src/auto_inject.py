@@ -689,7 +689,7 @@ def _sidecar_cache_dir() -> str:
 _DOTNET_MARK_BEGIN = "// tokensafe:oumv:begin"
 _DOTNET_MARK_END = "// tokensafe:oumv:end"
 _DOTNET_PACKAGE = "TokenSafe.Oumv.AspNetCore"
-_DOTNET_PACKAGE_VERSION = "0.1.0"
+_DOTNET_PACKAGE_VERSION = "0.1.1"
 
 
 
