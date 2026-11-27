@@ -108,7 +108,7 @@ class TestAutoInject(unittest.TestCase):
         path, note = auto_inject.ensure_sidecar("spring")
         self.assertIsNotNone(path)
         self.assertNotEqual(auto_inject._sha256_file(path), "changed")
-        self.assertIn("v0.7.0", note)
+        self.assertIn("v0.9.0", note)
         self.assertNotIn("mismatch", note)
 
     def tearDown(self):
@@ -163,7 +163,7 @@ class TestAutoInject(unittest.TestCase):
 
     def test_go_patch_is_reversible_byte_for_byte(self):
         with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:
-            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.7.0\n')
+            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.9.0\n')
         main_path = os.path.join(self.tmp, "main.go")
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(GIN_MAIN)
@@ -188,7 +188,7 @@ class TestAutoInject(unittest.TestCase):
 
     def test_go_patch_falls_back_to_mount_when_serve_call_is_not_simple(self):
         with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:
-            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.7.0\n')
+            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.9.0\n')
         main_path = os.path.join(self.tmp, "main.go")
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(GIN_MAIN.replace('r.Run(":8080")', "r.Run(port())"))
@@ -226,7 +226,7 @@ func main() {
 
     def test_go_patch_rolls_back_when_build_fails(self):
         with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:
-            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.7.0\n')
+            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.9.0\n')
         main_path = os.path.join(self.tmp, "main.go")
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(GIN_MAIN)
