@@ -2345,7 +2345,7 @@ WantedBy=default.target
                     "message": "; ".join(msgs) if msgs else "Cleaned"
                 }
 
-        cls.restart_mcp_daemons()
+        cls.restart_mcp_daemons(kill_running=True)
         proj_report = cls.uninstall_project(os.getcwd())
 
         purged = False
@@ -2429,7 +2429,7 @@ WantedBy=default.target
                 else:
                     print(f"  \033[33m–\033[0m \033[1m{name}\033[0m: Nothing to remove")
 
-        cls.restart_mcp_daemons()
+        cls.restart_mcp_daemons(kill_running=True)
         proj_rep = cls.uninstall_project(os.getcwd())
         if proj_rep.get("cleaned_rules"):
             print(f"\n\033[32m✔ Cleaned project rules from: {', '.join(proj_rep['cleaned_rules'])}\033[0m")
@@ -2482,10 +2482,16 @@ WantedBy=default.target
         return False
 
     @classmethod
-    def restart_mcp_daemons(cls) -> int:
+    def restart_mcp_daemons(cls, kill_running: bool = False) -> int:
         """
-        Touches the MCP reload marker and terminates active TokenSafe MCP server daemons
-        so auto-reconnecting IDEs (Antigravity, Cursor, Claude Code) spawn the updated version.
+        Touches the MCP reload marker so auto-reconnecting IDEs (Antigravity, Cursor,
+        Claude Code) spawn the updated version.
+
+        By default nothing is killed: running TokenSafe MCP servers belong to live
+        sessions of any host, and a machine-wide SIGTERM during an update kills
+        concurrent sessions' gateways (session-scoped MCP hosts never respawn them).
+        Uninstall flows pass kill_running=True because removing TokenSafe should
+        stop it everywhere.
         """
         try:
             # Data-dir resolution is context-independent (canonical
@@ -2500,7 +2506,7 @@ WantedBy=default.target
         except Exception:
             pass
 
-        if os.name == "nt":
+        if not kill_running or os.name == "nt":
             return 0
 
         my_pid = os.getpid()
@@ -2906,11 +2912,12 @@ WantedBy=default.target
         except Exception:
             pass
 
-        # 6. Restart running MCP server daemons so IDEs load the new version
+        # 6. Flag the reload so auto-reconnecting IDEs pick the new version.
+        #    Running servers are NOT killed: they belong to live sessions of
+        #    other agents, and session-scoped MCP hosts never respawn them.
         restarted_count = cls.restart_mcp_daemons()
-        if restarted_count > 0:
-            print(f"  {GREEN}✔{RESET} Restarted {restarted_count} running TokenSafe MCP daemon(s).")
-            print(f"    {CYAN}ℹ{RESET} Antigravity/Cursor/Claude Code reconnect automatically; reload MCP in Claude Desktop/VS Code if disconnected.")
+        if restarted_count == 0:
+            print(f"  {CYAN}ℹ{RESET} Reload marker written; running sessions keep their current engine until restarted (by design).")
 
         # 7. Proxy re-assertion (ultimate, default-on): TokenSafe is the default LLM
         # route for every wire-able agent. Agent/app updates are known to rewrite

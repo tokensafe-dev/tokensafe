@@ -113,7 +113,36 @@ class TestAgentInstaller(unittest.TestCase):
         self.assertFalse(AgentInstaller._is_tokensafe_mcp_command("zsh -c 'ps aux | grep tokensafe mcp'"))
         self.assertFalse(AgentInstaller._is_tokensafe_mcp_command("python3 -c 'print(\"tokensafe mcp\")'"))
 
-    def test_restart_mcp_daemons_signals_matching_pids_only(self):
+    def test_restart_mcp_daemons_default_writes_marker_without_killing(self):
+        """Update flows must never machine-globally SIGTERM other sessions' gateways."""
+        fake_ps = "\n".join([
+            f"{os.getpid()} python3 /app/bin/tokensafe update",
+            "54321 python3 /Users/dev/agy-token-optimizer/bin/tokensafe mcp",
+            "54322 node /Users/dev/.nvm/bin/tokensafe mcp",
+        ])
+        mock_proc = MagicMock(returncode=0, stdout=fake_ps)
+        killed = []
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError()
+            killed.append((pid, sig))
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.dict(os.environ, {"TOKENSAFE_DATA_DIR": os.path.join(tmpdir, "data")}), \
+             patch("src.installer.subprocess.run", return_value=mock_proc), \
+             patch("src.installer.os.kill", side_effect=fake_kill), \
+             patch("src.installer.time.sleep"):
+            count = AgentInstaller.restart_mcp_daemons()
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "data", ".mcp_reload")))
+
+        self.assertEqual(count, 0)
+        self.assertEqual(killed, [])
+        # The process scan must not even run when killing is not requested
+        self.assertEqual(mock_proc.call_count, 0)
+
+    def test_restart_mcp_daemons_signals_matching_pids_only_on_kill_request(self):
+        """Uninstall passes kill_running=True: removal may stop every daemon."""
         fake_ps = "\n".join([
             f"{os.getpid()} python3 /app/bin/tokensafe update",
             "54321 python3 /Users/dev/agy-token-optimizer/bin/tokensafe mcp",
@@ -134,7 +163,7 @@ class TestAgentInstaller(unittest.TestCase):
              patch("src.installer.subprocess.run", return_value=mock_proc), \
              patch("src.installer.os.kill", side_effect=fake_kill), \
              patch("src.installer.time.sleep"):
-            count = AgentInstaller.restart_mcp_daemons()
+            count = AgentInstaller.restart_mcp_daemons(kill_running=True)
             self.assertTrue(os.path.exists(os.path.join(tmpdir, "data", ".mcp_reload")))
 
         self.assertEqual(count, 2)
