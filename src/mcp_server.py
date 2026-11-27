@@ -821,7 +821,8 @@ TOOLS = [{'name': 'smart_read_file',
                                  'transcript_path': {'type': 'string'}}}},
  {'name': 'oumv',
   'annotations': {'readOnlyHint': False},
-  'description': "OUMV runtime: 'status'|'observe' L0-L4|'understand'|'verify'|'mutate' (OCC edit)|'graph'.",
+  'description': "OUMV runtime: 'status'|'observe' L0-L4|'understand'|'verify'|'mutate' (OCC edit)|'graph'|'index' "
+                 "(repo-wide symbol search: query, kinds?, limit?)|'preview' (dry-run diff, no write).",
   'inputSchema': {'type': 'object',
                   'properties': {'action': {'type': 'string',
                                             'enum': ['status',
@@ -829,7 +830,9 @@ TOOLS = [{'name': 'smart_read_file',
                                                      'understand',
                                                      'verify',
                                                      'mutate',
-                                                     'graph']},
+                                                     'graph',
+                                                     'index',
+                                                     'preview']},
                                  'level': {'type': 'string'},
                                  'query': {'type': 'string'},
                                  'target': {'type': 'string'},
@@ -837,11 +840,18 @@ TOOLS = [{'name': 'smart_read_file',
                                  'symbol': {'type': 'string'},
                                  'replacement': {'type': 'string'},
                                  'expectedVersion': {'type': 'string'},
+                                 'kinds': {'type': 'array',
+                                           'items': {'type': 'string'},
+                                           'description': 'index: symbol-kind filter (function, class, ...)'},
+                                 'limit': {'type': 'integer'},
+                                 'batch': {'type': 'array',
+                                           'items': {'type': 'object'},
+                                           'description': 'preview: batch edits envelope (wire 1.5.0+)'},
                                  'verify_action': {'type': 'string'},
                                  'payload': {'type': 'object'},
                                  'workspace_dir': {'type': 'string',
                                                    'description': 'Target repo root; for '
-                                                                  'status/observe/understand/verify/graph '
+                                                                  'status/observe/understand/verify/graph/index/preview '
                                                                   'also accepted as path'}}}},
  {'name': 'run_helper',
   'annotations': {'readOnlyHint': False},
@@ -1910,6 +1920,8 @@ _OUMV_ACTIONS = {
     "mutate": "oumv_mutate",
     "verify": "oumv_verify",
     "graph": "oumv_graph",
+    "index": "oumv_index",
+    "preview": "oumv_preview",
 }
 _HELPER_ACTIONS = {
     "sanitize": "sanitize_command",
@@ -2001,7 +2013,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         # wrong answer. Resolve the explicit root here and fail closed on a bad one.
         ws, ws_err = _oumv_workspace_arg(
             args,
-            allow_path=action in ("status", "observe", "understand", "verify", "graph"),
+            allow_path=action in ("status", "observe", "understand", "verify", "graph", "index", "preview"),
         )
         if ws_err:
             return _fallback_error("oumv", ws_err)
@@ -3368,6 +3380,42 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_graph", f"failed to query cross-stack graph: {e}")
+
+    elif name == "oumv_index":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            q = str(args.get("query") or "").strip()
+            kinds = args.get("kinds") if isinstance(args.get("kinds"), list) else None
+            limit = args.get("limit") if isinstance(args.get("limit"), int) else 25
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_index", ws_err)
+            if not q:
+                return _fallback_error("oumv_index", "missing required 'query' (symbol name or substring)")
+            res = OUMVGateway.index(query=q, kinds=kinds, limit=limit, workspace_dir=ws)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_index", f"failed to search symbol index: {e}")
+
+    elif name == "oumv_preview":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            p = str(args.get("path") or "").strip()
+            sym = str(args.get("symbol") or "").strip() or None
+            rep = args.get("replacement")
+            ev = str(args.get("expectedVersion") or "").strip() or None
+            batch = args.get("batch") if isinstance(args.get("batch"), list) else None
+            rt = str(args.get("runtime") or "auto").strip()
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_preview", ws_err)
+            if not p:
+                return _fallback_error("oumv_preview", "missing required 'path'")
+            res = OUMVGateway.preview(path=p, symbol=sym, replacement=rep, expected_version=ev,
+                                      batch=batch, runtime=rt, workspace_dir=ws)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_preview", f"failed to preview OUMV mutation: {e}")
 
     elif name == "apply_edits":
         try:

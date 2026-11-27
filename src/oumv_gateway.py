@@ -985,3 +985,179 @@ class OUMVGateway:
             g["edges"] = [e for e in g["edges"] if t in (e["source"] + e["target"]).lower()][:50]
             g["filteredBy"] = target
         return g
+
+    # 7. Tool: oumv index — repo-wide symbol search (spec §14, optional extension)
+    _INDEX_MATCH_CAP = 50
+
+    @classmethod
+    def index(cls, query: str, kinds: Optional[List[str]] = None, limit: int = 25, workspace_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Repo-wide symbol search over the static code graph (spec `oumv/index`).
+
+        Closes the largest remaining agent token sink: without it, "where is X
+        defined / who calls Y" needs raw grep. Ranking: exact name > prefix >
+        qualified-suffix > substring; reverse-edge count (who imports/calls this
+        symbol) breaks ties. Falls back to the FTS5 content index when the graph
+        holds nothing for the query, and labels that fallback honestly.
+        """
+        from src.graph_engine import GraphEngine
+        ws = workspace_dir or get_active_workspace() or os.getcwd()
+        q = (query or "").strip()
+        if not q:
+            return {
+                "workspace": ws,
+                "query": query,
+                "error": "VALIDATION_FAILED",
+                "hint": "query is required (a symbol name, Type.member, or substring)",
+            }
+        kind_filter = {k.strip().lower() for k in (kinds or []) if str(k).strip()}
+
+        graph = GraphEngine.get_instance(ws)
+        q_lower = q.lower()
+        scored: List[Tuple[int, int, str, Any]] = []  # (rank, -refs, sym_key, sym)
+        for key, sym in getattr(graph, "symbols", {}).items():
+            name = (sym.name or "").lower()
+            if not name:
+                continue
+            if q_lower == name:
+                rank = 0
+            elif name.startswith(q_lower):
+                rank = 1
+            elif key.lower().endswith("." + q_lower) or key.lower().endswith("::" + q_lower) or name.endswith("." + q_lower):
+                rank = 2
+            elif q_lower in name or q_lower in (sym.signature or "").lower():
+                rank = 3
+            else:
+                continue
+            if kind_filter and sym.kind.lower() not in kind_filter:
+                continue
+            refs = len(getattr(graph, "rev_edges", {}).get(key, ()) or ())
+            scored.append((rank, -refs, key, sym))
+
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+        matches = [
+            {
+                "resourceId": f"{sym.kind}:{sym.name}@{sym.file_path}",
+                "name": sym.name,
+                "kind": sym.kind,
+                "file": sym.file_path,
+                "lines": [int(sym.line_start or 0), int(sym.line_end or 0)],
+                "signature": (sym.signature or "").strip(),
+                "refs": -neg_refs,
+                "match": {0: "exact", 1: "prefix", 2: "qualified-suffix", 3: "substring"}[rank],
+            }
+            for rank, neg_refs, _key, sym in scored[:limit]
+        ]
+        provenance = "static-graph"
+        if not matches:
+            try:
+                from src.fts_index import CodeFTSIndex
+                fts_rows = CodeFTSIndex(ws).search(q, limit=limit) or []
+                matches = [
+                    {
+                        "resourceId": f"text:{row.get('file')}:{row.get('line')}",
+                        "name": str(row.get("content", ""))[:120],
+                        "kind": "text",
+                        "file": row.get("file"),
+                        "lines": [int(row.get("line") or 0), int(row.get("line") or 0)],
+                        "signature": "",
+                        "refs": 0,
+                        "match": "fts-content",
+                    }
+                    for row in fts_rows
+                ]
+                provenance = "fts-content-index"
+            except Exception:
+                matches = []
+        matches = matches[: cls._INDEX_MATCH_CAP]
+        return {
+            "workspace": ws,
+            "query": q,
+            "matches": matches,
+            "totalMatches": len(scored) if provenance == "static-graph" else len(matches),
+            "truncated": (len(scored) if provenance == "static-graph" else len(matches)) > len(matches),
+            "provenance": provenance,
+            "evidence": {"provenance": "static", "confidence": "confirmed", "sourceAdapter": "tokensafe-graph-engine"},
+        }
+
+    # 8. Tool: oumv preview — dry-run diff before commit (spec `oumv/previewEdit`)
+    @classmethod
+    def preview(cls, path: str, symbol: Optional[str] = None, replacement: Optional[str] = None,
+                expected_version: Optional[str] = None, batch: Optional[List[dict]] = None,
+                runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        """Dry-run an edit: returns the would-be result WITHOUT writing anything.
+
+        Delegates to a live runtime implementing `oumv/previewEdit` when one is
+        connected. Without a live runtime, only the honest subset is served
+        offline: a whole-file replacement preview (real unified diff against the
+        current bytes + syntax check). Symbol-level offline preview is refused
+        instead of guessing a diff the runtime never computed.
+        """
+        ws = workspace_dir or get_active_workspace() or os.getcwd()
+        params: Dict[str, Any] = {
+            "path": path,
+            "filePath": path,
+            "symbol": symbol,
+            "replacement": replacement,
+            "source": replacement,
+            "expectedVersion": expected_version,
+        }
+        if batch:
+            params["edits"] = batch
+        try:
+            url = cls._resolve_client_url(runtime=runtime, target=path, workspace_dir=workspace_dir)
+            res = cls._rpc_call(url, "oumv/previewEdit", params)
+            if isinstance(res, dict):
+                res.setdefault("mode", "LIVE_RUNTIME_PREVIEW")
+            return res
+        except OUMVRpcError as e:
+            if not any(hint in str(e).lower() for hint in _UNSUPPORTED_HINTS):
+                raise  # explicit protocol rejection (conflict/syntax/permission) — obey it
+            raise OUMVUnsupportedMethodError(str(e))
+        except RuntimeError as e:
+            if not any(hint in str(e).lower() for hint in _UNSUPPORTED_HINTS):
+                offline = {
+                    "mode": "OFFLINE_FULL_FILE_PREVIEW",
+                    "path": path,
+                    "workspace": ws,
+                    "requiresRuntime": True,
+                    "hint": (
+                        "mutate.preview needs a live OUMV runtime implementing oumv/previewEdit "
+                        "(wire 1.6.0+). Only whole-file replacement previews work offline."
+                    ),
+                }
+                if symbol:
+                    offline["error"] = "UNSUPPORTED_OFFLINE"
+                    offline["detail"] = "symbol-level preview needs the runtime's AST; nothing was computed or written"
+                    return offline
+                if replacement is None:
+                    offline["error"] = "VALIDATION_FAILED"
+                    offline["detail"] = "offline preview requires 'replacement' (whole-file content)"
+                    return offline
+                abs_path = os.path.normpath(os.path.join(ws, path))
+                if not abs_path.startswith(os.path.abspath(ws)):
+                    return {"mode": "OFFLINE_FULL_FILE_PREVIEW", "error": "SECURITY_VIOLATION", "detail": f"Path traversal blocked: {path}"}
+                current = ""
+                if os.path.isfile(abs_path):
+                    with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                        current = f.read()
+                import difflib
+                diff_lines = list(difflib.unified_diff(
+                    current.splitlines(keepends=True),
+                    (replacement or "").splitlines(keepends=True),
+                    fromfile=f"a/{path}", tofile=f"b/{path}",
+                ))
+                offline["diff"] = "".join(diff_lines)
+                offline["unchanged"] = current == (replacement or "")
+                offline["currentVersion"] = cls._hash_version(abs_path)
+                from src.syntax_guard import check_syntax
+                offline["syntaxCheck"] = check_syntax(abs_path, replacement)
+                return offline
+            raise
+
+    @staticmethod
+    def _hash_version(abs_path: str) -> Optional[str]:
+        import hashlib as _hashlib
+        if not os.path.isfile(abs_path):
+            return None
+        with open(abs_path, "rb") as f:
+            return "sha256:" + _hashlib.sha256(f.read()).hexdigest()

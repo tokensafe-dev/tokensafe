@@ -537,6 +537,95 @@ class TestOUMVGateway(unittest.TestCase):
             pass
 
 
+class TestOumvIndexAndPreview(unittest.TestCase):
+    """oumv index (repo-wide symbol search) and oumv preview (dry-run edit)."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="oumv_index_")
+        OUMVGateway._workspace_states.clear()
+        OUMVGateway._port_liveness.clear()
+
+    def tearDown(self):
+        OUMVGateway._port_liveness.clear()
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _prime_state(self, ws=None, fe=None, be=None, fresh=True):
+        st = OUMVGateway._state_for(ws or self.test_dir)
+        if fresh:
+            st["last_scan"] = 9999999999.0
+        st["fe"] = fe
+        st["be"] = be
+        return st
+
+    def _write(self, rel, content):
+        full = os.path.join(self.test_dir, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def test_index_ranks_exact_above_substring_with_refs(self):
+        self._write("orders.py",
+                    "def create_order(payload):\n    return {'ok': True}\n\n"
+                    "class OrderService:\n    def create_order(self, p):\n        return create_order(p)\n")
+        self._write("orders_client.py",
+                    "from orders import create_order\n\n"
+                    "def submit():\n    return create_order({})\n")
+        res = OUMVGateway.index(query="create_order", limit=10, workspace_dir=self.test_dir)
+        self.assertEqual(res["provenance"], "static-graph")
+        names = [m["name"] for m in res["matches"]]
+        self.assertIn("create_order", names)
+        top = res["matches"][0]
+        self.assertEqual(top["match"], "exact")
+        self.assertGreaterEqual(top["refs"], 1, "two call sites -> reverse-edge count >= 1")
+        self.assertEqual(top["file"], "orders.py")
+        self.assertGreater(top["lines"][0], 0)
+
+    def test_index_kinds_filter_and_honest_empty(self):
+        self._write("m.py", "class Repo:\n    pass\n\n\ndef helper():\n    return Repo\n")
+        res = OUMVGateway.index(query="Repo", kinds=["class"], workspace_dir=self.test_dir)
+        self.assertTrue(res["matches"])
+        self.assertEqual({m["kind"] for m in res["matches"]}, {"class"})
+        res2 = OUMVGateway.index(query="definitely_not_present_zz", workspace_dir=self.test_dir)
+        self.assertEqual(res2["matches"], [])
+        self.assertIn("provenance", res2)
+
+    def test_index_requires_query(self):
+        res = OUMVGateway.index(query="", workspace_dir=self.test_dir)
+        self.assertEqual(res.get("error"), "VALIDATION_FAILED")
+
+    def test_preview_offline_full_file_diff_without_writing(self):
+        self._write("app.py", "def a():\n    return 1\n")
+        res = OUMVGateway.preview(path="app.py", replacement="def a():\n    return 2\n", workspace_dir=self.test_dir)
+        self.assertEqual(res["mode"], "OFFLINE_FULL_FILE_PREVIEW")
+        self.assertFalse(res["unchanged"])
+        self.assertIn("-    return 1", res["diff"])
+        self.assertIn("+    return 2", res["diff"])
+        self.assertEqual(res["syntaxCheck"]["status"], "passed")
+        with open(os.path.join(self.test_dir, "app.py"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "def a():\n    return 1\n", "preview must never write")
+
+    def test_preview_refuses_symbol_level_without_runtime(self):
+        self._write("app.py", "def a():\n    return 1\n")
+        res = OUMVGateway.preview(path="app.py", symbol="a", replacement="def a():\n    return 9\n", workspace_dir=self.test_dir)
+        self.assertEqual(res["error"], "UNSUPPORTED_OFFLINE")
+        self.assertNotIn("diff", res)
+        with open(os.path.join(self.test_dir, "app.py"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "def a():\n    return 1\n")
+
+    def test_preview_blocks_path_traversal(self):
+        res = OUMVGateway.preview(path="../outside.py", replacement="x", workspace_dir=self.test_dir)
+        self.assertEqual(res["error"], "SECURITY_VIOLATION")
+
+    @patch.object(OUMVGateway, "_rpc_call")
+    def test_preview_delegates_to_live_runtime(self, mock_rpc):
+        mock_rpc.return_value = {"status": "PREVIEW", "path": "a.py", "diff": "-1\n+2\n"}
+        self._prime_state(fe={"url": "http://localhost:5173/__oumv/rpc"})
+        res = OUMVGateway.preview(path="a.py", replacement="2", runtime="frontend", workspace_dir=self.test_dir)
+        self.assertEqual(res["mode"], "LIVE_RUNTIME_PREVIEW")
+        method = mock_rpc.call_args[0][1]
+        self.assertEqual(method, "oumv/previewEdit")
+
+
 class TestOumvWorkspaceResolution(unittest.TestCase):
     """Root-less oumv calls resolve per server, not per machine.
 
