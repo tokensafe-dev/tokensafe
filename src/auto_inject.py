@@ -648,6 +648,228 @@ def _sidecar_cache_dir() -> str:
     return os.path.join(_tokensafe_home(), "sidecars")
 
 
+# --- ASP.NET Core -----------------------------------------------------------------
+#
+# The .NET adapter is a NuGet package with a middleware mount, so injection is the
+# same shape as Go/Node: one visible, reversible block in Program.cs. The builder
+# line is required only because ASP.NET Core does not expose the service collection
+# after Build(), and EF Core DbContext discovery needs it.
+
+_DOTNET_MARK_BEGIN = "// tokensafe:oumv:begin"
+_DOTNET_MARK_END = "// tokensafe:oumv:end"
+_DOTNET_PACKAGE = "TokenSafe.Oumv.AspNetCore"
+_DOTNET_PACKAGE_VERSION = "0.1.0"
+
+
+def _dotnet_web_project(workspace: str) -> Optional[str]:
+    """Finds a web csproj (Microsoft.NET.Sdk.Web or the ASP.NET Core framework reference)."""
+    for root, dirs, files in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in ("bin", "obj", "node_modules", ".git", ".tokensafe")]
+        for name in files:
+            if not name.endswith(".csproj"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    content = handle.read()
+            except OSError:
+                continue
+            if "Microsoft.NET.Sdk.Web" in content or "Microsoft.AspNetCore.App" in content:
+                return path
+    return None
+
+
+def _find_dotnet_entrypoint(workspace: str, project: Optional[str] = None) -> Optional[str]:
+    """Program.cs next to the web project (top-level statements), if present."""
+    if project:
+        candidate = os.path.join(os.path.dirname(project), "Program.cs")
+        if os.path.isfile(candidate):
+            return candidate
+    candidate = os.path.join(workspace, "Program.cs")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def dotnet_patch_state(workspace: str) -> Dict[str, Any]:
+    """Reports whether the OUMV mount is already present in Program.cs."""
+    project = _dotnet_web_project(workspace)
+    entrypoint = _find_dotnet_entrypoint(workspace, project)
+    if not entrypoint:
+        return {"entrypoint": None, "patched": False, "project": project}
+    try:
+        with open(entrypoint, "r", encoding="utf-8") as handle:
+            source = handle.read()
+    except OSError:
+        return {"entrypoint": os.path.relpath(entrypoint, workspace), "patched": False, "project": project}
+    return {
+        "entrypoint": os.path.relpath(entrypoint, workspace),
+        "patched": _DOTNET_MARK_BEGIN in source and _DOTNET_MARK_END in source,
+        "project": os.path.relpath(project, workspace) if project else None,
+    }
+
+
+def _dotnet_build(project: str) -> Tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["dotnet", "build", project, "-c", "Release", "--nologo", "-v", "quiet"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        return result.returncode == 0, (result.stdout + result.stderr)[-1500:]
+    except FileNotFoundError:
+        return False, "dotnet SDK not found on PATH"
+    except subprocess.TimeoutExpired:
+        return False, "dotnet build timed out"
+
+
+def _ensure_dotnet_dependency(project: str) -> Optional[str]:
+    """Adds the NuGet package once; returns a note when the CLI could not do it."""
+    try:
+        with open(project, "r", encoding="utf-8") as handle:
+            content = handle.read()
+    except OSError:
+        return f"could not read {project}"
+    if _DOTNET_PACKAGE in content:
+        return None
+    try:
+        result = subprocess.run(
+            ["dotnet", "add", project, "package", _DOTNET_PACKAGE, "--version", _DOTNET_PACKAGE_VERSION],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except FileNotFoundError:
+        return f"dotnet SDK not found; add <PackageReference Include=\"{_DOTNET_PACKAGE}\" Version=\"{_DOTNET_PACKAGE_VERSION}\" /> manually"
+    except subprocess.TimeoutExpired:
+        return "dotnet add package timed out"
+    if result.returncode != 0:
+        return f"dotnet add package failed; add the PackageReference manually: {(result.stdout + result.stderr)[-300:]}"
+    return None
+
+
+def apply_dotnet_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
+    """Inserts `using`, `AddTokensafe()` and `UseTokensafe()` between tokensafe markers."""
+    project = _dotnet_web_project(workspace)
+    if not project:
+        return {"status": "skipped", "reason": "no ASP.NET Core (Microsoft.NET.Sdk.Web) project found"}
+    entrypoint = _find_dotnet_entrypoint(workspace, project)
+    if not entrypoint:
+        return {"status": "skipped", "reason": "no Program.cs next to the web project"}
+
+    with open(entrypoint, "r", encoding="utf-8") as handle:
+        source = handle.read()
+    if _DOTNET_MARK_BEGIN in source:
+        return {"status": "already_patched", "entrypoint": os.path.relpath(entrypoint, workspace)}
+
+    builder = re.search(
+        r"(?m)^(?P<indent>[ \t]*)(?:var|WebApplicationBuilder)\s+(?P<builder>\w+)\s*=\s*WebApplication\.CreateBuilder\(",
+        source,
+    )
+    app = re.search(
+        r"(?m)^(?P<indent>[ \t]*)(?:var|WebApplication)\s+(?P<app>\w+)\s*=\s*(?P<builder>\w+)\.Build\(\)\s*;",
+        source,
+    )
+    if not builder or not app:
+        return {
+            "status": "skipped",
+            "reason": "could not find `WebApplication.CreateBuilder(...)` and `builder.Build()` in Program.cs",
+        }
+    if builder.group("builder") != app.group("builder"):
+        return {"status": "skipped", "reason": "Program.cs builds the app from a different builder variable"}
+
+    def insertion(line_match: "re.Match[str]", body: str) -> Tuple[int, str]:
+        line_end = source.find("\n", line_match.end())
+        insert_at = len(source) if line_end < 0 else line_end + 1
+        indent = line_match.group("indent")
+        block = f"{_DOTNET_MARK_BEGIN}\n{indent}{body}\n{_DOTNET_MARK_END}\n"
+        return insert_at, block
+
+    services_at, services_block = insertion(
+        builder, f"{builder.group('builder')}.Services.AddTokensafe();"
+    )
+    mount_at, mount_block = insertion(app, f"{app.group('app')}.UseTokensafe();")
+
+    using_block = ""
+    if not re.search(r"(?m)^\s*using\s+TokenSafe\.Oumv\s*;", source):
+        using_lines = list(re.finditer(r"(?m)^using\s+[^;]+;\s*$", source))
+        using_block = f"{_DOTNET_MARK_BEGIN}\nusing TokenSafe.Oumv;\n{_DOTNET_MARK_END}\n"
+        if using_lines:
+            last = using_lines[-1]
+            line_end = source.find("\n", last.end())
+            using_at = len(source) if line_end < 0 else line_end + 1
+        else:
+            using_at = 0
+
+    patched = source
+    # Insert from the bottom up so earlier offsets stay valid.
+    for position, block in sorted(((services_at, services_block), (mount_at, mount_block)), reverse=True):
+        patched = patched[:position] + block + patched[position:]
+    if using_block:
+        patched = patched[:using_at] + using_block + patched[using_at:]
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "entrypoint": os.path.relpath(entrypoint, workspace),
+            "preview": f"{builder.group('builder')}.Services.AddTokensafe();\n{app.group('app')}.UseTokensafe();",
+        }
+
+    backup_dir = _inject_dir(workspace)
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, os.path.relpath(entrypoint, workspace).replace(os.sep, "__") + ".bak")
+    shutil.copy2(entrypoint, backup_path)
+    with open(entrypoint, "w", encoding="utf-8") as handle:
+        handle.write(patched)
+
+    dependency_note = _ensure_dotnet_dependency(project)
+    build_ok, build_output = _dotnet_build(project) if dependency_note is None else (False, "skipped")
+    if not build_ok:
+        shutil.copy2(backup_path, entrypoint)
+        os.unlink(backup_path)
+        return {
+            "status": "reverted",
+            "entrypoint": os.path.relpath(entrypoint, workspace),
+            "reason": dependency_note or "dotnet build failed",
+            "build": build_output[-800:],
+        }
+
+    with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {"entrypoint": entrypoint, "backup": backup_path, "framework": "aspnetcore", "mode": "dotnet_mount"},
+            handle,
+            indent=2,
+        )
+    return {
+        "status": "patched",
+        "entrypoint": os.path.relpath(entrypoint, workspace),
+        "framework": "aspnetcore",
+        "mode": "dotnet_mount",
+        "backup": backup_path,
+        "line": f"{app.group('app')}.UseTokensafe();",
+        "dependency": f"{_DOTNET_PACKAGE}@{_DOTNET_PACKAGE_VERSION}",
+    }
+
+
+def revert_dotnet_patch(workspace: str) -> Dict[str, Any]:
+    manifest_path = os.path.join(_inject_dir(workspace), "manifest.json")
+    if not os.path.isfile(manifest_path):
+        return {"status": "clean", "reason": "no .NET patch manifest"}
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except Exception as exc:
+        return {"status": "error", "reason": f"cannot read manifest: {exc}"}
+    if manifest.get("mode") != "dotnet_mount":
+        return {"status": "clean", "reason": "manifest is not a .NET patch"}
+    entrypoint = manifest.get("entrypoint")
+    backup = manifest.get("backup")
+    if not (entrypoint and backup and os.path.isfile(backup)):
+        return {"status": "error", "reason": "backup missing; restore manually"}
+    shutil.copy2(backup, entrypoint)
+    os.unlink(manifest_path)
+    return {"status": "reverted", "entrypoint": os.path.relpath(entrypoint, workspace)}
+
+
 # Pinned to the backend release: the sidecars are single files, so the cache is
 # content-addressed by SHA-256 and a clean machine downloads the exact bytes the
 # release was certified from. Bump both the tag and the hashes together.
@@ -784,6 +1006,7 @@ def plan(workspace: str) -> Dict[str, Any]:
             "node": "backend/node",
             "spring": "backend/spring",
             "php": "backend/php",
+            "dotnet": "backend/aspnetcore",
         }.get(provider, "backend/go")
         entry = catalog.get(entry_id, {})
         install = entry.get("technology", {}).get("package", {}).get("install")
@@ -820,6 +1043,20 @@ def plan(workspace: str) -> Dict[str, Any]:
                 "entrypoint": state["entrypoint"],
                 "description": "one mountTokensafe(app)/registerTokensafe(app) line between tokensafe markers; byte-exact backup + --revert",
                 "install": install or "npm install tokensafe-backend-node",
+            })
+        elif provider == "dotnet":
+            state = dotnet_patch_state(workspace)
+            actions.append({
+                "kind": "dotnet_one_line_patch",
+                "profile": "backend",
+                "framework": "aspnetcore",
+                "writes_repo": True,
+                "already_patched": state["patched"],
+                "entrypoint": state["entrypoint"],
+                "project": state.get("project"),
+                "description": "one AddTokensafe()/UseTokensafe() pair between tokensafe markers; byte-exact backup + --revert",
+                "install": install or f"dotnet add package {_DOTNET_PACKAGE}",
+                "run": "dotnet run",
             })
         elif provider in ("spring", "php"):
             sidecar_path, note = ensure_sidecar(provider)
@@ -884,6 +1121,8 @@ def apply(workspace: str, dry_run: bool = False, include_go: bool = True) -> Dic
         results["actions"].append({"kind": "go_one_line_patch", **apply_go_patch(workspace, dry_run=dry_run)})
     elif backend.get("provider") == "node":
         results["actions"].append({"kind": "node_one_line_patch", **apply_node_patch(workspace, dry_run=dry_run)})
+    elif backend.get("provider") == "dotnet":
+        results["actions"].append({"kind": "dotnet_one_line_patch", **apply_dotnet_patch(workspace, dry_run=dry_run)})
     elif backend.get("provider") in ("spring", "php"):
         sidecar_path, note = ensure_sidecar(backend["provider"])
         results["actions"].append({
@@ -902,4 +1141,5 @@ def revert(workspace: str) -> Dict[str, Any]:
         "workspace": workspace,
         "go": revert_go_patch(workspace),
         "node": revert_node_patch(workspace),
+        "dotnet": revert_dotnet_patch(workspace),
     }

@@ -26,6 +26,16 @@ func main() {
 }
 '''
 
+DOTNET_PROGRAM = '''using Microsoft.EntityFrameworkCore;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite("Data Source=app.db"));
+
+var app = builder.Build();
+app.MapGet("/", () => "ok");
+app.Run();
+'''
+
 
 class TestAutoInject(unittest.TestCase):
     def setUp(self):
@@ -239,6 +249,58 @@ func main() {
         self.assertEqual(action["kind"], "node_one_line_patch")
         self.assertTrue(action["writes_repo"])
         self.assertIn("mountTokensafe", action["description"])
+
+
+    def _write_dotnet_project(self):
+        with open(os.path.join(self.tmp, "Cert.csproj"), "w", encoding="utf-8") as f:
+            f.write('<Project Sdk="Microsoft.NET.Sdk.Web">\n  <PropertyGroup>'
+                    "<TargetFramework>net10.0</TargetFramework></PropertyGroup>\n</Project>\n")
+        with open(os.path.join(self.tmp, "Program.cs"), "w", encoding="utf-8") as f:
+            f.write(DOTNET_PROGRAM)
+        return os.path.join(self.tmp, "Program.cs")
+
+    def test_dotnet_patch_is_reversible_byte_for_byte(self):
+        program = self._write_dotnet_project()
+        original = open(program, "rb").read()
+
+        with patch.object(auto_inject, "_ensure_dotnet_dependency", return_value=None), \
+             patch.object(auto_inject, "_dotnet_build", return_value=(True, "")):
+            patched = auto_inject.apply_dotnet_patch(self.tmp)
+
+        self.assertEqual(patched["status"], "patched")
+        self.assertEqual(patched["mode"], "dotnet_mount")
+        after = open(program, encoding="utf-8").read()
+        self.assertIn("// tokensafe:oumv:begin", after)
+        self.assertIn("using TokenSafe.Oumv;", after)
+        self.assertIn("builder.Services.AddTokensafe();", after)
+        self.assertIn("app.UseTokensafe();", after)
+        self.assertLess(after.index("using TokenSafe.Oumv;"), after.index("var builder"))
+
+        reverted = auto_inject.revert_dotnet_patch(self.tmp)
+        self.assertEqual(reverted["status"], "reverted")
+        self.assertEqual(open(program, "rb").read(), original)
+
+    def test_dotnet_patch_rolls_back_when_build_fails(self):
+        program = self._write_dotnet_project()
+        original = open(program, "rb").read()
+
+        with patch.object(auto_inject, "_ensure_dotnet_dependency", return_value=None), \
+             patch.object(auto_inject, "_dotnet_build", return_value=(False, "error CS0246")):
+            result = auto_inject.apply_dotnet_patch(self.tmp)
+
+        self.assertEqual(result["status"], "reverted")
+        self.assertEqual(open(program, "rb").read(), original)
+
+    def test_dotnet_plan_offers_the_middleware_patch(self):
+        self._write_dotnet_project()
+        data = auto_inject.plan(self.tmp)
+        action = next(item for item in data["actions"] if item["profile"] == "backend")
+        self.assertEqual(action["kind"], "dotnet_one_line_patch")
+        self.assertEqual(action["framework"], "aspnetcore")
+        self.assertTrue(action["writes_repo"])
+        self.assertFalse(action["already_patched"])
+        self.assertIn("TokenSafe.Oumv.AspNetCore", action["install"])
+
 
 
 if __name__ == "__main__":

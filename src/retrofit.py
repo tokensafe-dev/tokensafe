@@ -4,9 +4,11 @@ Enables existing frontend and backend projects to adopt the OUMV protocol
 incrementally without migrating frameworks or restructuring codebases.
 """
 
+import glob
 import os
 import json
 import time
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 # Top-level directories that hold frontend source in a repo-root app (as opposed to
@@ -310,6 +312,44 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
                 })
                 break
 
+        # ASP.NET Core detection: Microsoft.NET.Sdk.Web or the ASP.NET Core
+        # framework reference in a csproj.
+        for csproj in sorted(glob.glob(os.path.join(target_dir, "**", "*.csproj"), recursive=True)):
+            if any(part in ("bin", "obj", "node_modules") for part in Path(csproj).parts):
+                continue
+            try:
+                with open(csproj, "r", encoding="utf-8", errors="replace") as f:
+                    csproj_content = f.read()
+            except Exception:
+                continue
+            if "Microsoft.NET.Sdk.Web" not in csproj_content and "Microsoft.AspNetCore.App" not in csproj_content:
+                continue
+            rel_csproj = os.path.relpath(csproj, workspace_dir)
+            _add_detected(rel_csproj)
+            if "nuget/dotnet" not in stack["package_managers"]:
+                stack["package_managers"].append("nuget/dotnet")
+            dotnet_entry = {
+                "framework": "aspnetcore",
+                "provider": "dotnet",
+                "adapter": "tokensafe-backend/dotnet",
+                "language": "csharp",
+                "root": os.path.dirname(rel_csproj) or ".",
+                "oumv_supported": True,
+                "status": "ready",
+            }
+            if not stack["backend"] or not stack["backend"].get("oumv_supported", False):
+                stack["backend"] = dotnet_entry
+            _add_package({
+                "role": "backend",
+                "path": dotnet_entry["root"],
+                "framework": "aspnetcore",
+                "provider": "dotnet",
+                "adapter": "tokensafe-backend/dotnet",
+                "oumvSupported": True,
+                "status": "ready",
+            })
+            break
+
         composer_path = os.path.join(target_dir, "composer.json")
         if os.path.isfile(composer_path):
             try:
@@ -583,6 +623,32 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
                 {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": True}},
                 {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": True, "requiresPermission": "permissions.mutate != false"}},
                 {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True}},
+            ],
+        },
+        {
+            "id": "backend/aspnetcore",
+            "name": "ASP.NET Core Adapter (minimal APIs, MVC controllers, EF Core)",
+            "profile": "backend",
+            "profiles": ["backend"],
+            "repo": "tokensafe-backend/dotnet",
+            "mode": "hybrid",
+            "status": "ready",
+            "description": "In-process endpoint dispatch for minimal APIs and controllers, Roslyn syntax pre-flight, and verify.sandboxRollback that rolls every auto-discovered EF Core DbContext back",
+            "technology": {
+                "language": "csharp",
+                "framework": "aspnetcore",
+                "package": {
+                    "manager": "nuget",
+                    "name": "TokenSafe.Oumv.AspNetCore",
+                    "install": "dotnet add package TokenSafe.Oumv.AspNetCore",
+                },
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "observe.runtime_state", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": False, "limitations": ["requires observed request traces (UseTokensafe middleware or oumv/verify)"]}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.runtime_behavior", "constraints": {"readOnly": True, "developmentOnly": False}},
             ],
         },
         {
