@@ -535,6 +535,15 @@ def pypi_version_published(version: str) -> bool:
         return False
 
 
+def wait_for_pypi(version: str, attempts: int = 12, delay: int = 15) -> bool:
+    """Waits for the tag CI job to publish `version` via Trusted Publishing."""
+    for _ in range(attempts):
+        if pypi_version_published(version):
+            return True
+        time.sleep(delay)
+    return False
+
+
 def npm_version_published(version: str) -> bool:
     code, out = _sh(["npm", "view", f"tokensafe@{version}", "version"], timeout=30)
     return code == 0 and version in out
@@ -758,7 +767,12 @@ def run_release(target: str, otp: Optional[str] = None, no_bump: bool = False, s
     print("── Phase 5: PyPI")
     if pypi_version_published(next_v):
         print(f"  ℹ {next_v} already on PyPI")
-    else:
+    elif os.environ.get("TOKENSAFE_ALLOW_TOKEN_UPLOAD") == "1":
+        # Explicit opt-in only. The tag-triggered CI job owns PyPI through Trusted
+        # Publishing (OIDC); uploading with an API token next to it makes PyPI
+        # email "a token belonging to user X was used although a Trusted Publisher
+        # is configured" and re-introduces the credential this repo moved away
+        # from. Keep the path for emergencies, never as the default.
         dists = sorted(_glob.glob(os.path.join(PROJECT_ROOT, "dist", f"*{next_v}*")))
         if not dists:
             print("❌ dist artifacts missing."); sys.exit(1)
@@ -766,7 +780,14 @@ def run_release(target: str, otp: Optional[str] = None, no_bump: bool = False, s
         if code != 0:
             print(out[-400:]); pending.append("twine upload")
         else:
-            print("  ✔ PyPI uploaded")
+            print("  ✔ PyPI uploaded (explicit token upload)")
+    else:
+        print("  ⏳ Trusted Publishing owns PyPI — waiting for the tag CI job")
+        if wait_for_pypi(next_v):
+            print("  ✔ PyPI published by CI (OIDC)")
+        else:
+            print("  ℹ CI has not published yet; do NOT run twine — re-run --resume later")
+            pending.append("PyPI upload (CI OIDC job)")
 
     # Phase 6: npm ------------------------------------------------------------
     print("── Phase 6: npm (token / 2FA)")
