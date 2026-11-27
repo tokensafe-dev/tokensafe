@@ -30,9 +30,7 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
         _UI_CLI_CACHE.clear()
 
     def tearDown(self):
-        OUMVGateway._cached_fe = None
-        OUMVGateway._cached_be = None
-        OUMVGateway._last_scan_time = 0.0
+        OUMVGateway._workspace_states.clear()
         OUMVGateway._port_liveness.clear()
         shutil.rmtree(self.test_dir, ignore_errors=True)
         shutil.rmtree(self.tmp_home, ignore_errors=True)
@@ -197,7 +195,7 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
             with patch.object(OUMVGateway, "_probe_candidates", return_value=None):
                 st = OUMVGateway.status(workspace_dir=self.test_dir)
             self.assertNotEqual(st["frontend"].get("status", ""), "CONNECTED")
-            self.assertIsNone(OUMVGateway._cached_fe)
+            self.assertIsNone(OUMVGateway._state_for(self.test_dir)["fe"])
             self.assertTrue(st.get("staleRuntimes"))
 
     def test_expired_runtime_descriptor_is_ignored(self):

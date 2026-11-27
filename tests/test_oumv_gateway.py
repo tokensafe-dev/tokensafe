@@ -19,14 +19,21 @@ class TestOUMVGateway(unittest.TestCase):
 
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
-        OUMVGateway._cached_fe = None
-        OUMVGateway._cached_be = None
-        OUMVGateway._last_scan_time = 0.0
+        OUMVGateway._workspace_states.clear()
         OUMVGateway._port_liveness.clear()
 
     def tearDown(self):
         OUMVGateway._port_liveness.clear()
         shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _prime_state(self, ws=None, fe=None, be=None, fresh=True):
+        """Seeds the per-workspace gateway state (fresh scan time skips live probing)."""
+        st = OUMVGateway._state_for(ws or self.test_dir)
+        if fresh:
+            st["last_scan"] = 9999999999.0
+        st["fe"] = fe
+        st["be"] = be
+        return st
 
     def _listener_port(self):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -54,9 +61,7 @@ class TestOUMVGateway(unittest.TestCase):
             f.write("[project]\nname = 'svc'\ndependencies = ['fastapi']\n")
 
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0
-            OUMVGateway._cached_fe = None
-            OUMVGateway._cached_be = None
+            self._prime_state()
             status = OUMVGateway.status(workspace_dir=self.test_dir)
 
         adapters = status.get("adapters", [])
@@ -120,41 +125,40 @@ class TestOUMVGateway(unittest.TestCase):
 
     @patch.object(OUMVGateway, "_rpc_call")
     def test_observe_fullstack_pulse(self, mock_rpc):
-        OUMVGateway._last_scan_time = 9999999999.0
-        OUMVGateway._cached_fe = {"url": "http://localhost:5173/__oumv/rpc"}
-        OUMVGateway._cached_be = {"url": "http://localhost:8000/__oumv/rpc"}
-        mock_rpc.side_effect = [
-            {"status": "HEALTHY", "route": "/"},
-            {"status": "HEALTHY", "routesCount": 5}
-        ]
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            self._prime_state(fe={"url": "http://localhost:5173/__oumv/rpc"}, be={"url": "http://localhost:8000/__oumv/rpc"})
+            mock_rpc.side_effect = [
+                {"status": "HEALTHY", "route": "/"},
+                {"status": "HEALTHY", "routesCount": 5}
+            ]
 
-        res = OUMVGateway.observe(level="L0", runtime="auto")
+            res = OUMVGateway.observe(level="L0", runtime="auto")
         self.assertEqual(res["mode"], "FULLSTACK_PULSE")
         self.assertEqual(res["frontend"]["status"], "HEALTHY")
         self.assertEqual(res["backend"]["routesCount"], 5)
 
     @patch.object(OUMVGateway, "_rpc_call")
     def test_verify_dispatch(self, mock_rpc):
-        OUMVGateway._last_scan_time = 9999999999.0
-        OUMVGateway._cached_be = {"url": "http://localhost:8000/__oumv/rpc"}
-        mock_rpc.return_value = {
-            "status": "PASS",
-            "statusCode": 201,
-            "rolledBack": True
-        }
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            self._prime_state(be={"url": "http://localhost:8000/__oumv/rpc"})
+            mock_rpc.return_value = {
+                "status": "PASS",
+                "statusCode": 201,
+                "rolledBack": True
+            }
 
-        res = OUMVGateway.verify(target="POST /api/products", payload={"title": "Widget"})
-        self.assertEqual(res["status"], "PASS")
-        self.assertEqual(res["statusCode"], 201)
-        self.assertTrue(res["rolledBack"])
-        sent = mock_rpc.call_args[0][2]
-        self.assertNotIn("sandbox", sent)
+            res = OUMVGateway.verify(target="POST /api/products", payload={"title": "Widget"})
+            self.assertEqual(res["status"], "PASS")
+            self.assertEqual(res["statusCode"], 201)
+            self.assertTrue(res["rolledBack"])
+            sent = mock_rpc.call_args[0][2]
+            self.assertNotIn("sandbox", sent)
 
-        OUMVGateway.verify(
-            target="POST /api/products",
-            payload={"title": "Widget"},
-            sandbox={"mode": "rollback"},
-        )
+            OUMVGateway.verify(
+                target="POST /api/products",
+                payload={"title": "Widget"},
+                sandbox={"mode": "rollback"},
+            )
         sent = mock_rpc.call_args[0][2]
         self.assertEqual(sent["sandbox"], {"mode": "rollback"})
 
@@ -247,9 +251,7 @@ class TestOUMVGateway(unittest.TestCase):
     def test_understand_causality_includes_cross_stack_edges(self):
         self._make_fullstack_fixture()
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0  # skip live port probing
-            OUMVGateway._cached_fe = None
-            OUMVGateway._cached_be = None
+            self._prime_state()
 
             res = OUMVGateway.understand(query="causality", target="/api/orders", runtime="auto")
             self.assertEqual(res["query"], "causality")
@@ -265,9 +267,7 @@ class TestOUMVGateway(unittest.TestCase):
     def test_understand_impact_returns_static_impact_and_callers(self):
         self._make_fullstack_fixture()
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0
-            OUMVGateway._cached_fe = None
-            OUMVGateway._cached_be = None
+            self._prime_state()
 
             res = OUMVGateway.understand(query="impact", target="/api/orders", runtime="auto")
             self.assertEqual(res["query"], "impact")
@@ -281,9 +281,7 @@ class TestOUMVGateway(unittest.TestCase):
     def test_understand_rejects_prose_query_instead_of_dumping_surface(self):
         self._make_fullstack_fixture()
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0
-            OUMVGateway._cached_fe = None
-            OUMVGateway._cached_be = None
+            self._prime_state()
             with patch.object(OUMVGateway, "get_endpoints", return_value=(None, None)):
                 res = OUMVGateway.understand(
                     query="WheelModal spin button click handler chain", target=None, runtime="auto"
@@ -303,9 +301,7 @@ class TestOUMVGateway(unittest.TestCase):
             f.write("import { spinRequest } from './api/wheel'\n"
                     "export async function spinWheel(p: any) { return spinRequest(p) }\n")
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0
-            OUMVGateway._cached_fe = None
-            OUMVGateway._cached_be = None
+            self._prime_state()
             res = OUMVGateway.understand(query="flow", target="spinWheel", runtime="auto")
         self.assertEqual(res["mode"], "STATIC_FLOW")
         self.assertEqual(res["level"], "L2")
@@ -314,9 +310,7 @@ class TestOUMVGateway(unittest.TestCase):
     def test_understand_causality_with_explicit_runtime_keeps_static_backbone(self):
         self._make_fullstack_fixture()
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0
-            OUMVGateway._cached_fe = None
-            OUMVGateway._cached_be = None
+            self._prime_state()
             with patch.object(OUMVGateway, "get_endpoints", return_value=(None, None)):
                 res = OUMVGateway.understand(query="causality", target="/api/orders", runtime="frontend")
         self.assertEqual(res["query"], "causality")
@@ -326,8 +320,7 @@ class TestOUMVGateway(unittest.TestCase):
     @patch.object(OUMVGateway, "_rpc_call", side_effect=OUMVRpcError("JSON-RPC error (-32002): SYNTAX_ERROR"))
     def test_mutate_propagates_live_rpc_error_without_offline_bypass(self, _mock_rpc):
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0
-            OUMVGateway._cached_fe = {"url": "http://localhost:5173/__oumv/rpc"}
+            self._prime_state(fe={"url": "http://localhost:5173/__oumv/rpc"})
             file_path = "src/App.tsx"
             full_path = os.path.join(self.test_dir, file_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -363,8 +356,7 @@ class TestOUMVGateway(unittest.TestCase):
         thread.start()
         try:
             with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-                OUMVGateway._last_scan_time = 9999999999.0
-                OUMVGateway._cached_fe = {"url": f"http://127.0.0.1:{server.server_port}/__oumv/rpc"}
+                self._prime_state(fe={"url": f"http://127.0.0.1:{server.server_port}/__oumv/rpc"})
 
                 file_path = "src/App.py"
                 full_path = os.path.join(self.test_dir, file_path)
@@ -425,11 +417,11 @@ class TestOUMVGateway(unittest.TestCase):
                         }
                     }, f)
 
-                OUMVGateway._cached_fe = None
-                OUMVGateway._check_workspace_runtime_files(self.test_dir)
-                self.assertIsNotNone(OUMVGateway._cached_fe)
-                self.assertEqual(OUMVGateway._cached_fe["url"], "http://localhost:5173/__oumv/rpc")
-                self.assertEqual(OUMVGateway._cached_fe["sessionToken"], "zf-token")
+                OUMVGateway._workspace_states.clear()
+                st = OUMVGateway._check_workspace_runtime_files(self.test_dir)
+                self.assertIsNotNone(st["fe"])
+                self.assertEqual(st["fe"]["url"], "http://localhost:5173/__oumv/rpc")
+                self.assertEqual(st["fe"]["sessionToken"], "zf-token")
                 self.assertFalse(os.path.exists(os.path.join(self.test_dir, ".tokensafe")))
         finally:
             shutil.rmtree(tmp_home, ignore_errors=True)
@@ -440,6 +432,51 @@ class TestOUMVGateway(unittest.TestCase):
         self.assertIn("dev", cmd)
         self.assertIn(os.path.abspath(self.test_dir), cmd)
         self.assertIn("--port=5179", cmd)
+
+    def test_endpoints_are_isolated_per_workspace_root(self):
+        """A live runtime discovered for root A must never satisfy root B.
+
+        Multi-root sessions answer several repos from one process: the gateway
+        cache is keyed by canonical workspace root, so root B's status (and any
+        RPC routed through it) cannot see root A's endpoints.
+        """
+        ws_a = tempfile.mkdtemp(prefix="oumv_ws_a_")
+        ws_b = tempfile.mkdtemp(prefix="oumv_ws_b_")
+        self.addCleanup(shutil.rmtree, ws_a, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, ws_b, ignore_errors=True)
+
+        fe_port = self._listener_port()
+        # Root A advertises a live frontend via its workspace descriptor
+        a_dir = os.path.join(ws_a, ".tokensafe")
+        os.makedirs(a_dir, exist_ok=True)
+        with open(os.path.join(a_dir, "runtime.json"), "w", encoding="utf-8") as f:
+            json.dump({"frontend": {"name": "a-ui", "url": f"http://127.0.0.1:{fe_port}/__oumv/rpc"}}, f)
+
+        with patch.object(OUMVGateway, "_probe_candidates", return_value=None):
+            fe_a, be_a = OUMVGateway.get_endpoints(workspace_dir=ws_a)
+            self.assertIsNotNone(fe_a, "root A must adopt its own descriptor")
+            fe_b, be_b = OUMVGateway.get_endpoints(workspace_dir=ws_b)
+            self.assertIsNone(fe_b, "root B must not inherit root A's frontend")
+            self.assertIsNone(be_b)
+
+        # The same isolation holds for the status report
+        with patch.object(OUMVGateway, "_probe_candidates", return_value=None):
+            status_b = OUMVGateway.status(workspace_dir=ws_b)
+            self.assertNotEqual(status_b["frontend"].get("name", ""), "a-ui")
+            self.assertEqual(status_b["workspace"], ws_b)
+
+    def test_status_scan_never_resets_another_workspaces_state(self):
+        """Scanning one root must not drop a concurrent root's discovered endpoints."""
+        ws_a = tempfile.mkdtemp(prefix="oumv_scan_a_")
+        ws_b = tempfile.mkdtemp(prefix="oumv_scan_b_")
+        self.addCleanup(shutil.rmtree, ws_a, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, ws_b, ignore_errors=True)
+
+        with patch.object(OUMVGateway, "_probe_candidates", return_value=None):
+            self._prime_state(ws_a, fe={"url": "http://localhost:5173/__oumv/rpc"}, fresh=False)
+            OUMVGateway.scan(workspace_dir=ws_b)
+            st_a = OUMVGateway._state_for(ws_a)
+            self.assertEqual(st_a["fe"]["url"], "http://localhost:5173/__oumv/rpc")
 
 
 if __name__ == "__main__":

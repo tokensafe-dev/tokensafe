@@ -125,16 +125,14 @@ class TestGatewayGraphTool(unittest.TestCase):
                "from fastapi import FastAPI\napp = FastAPI()\n\n@app.post('/api/items')\ndef create_item():\n    return {}\n")
         _write(os.path.join(self.test_dir, "web", "client.ts"),
                "export async function addItem() {\n    return axios.post('/api/items', {});\n}\n")
-        OUMVGateway._cached_fe = None
-        OUMVGateway._cached_be = None
-        OUMVGateway._last_scan_time = 0.0
+        OUMVGateway._workspace_states.clear()
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_gateway_graph_overview_and_who_depends(self):
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
-            OUMVGateway._last_scan_time = 9999999999.0
+            OUMVGateway._state_for(self.test_dir)["last_scan"] = 9999999999.0
             overview = OUMVGateway.graph(query="overview", target="/api/items")
             self.assertEqual(overview["mode"], "UNIFIED_CROSS_STACK_GRAPH")
             self.assertTrue(overview["edges"])

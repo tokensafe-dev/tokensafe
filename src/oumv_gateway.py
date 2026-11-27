@@ -41,9 +41,10 @@ _UNSUPPORTED_HINTS = (
 class OUMVGateway:
     """Dispatches OUMV protocol calls to live DevServers with zero-config discovery."""
 
-    _cached_fe: Optional[Dict[str, Any]] = None
-    _cached_be: Optional[Dict[str, Any]] = None
-    _last_scan_time: float = 0.0
+    # Per-workspace endpoint cache: one process serves several workspace roots
+    # (multi-root sessions), so root A's live runtime must never leak into
+    # root B's status/observe answer.
+    _workspace_states: Dict[str, Dict[str, Any]] = {}
     _SCAN_INTERVAL_SEC: float = 5.0
     # Liveness cache for descriptor-derived ports: the bash guard runs per command,
     # so a TCP probe must be memoized instead of blocking every invocation.
@@ -88,40 +89,68 @@ class OUMVGateway:
         return cls._is_port_open(parsed.hostname or "127.0.0.1", int(port))
 
     @classmethod
-    def _drop_stale_descriptor_endpoints(cls) -> List[Dict[str, Any]]:
+    def _ws_key(cls, workspace_dir: Optional[str] = None) -> str:
+        """Canonical per-workspace cache key (realpath'd, never empty)."""
+        base = workspace_dir or get_active_workspace() or os.getcwd()
+        return os.path.realpath(os.path.abspath(base))
+
+    @classmethod
+    def _state_for(cls, workspace_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Per-workspace endpoint state: {"fe", "be", "last_scan"}."""
+        return cls._workspace_states.setdefault(
+            cls._ws_key(workspace_dir), {"fe": None, "be": None, "last_scan": 0.0}
+        )
+
+    @classmethod
+    def _drop_stale_descriptor_endpoints(cls, workspace_dir: Optional[str] = None) -> List[Dict[str, Any]]:
         """Clears descriptor-sourced endpoints whose port no longer listens.
 
         A descriptor is a hint written by the dev server; after a crash it keeps
         pointing at a dead (or reused) port and every consumer would report CONNECTED.
+        Without a workspace_dir, every cached workspace is checked; with one, only
+        that root's state is touched (and its drops reported to the caller).
         Returns the dropped entries so callers can explain the downgrade.
         """
         dropped: List[Dict[str, Any]] = []
-        for attr in ("_cached_fe", "_cached_be"):
-            entry = getattr(cls, attr)
-            if entry and entry.get("source") == "descriptor":
-                url = entry.get("url")
-                if url and not cls._is_url_live(url):
-                    dropped.append(entry)
-                    setattr(cls, attr, None)
+        if workspace_dir is not None:
+            states = [cls._state_for(workspace_dir)]
+        elif cls._workspace_states:
+            states = list(cls._workspace_states.values())
+        else:
+            states = [cls._state_for(None)]
+        for st in states:
+            for slot in ("fe", "be"):
+                entry = st.get(slot)
+                if entry and entry.get("source") == "descriptor":
+                    url = entry.get("url")
+                    if url and not cls._is_url_live(url):
+                        dropped.append(entry)
+                        st[slot] = None
         return dropped
 
     @classmethod
     def get_endpoints(cls, workspace_dir: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Returns (frontend_endpoint, backend_endpoint) with periodic cache invalidation."""
+        """Returns (frontend_endpoint, backend_endpoint) for the given workspace root.
+
+        Each root has its own scan timestamp and endpoint pair; a scan performed for
+        root A never satisfies root B's discovery.
+        """
+        st = cls._state_for(workspace_dir)
         now = time.time()
-        if (now - cls._last_scan_time > cls._SCAN_INTERVAL_SEC) or (not cls._cached_fe and not cls._cached_be):
+        if (now - st["last_scan"] > cls._SCAN_INTERVAL_SEC) or (not st["fe"] and not st["be"]):
             cls.scan(workspace_dir=workspace_dir)
-        cls._drop_stale_descriptor_endpoints()
-        return cls._cached_fe, cls._cached_be
+        cls._drop_stale_descriptor_endpoints(workspace_dir)
+        return st["fe"], st["be"]
 
     @classmethod
     def scan(cls, workspace_dir: Optional[str] = None):
         """Scans workspace runtime lockfiles and local ports in parallel."""
-        cls._last_scan_time = time.time()
-        ws = workspace_dir or get_active_workspace()
+        ws = workspace_dir or get_active_workspace() or os.getcwd()
+        st = cls._state_for(ws)
+        st["last_scan"] = time.time()
 
         # 1. Check workspace runtime files (.tokensafe/runtime.json or .oumv/runtime.json)
-        cls._check_workspace_runtime_files(ws)
+        cls._check_workspace_runtime_files(ws, st)
 
         # 2. Parallel candidate probe for remaining missing endpoints
         env_fe = os.environ.get("TOKENSAFE_FRONTEND_URL")
@@ -149,17 +178,17 @@ class OUMVGateway:
         ]
 
         with ThreadPoolExecutor(max_workers=6) as executor:
-            future_fe = executor.submit(cls._probe_candidates, fe_candidates, "frontend") if not cls._cached_fe else None
-            future_be = executor.submit(cls._probe_candidates, be_candidates, "backend") if not cls._cached_be else None
+            future_fe = executor.submit(cls._probe_candidates, fe_candidates, "frontend") if not st["fe"] else None
+            future_be = executor.submit(cls._probe_candidates, be_candidates, "backend") if not st["be"] else None
 
             if future_fe:
                 found_fe = future_fe.result()
                 if found_fe:
-                    cls._cached_fe = found_fe
+                    st["fe"] = found_fe
             if future_be:
                 found_be = future_be.result()
                 if found_be:
-                    cls._cached_be = found_be
+                    st["be"] = found_be
 
     @staticmethod
     def global_runtime_file(workspace_dir: str) -> str:
@@ -170,7 +199,8 @@ class OUMVGateway:
         return os.path.join(tokensafe_home, "runtimes", f"{ws_id}.json")
 
     @classmethod
-    def _check_workspace_runtime_files(cls, workspace_dir: str):
+    def _check_workspace_runtime_files(cls, workspace_dir: str, st: Optional[Dict[str, Any]] = None):
+        st = st if st is not None else cls._state_for(workspace_dir)
         lock_paths = [
             cls.global_runtime_file(workspace_dir),
             os.path.join(workspace_dir, ".tokensafe", "runtime.json"),
@@ -183,7 +213,7 @@ class OUMVGateway:
                         data = json.load(f)
                     fe_info = data.get("frontend")
                     if fe_info and fe_info.get("url"):
-                        cls._cached_fe = {
+                        st["fe"] = {
                             "kind": "frontend",
                             "name": fe_info.get("name", "tokensafe-ui"),
                             "version": fe_info.get("version", "1.0.0"),
@@ -195,7 +225,7 @@ class OUMVGateway:
                         }
                     be_info = data.get("backend")
                     if be_info and be_info.get("url"):
-                        cls._cached_be = {
+                        st["be"] = {
                             "kind": "backend",
                             "name": be_info.get("name", "tokensafe-backend"),
                             "version": be_info.get("version", "1.0.0"),
@@ -207,6 +237,7 @@ class OUMVGateway:
                         }
                 except Exception:
                     pass
+        return st
 
     @classmethod
     def _probe_candidates(cls, urls: List[str], kind: str) -> Optional[Dict[str, Any]]:
@@ -240,11 +271,14 @@ class OUMVGateway:
         }).encode("utf-8")
 
         headers = {"Content-Type": "application/json", "User-Agent": "TokenSafe-Gateway/1.0"}
+        # Session tokens live in per-workspace states; a URL identifies its runtime
+        # unambiguously, so scan every root's state for a match.
         token = None
-        if cls._cached_fe and cls._cached_fe.get("url") == endpoint_url:
-            token = cls._cached_fe.get("sessionToken")
-        elif cls._cached_be and cls._cached_be.get("url") == endpoint_url:
-            token = cls._cached_be.get("sessionToken")
+        for st in cls._workspace_states.values():
+            if st.get("fe", {}) and st["fe"].get("url") == endpoint_url:
+                token = st["fe"].get("sessionToken")
+            elif st.get("be", {}) and st["be"].get("url") == endpoint_url:
+                token = st["be"].get("sessionToken")
 
         if token:
             headers["X-OUMV-Session-Token"] = token
@@ -407,11 +441,12 @@ class OUMVGateway:
     @classmethod
     def status(cls, workspace_dir: Optional[str] = None) -> Dict[str, Any]:
         cls.mark_oumv_used(workspace_dir)
-        cls.scan(workspace_dir=workspace_dir)
+        ws = workspace_dir or get_active_workspace() or os.getcwd()
+        cls.scan(workspace_dir=ws)
         # A descriptor whose port is closed must not be reported as a live runtime.
-        dropped = cls._drop_stale_descriptor_endpoints()
-        fe, be = cls._cached_fe, cls._cached_be
-        ws = workspace_dir or get_active_workspace()
+        dropped = cls._drop_stale_descriptor_endpoints(ws)
+        st = cls._state_for(ws)
+        fe, be = st["fe"], st["be"]
 
         # Out-of-the-box stack detection
         stack_info = {}
