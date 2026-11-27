@@ -52,9 +52,10 @@ _SKIP_CALLS = {
     "true", "false", "null", "undefined", "None", "True", "False",
 }
 
-# v6: client-call extraction learned local HTTP wrappers (request(...), generic
-# call shapes); a v5 cache would keep serving the old, incomplete api-call set.
-_CACHE_SCHEMA_VERSION = 6
+# v7: endpoint extraction learned chained router calls (Elysia/Fastify `.post("/x")`),
+# file-level framework prefixes and app.use('/p', router) mounts; older caches hold
+# an empty endpoint set for those stacks.
+_CACHE_SCHEMA_VERSION = 7
 
 _STATIC_ASSET_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
@@ -68,6 +69,14 @@ _BACKEND_ROUTE_PATTERNS = [
     (re.compile(r'@(?:app|router|api|bp)\.(?:get|post|put|delete|patch|route)\(\s*["\']([^"\']+)["\']', re.IGNORECASE), None),
     # JS/TS: app.get("/users", ...), router.post('/login', ...)
     (re.compile(r'(?<!@)\b(?:app|router|server|fastify)\.(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']', re.IGNORECASE), None),
+    # Named routers: usersRouter.get("/users", ...), wheelRoutes.post("/spin", ...).
+    # The suffix carries the intent, so a bare `axios.get("/x")` stays a client call.
+    (re.compile(r'\b[A-Za-z_$][\w$]*(?:Router|Routes|App|Server)\.(?:get|post|put|delete|patch)\(\s*[`"\'](/[^`"\'?#]*)'), None),
+    # Chained builders: Elysia/Fastify `new Elysia().post("/spin", h)` and
+    # `router\n  .get("/status", h)`. The verb must be preceded by whitespace or
+    # ")" (a chain continuation) and the literal must start with "/", so
+    # `axios.get(...)` / `map.get(...)` receivers stay excluded.
+    (re.compile(r'(?<![\w$.])\.(?:get|post|put|delete|patch)\(\s*[`"\'](/[^`"\'?#]*)'), None),
     # Java/Kotlin Spring: @GetMapping("/users"), @PostMapping(value = "/login"), @RequestMapping("/api")
     (re.compile(r'@(?:Get|Post|Put|Delete|Patch|Request)Mapping\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']', re.IGNORECASE), None),
     # Go Gin/Echo/Fiber: r.GET("/users", ...), router.POST('/login', ...)
@@ -98,6 +107,62 @@ _FRONTEND_CALL_PATTERNS = [
 ]
 
 # HTTP method extraction from route-declaration / API-call matched text.
+# File-level route prefixes declared by the framework constructor, so a route
+# literal in that file is not the route clients call: Elysia
+# `new Elysia({ prefix: "/wheel" })`, FastAPI/Flask `APIRouter(prefix=...)`,
+# `Blueprint(..., url_prefix=...)`, Fastify plugin `{ prefix: "/v1" }`.
+_FRAMEWORK_PREFIX_PATTERNS = [
+    re.compile(r'\bnew\s+Elysia\s*\([^)]*?\bprefix\s*:\s*[`"\']([^`"\']+)[`"\']'),
+    re.compile(r'\b(?:APIRouter|FastAPI|Blueprint|Flask)\s*\([^)]*?\b(?:url_)?prefix\s*=\s*["\']([^"\']+)["\']'),
+    re.compile(r'\bregister\s*\(\s*[A-Za-z_$][\w$]*\s*,\s*\{[^}]*?\bprefix\s*:\s*[`"\']([^`"\']+)[`"\']'),
+]
+
+# Router mounts: app.use("/wheel", wheelRoutes) / server.register("/v1", routes).
+_MOUNT_RE = re.compile(
+    r'\b(?:app|server|api|router|fastify|r)\.(?:use|register)\(\s*[`"\'](/[^`"\']*)[`"\']\s*,\s*([A-Za-z_$][\w$]*)'
+)
+
+# Where a mounted router identifier comes from: import/require bindings, so the
+# mount prefix can be applied to the file that actually declares the routes.
+_IMPORT_BINDING_PATTERNS = [
+    # import { a, b as c } from "./mod" / import def from "./mod"
+    re.compile(r'\bimport\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*from\s*[`"\']([^`"\']+)[`"\']'),
+    # const { a, b: c } = require("./mod") / const def = require("./mod")
+    re.compile(r'\b(?:const|let|var)\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*=\s*require\(\s*[`"\']([^`"\']+)[`"\']'),
+]
+
+
+def _import_bindings(content: str) -> Dict[str, str]:
+    """Maps a local identifier to the module specifier it was imported from."""
+    bindings: Dict[str, str] = {}
+    for rx in _IMPORT_BINDING_PATTERNS:
+        for m in rx.finditer(content):
+            names_blob, default_name, module = m.group(1), m.group(2), m.group(3)
+            if default_name:
+                bindings[default_name] = module
+                continue
+            for part in (names_blob or "").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                # `a as b` -> local b; `a: b` -> local b
+                local = re.split(r'\s+as\s+|:\s*', part)[-1].strip()
+                if local:
+                    bindings[local] = module
+    return bindings
+
+
+def _join_route(prefix: str, route: str) -> str:
+    """Compose a mount/constructor prefix with a declared route, without doubling it."""
+    p = (prefix or "").rstrip("/")
+    r = route if route.startswith("/") else "/" + route
+    if not p or p == "/":
+        return r
+    if r == p or r.startswith(p + "/"):
+        return r
+    return p + r
+
+
 _HTTP_METHOD_ANNOTATION_RE = re.compile(r'(?i)@(get|post|put|delete|patch)mapping\b')
 _HTTP_METHOD_BRACKET_RE = re.compile(r'(?i)\[\s*http(get|post|put|delete|patch)\b')
 _HTTP_METHOD_CALL_RE = re.compile(r'(?i)(?:\.|::)\s*(get|post|put|delete|patch|head|options)\s*\(')
@@ -247,6 +312,7 @@ class CodeGraph:
         self.file_imports: Dict[str, Set[str]] = {}        # file_rel_path -> raw imported modules
         self.file_endpoints: Dict[str, List[Tuple[str, Optional[str], Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key, http_method)]
         self.file_api_calls: Dict[str, List[Tuple[str, Optional[str], Optional[str]]]] = {}  # rel_path -> [(norm_route, sym_key, http_method)]
+        self.file_mounts: Dict[str, List[Tuple[str, str, str]]] = {}  # rel_path -> [(url_prefix, router_ident, module_or_".")]
         self.api_links: List[Dict[str, Any]] = []  # cross-stack edges: frontend call -> backend endpoint
         self.last_scanned: float = 0.0
         self.backend: str = self._detect_backend()
@@ -284,6 +350,7 @@ class CodeGraph:
         self.file_imports.clear()
         self.file_endpoints.clear()
         self.file_api_calls.clear()
+        self.file_mounts.clear()
         self.api_links.clear()
 
     def _load_disk_cache(self) -> bool:
@@ -346,6 +413,13 @@ class CodeGraph:
                         for row in cur.execute("SELECT rel_path, route, sym_key, method FROM api_calls").fetchall():
                             method = row[3] if len(row) > 3 else None
                             self.file_api_calls.setdefault(row[0], []).append((row[1], row[2], method))
+                    except sqlite3.OperationalError:
+                        pass
+
+                    self.file_mounts = {}
+                    try:
+                        for row in cur.execute("SELECT rel_path, prefix, ident, module FROM file_mounts").fetchall():
+                            self.file_mounts.setdefault(row[0], []).append((row[1], row[2], row[3] or ""))
                     except sqlite3.OperationalError:
                         pass
 
@@ -424,6 +498,7 @@ class CodeGraph:
                     cur.execute("CREATE TABLE edges (source TEXT, target TEXT, PRIMARY KEY (source, target))")
                     cur.execute("CREATE TABLE api_endpoints (rel_path TEXT, route TEXT, sym_key TEXT, method TEXT)")
                     cur.execute("CREATE TABLE api_calls (rel_path TEXT, route TEXT, sym_key TEXT, method TEXT)")
+                    cur.execute("CREATE TABLE file_mounts (rel_path TEXT, prefix TEXT, ident TEXT, module TEXT)")
                     cur.execute("CREATE TABLE api_links (link_json TEXT)")
 
                     cur.executemany(
@@ -467,6 +542,10 @@ class CodeGraph:
                     cur.executemany(
                         "INSERT INTO api_calls VALUES (?, ?, ?, ?)",
                         [(rel, call[0], call[1], call[2] if len(call) > 2 else None) for rel, calls in self.file_api_calls.items() for call in calls],
+                    )
+                    cur.executemany(
+                        "INSERT INTO file_mounts VALUES (?, ?, ?, ?)",
+                        [(rel, prefix, ident, module) for rel, mounts in self.file_mounts.items() for (prefix, ident, module) in mounts],
                     )
                     cur.executemany(
                         "INSERT INTO api_links VALUES (?)",
@@ -577,6 +656,7 @@ class CodeGraph:
         self.file_imports.pop(rel_path, None)
         self.file_endpoints.pop(rel_path, None)
         self.file_api_calls.pop(rel_path, None)
+        self.file_mounts.pop(rel_path, None)
         for k in sym_keys:
             self.symbols.pop(k, None)
             targets = self.edges.pop(k, set())
@@ -651,6 +731,7 @@ class CodeGraph:
     def _extract_api_routes_and_calls(self, content: str, rel_path: str) -> None:
         self.file_endpoints[rel_path] = []
         self.file_api_calls[rel_path] = []
+        self.file_mounts[rel_path] = []
 
         norm_rel = rel_path.replace("\\", "/")
 
@@ -658,6 +739,30 @@ class CodeGraph:
         m_prefix = _CONTROLLER_PREFIX_RE.search(content)
         if m_prefix:
             class_prefix = m_prefix.group(1) or m_prefix.group(2) or ""
+
+        # Framework-level prefix: routes are declared relative to it.
+        file_prefix = ""
+        for rx in _FRAMEWORK_PREFIX_PATTERNS:
+            m = rx.search(content)
+            if m:
+                file_prefix = (m.group(1) or "").strip()
+                break
+
+        # Mounted sub-routers: the prefix lives where the router is mounted,
+        # the routes where it is declared, so record the pair plus where the
+        # identifier comes from ("." = declared in this same file).
+        mount_matches = list(_MOUNT_RE.finditer(content))
+        if mount_matches:
+            bindings = _import_bindings(content)
+            for m in mount_matches:
+                prefix = (m.group(1) or "").strip()
+                ident = (m.group(2) or "").strip()
+                if not (prefix and ident):
+                    continue
+                module = bindings.get(ident) or ""
+                if not module and re.search(r'\b(?:const|let|var|function|class)\s+' + re.escape(ident) + r'\b', content):
+                    module = "."
+                self.file_mounts[rel_path].append((prefix, ident, module))
 
         # 1. Next.js file-based API routes
         m_app = _NEXT_APP_ROUTE_RE.match(norm_rel)
@@ -685,6 +790,8 @@ class CodeGraph:
                     full_route = class_prefix.rstrip("/") + "/" + route_raw.lstrip("/")
                 else:
                     full_route = route_raw
+                if file_prefix:
+                    full_route = _join_route(file_prefix, full_route)
                 norm_route = _normalize_route_path(full_route)
                 if not norm_route:
                     continue
@@ -704,6 +811,21 @@ class CodeGraph:
                 sym_key = self._find_enclosing_symbol(rel_path, line_no)
                 method = _match_http_method(match.group(0)) or default_method
                 self.file_api_calls[rel_path].append((norm_route, sym_key, method))
+
+    def _resolve_relative_module(self, from_rel: str, spec: str) -> Optional[str]:
+        """Resolves a relative import specifier to an indexed file, if any."""
+        if not spec or not spec.startswith("."):
+            return None
+        base = os.path.normpath(os.path.join(os.path.dirname(from_rel), spec)).replace("\\", "/")
+        candidates = [base]
+        for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".php", ".java"):
+            candidates.append(base + ext)
+        for ext in (".ts", ".tsx", ".js", ".jsx"):
+            candidates.append(base + "/index" + ext)
+        for cand in candidates:
+            if cand in self.file_symbols:
+                return cand
+        return None
 
     @staticmethod
     def _route_matches(path: str, pattern_route: str) -> bool:
@@ -733,11 +855,38 @@ class CodeGraph:
         """
         self.api_links = []
         try:
+            # Mounted routers: `app.use("/wheel", wheelRoutes)` prefixes the routes
+            # declared in the router's own file. Resolve the module binding first
+            # (a router constant is not always a graph symbol), then fall back to
+            # a uniquely-named symbol.
+            name_to_files: Dict[str, Set[str]] = {}
+            for sym in self.symbols.values():
+                name_to_files.setdefault(sym.name, set()).add(sym.file_path)
+            mounted: Dict[str, List[str]] = {}
+            for mount_rel, mounts in self.file_mounts.items():
+                for prefix, ident, module in mounts:
+                    target = None
+                    if module == ".":
+                        target = mount_rel
+                    elif module:
+                        target = self._resolve_relative_module(mount_rel, module)
+                    if not target:
+                        owners = name_to_files.get(ident) or set()
+                        if len(owners) == 1:
+                            target = next(iter(owners))
+                    if target and target != mount_rel:
+                        mounted.setdefault(target, []).append(prefix)
+
             endpoint_map: Dict[str, List[Tuple[str, Optional[str], Optional[str]]]] = {}
             for rel_path, endpoints in self.file_endpoints.items():
                 for norm_route, sym_key, method in endpoints:
-                    if norm_route:
-                        endpoint_map.setdefault(norm_route, []).append((rel_path, sym_key, method))
+                    if not norm_route:
+                        continue
+                    effective = [norm_route] + [
+                        _join_route(prefix, norm_route) for prefix in mounted.get(rel_path, [])
+                    ]
+                    for eff_route in dict.fromkeys(effective):
+                        endpoint_map.setdefault(eff_route, []).append((rel_path, sym_key, method))
 
             if not endpoint_map:
                 return

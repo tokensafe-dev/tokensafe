@@ -150,5 +150,132 @@ export async function spinWheel() {
         self.assertIn("/api/v1/wheel/spin", routes)
 
 
+class TestPrefixComposition(unittest.TestCase):
+    """Routes are not what clients call: prefixes come from the framework
+    constructor (Elysia/FastAPI) or from the mount site (app.use)."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="tokensafe_prefix_test_")
+        self.graph = None
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _scan(self):
+        self.graph = CodeGraph(self.test_dir, use_disk_cache=False)
+        self.graph.scan()
+        return self.graph
+
+    def test_elysia_constructor_prefix_and_chained_routes(self):
+        _write(os.path.join(self.test_dir, "backend", "wheel.ts"), """import { Elysia } from "elysia";
+
+export const wheelRoutes = new Elysia({ prefix: "/wheel" })
+  .get("/status", () => ({ ok: true }))
+  .post("/spin", () => ({ ok: true }));
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "wheel.ts"), """import { request } from './client'
+
+export async function spinWheel() {
+    return request<SpinWheelResponse>('/wheel/spin')
+}
+""")
+        g = self._scan()
+        eps = {(e[0], e[2]) for e in g.file_endpoints.get("backend/wheel.ts", [])}
+        self.assertIn(("/wheel/spin", "POST"), eps)
+        self.assertIn(("/wheel/status", "GET"), eps)
+        links = [
+            lk for lk in g.api_links
+            if lk["source"]["file"] == "frontend/src/wheel.ts" and lk["target"]["route"] == "/wheel/spin"
+        ]
+        self.assertTrue(links, g.api_links)
+
+    def test_fastapi_router_prefix_is_applied(self):
+        _write(os.path.join(self.test_dir, "backend", "orders.py"), """from fastapi import APIRouter
+
+router = APIRouter(prefix="/api/v2")
+
+@router.get("/orders")
+def list_orders():
+    return []
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "orders.ts"),
+               "export const load = () => fetch('/api/v2/orders');\n")
+        g = self._scan()
+        routes = {e[0] for e in g.file_endpoints.get("backend/orders.py", [])}
+        self.assertIn("/api/v2/orders", routes)
+        self.assertTrue(
+            [lk for lk in g.api_links if lk["target"]["route"] == "/api/v2/orders"],
+            g.api_links,
+        )
+
+    def test_mount_site_prefix_composes_across_files(self):
+        _write(os.path.join(self.test_dir, "backend", "users.ts"), """import { Router } from 'express'
+
+export const usersRouter = Router()
+
+usersRouter.get('/users', (req, res) => res.json([]))
+""")
+        _write(os.path.join(self.test_dir, "backend", "app.ts"), """import express from 'express'
+import { usersRouter } from './users'
+
+const app = express()
+app.use('/v1', usersRouter)
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "users.ts"),
+               "export const load = () => fetch('/v1/users');\n")
+        g = self._scan()
+        self.assertIn("/users", {e[0] for e in g.file_endpoints.get("backend/users.ts", [])})
+        self.assertEqual(g.file_mounts.get("backend/app.ts"), [("/v1", "usersRouter", "./users")])
+        links = [
+            lk for lk in g.api_links
+            if lk["source"]["file"] == "frontend/src/users.ts" and lk["target"]["route"] == "/v1/users"
+        ]
+        self.assertTrue(links, [(lk["source"], lk["target"]) for lk in g.api_links])
+
+    def test_prefix_is_not_applied_twice(self):
+        _write(os.path.join(self.test_dir, "backend", "dup.ts"), """import { Elysia } from "elysia";
+
+export const routes = new Elysia({ prefix: "/wheel" })
+  .post("/wheel/spin", () => ({ ok: true }));
+""")
+        g = self._scan()
+        routes = [e[0] for e in g.file_endpoints.get("backend/dup.ts", [])]
+        self.assertEqual(routes, ["/wheel/spin"])
+
+    def test_mounts_and_links_survive_the_disk_cache(self):
+        _write(os.path.join(self.test_dir, "backend", "users.ts"), """import { Router } from 'express'
+
+export const usersRouter = Router()
+
+usersRouter.get('/users', (req, res) => res.json([]))
+""")
+        _write(os.path.join(self.test_dir, "backend", "app.ts"), """import express from 'express'
+import { usersRouter } from './users'
+
+const app = express()
+app.use('/v1', usersRouter)
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "users.ts"),
+               "export const load = () => fetch('/v1/users');\n")
+        data_dir = tempfile.mkdtemp(prefix="tokensafe_graph_cache_")
+        self.addCleanup(shutil.rmtree, data_dir, ignore_errors=True)
+        old_data = os.environ.get("TOKENSAFE_DATA_DIR")
+        os.environ["TOKENSAFE_DATA_DIR"] = data_dir
+        try:
+            first = CodeGraph(self.test_dir, use_disk_cache=True)
+            first.scan()
+            second = CodeGraph(self.test_dir, use_disk_cache=True)
+        finally:
+            if old_data is None:
+                os.environ.pop("TOKENSAFE_DATA_DIR", None)
+            else:
+                os.environ["TOKENSAFE_DATA_DIR"] = old_data
+        self.assertEqual(second.file_mounts.get("backend/app.ts"), [("/v1", "usersRouter", "./users")])
+        self.assertTrue(
+            [lk for lk in second.api_links if lk["target"]["route"] == "/v1/users"],
+            second.api_links,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
