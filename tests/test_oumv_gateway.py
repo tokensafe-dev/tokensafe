@@ -478,6 +478,64 @@ class TestOUMVGateway(unittest.TestCase):
             st_a = OUMVGateway._state_for(ws_a)
             self.assertEqual(st_a["fe"]["url"], "http://localhost:5173/__oumv/rpc")
 
+    def test_ghost_transient_descriptor_is_not_adopted(self):
+        """A global descriptor of a deleted temp workspace is a ghost: never adopted.
+
+        Smoke tests and benchmarks legitimately develop in temp dirs, so the rule is
+        existence, not transience: the descriptor is trusted only while the recorded
+        root is still on disk. Even a listening port does not resurrect the ghost.
+        """
+        port = self._listener_port()
+        tmp_home = tempfile.mkdtemp(prefix="tokensafe_home_")
+        self.addCleanup(shutil.rmtree, tmp_home, ignore_errors=True)
+        ghost_ws = tempfile.mkdtemp(prefix="react-oumv-smoke-")
+        ghost_real = os.path.realpath(ghost_ws)
+        try:
+            with patch.dict(os.environ, {"TOKENSAFE_HOME": tmp_home}):
+                rt = OUMVGateway.global_runtime_file(ghost_ws)
+                os.makedirs(os.path.dirname(rt), exist_ok=True)
+                with open(rt, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "frontend": {
+                            "name": "ghost-ui",
+                            "url": f"http://127.0.0.1:{port}/__oumv/rpc",
+                            "workspaceRoot": ghost_real,
+                        }
+                    }, f)
+                shutil.rmtree(ghost_ws, ignore_errors=True)  # workspace dies, descriptor stays
+
+                st = OUMVGateway._state_for(ghost_ws)
+                OUMVGateway._check_workspace_runtime_files(ghost_ws, st)
+                self.assertIsNone(st["fe"], "ghost descriptor must not be adopted")
+        finally:
+            shutil.rmtree(ghost_ws, ignore_errors=True)
+
+    def test_key_mismatched_global_descriptor_is_not_adopted(self):
+        """An entry that describes another root must not answer for this one."""
+        port = self._listener_port()
+        tmp_home = tempfile.mkdtemp(prefix="tokensafe_home_")
+        self.addCleanup(shutil.rmtree, tmp_home, ignore_errors=True)
+        other_ws = tempfile.mkdtemp(prefix="oumv_other_")
+        self.addCleanup(shutil.rmtree, other_ws, ignore_errors=True)
+        try:
+            with patch.dict(os.environ, {"TOKENSAFE_HOME": tmp_home}):
+                # Descriptor for ws "other" filed under this test dir's registry key
+                rt = OUMVGateway.global_runtime_file(self.test_dir)
+                os.makedirs(os.path.dirname(rt), exist_ok=True)
+                with open(rt, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "frontend": {
+                            "name": "other-ui",
+                            "url": f"http://127.0.0.1:{port}/__oumv/rpc",
+                            "workspaceRoot": os.path.realpath(other_ws),
+                        }
+                    }, f)
+                st = OUMVGateway._state_for(self.test_dir)
+                OUMVGateway._check_workspace_runtime_files(self.test_dir, st)
+                self.assertIsNone(st["fe"], "foreign-root descriptor must not be adopted")
+        finally:
+            pass
+
 
 if __name__ == "__main__":
     unittest.main()

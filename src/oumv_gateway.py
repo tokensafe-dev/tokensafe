@@ -198,14 +198,50 @@ class OUMVGateway:
         tokensafe_home = os.environ.get("TOKENSAFE_HOME") or os.path.expanduser("~/.tokensafe")
         return os.path.join(tokensafe_home, "runtimes", f"{ws_id}.json")
 
+    @staticmethod
+    def _descriptor_path_is_trusted(path: str, workspace_dir: Optional[str] = None) -> bool:
+        """A global descriptor whose workspace died must not be adopted.
+
+        Transient roots (system temp dirs) outlive their dev servers: a leftover
+        descriptor keeps describing a directory that no longer exists. Such an
+        entry is trusted only while the recorded root is still on disk (so live
+        smoke-test/benchmark workspaces in temp dirs keep working); user-project
+        roots are always trusted and rely on the port-liveness check instead.
+        """
+        try:
+            canonical = os.path.realpath(os.path.abspath(path))
+            # Only the global registry entry needs this check: workspace-local files
+            # live inside the root they describe, so they cannot outlive it this way.
+            runtimes_dir = os.path.realpath(os.path.join(
+                os.environ.get("TOKENSAFE_HOME") or os.path.expanduser("~/.tokensafe"), "runtimes"
+            ))
+            if os.path.dirname(canonical) != runtimes_dir:
+                return True
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            recorded = (data.get("frontend") or {}).get("workspaceRoot") or (data.get("backend") or {}).get("workspaceRoot")
+            if not recorded:
+                # Legacy descriptors without a workspaceRoot: judge by the file's
+                # own location — the sha256 key cannot be reverse-mapped.
+                return True
+            recorded_real = os.path.realpath(os.path.abspath(recorded))
+            if workspace_dir and recorded_real != os.path.realpath(os.path.abspath(workspace_dir)):
+                return False  # entry under this key describes another root: stale reuse
+            from src.paths import is_transient_dir
+            if is_transient_dir(recorded_real) and not os.path.isdir(recorded_real):
+                return False
+            return True
+        except Exception:
+            return True
+
     @classmethod
     def _check_workspace_runtime_files(cls, workspace_dir: str, st: Optional[Dict[str, Any]] = None):
         st = st if st is not None else cls._state_for(workspace_dir)
-        lock_paths = [
+        lock_paths = [lp for lp in (
             cls.global_runtime_file(workspace_dir),
             os.path.join(workspace_dir, ".tokensafe", "runtime.json"),
             os.path.join(workspace_dir, ".oumv", "runtime.json"),
-        ]
+        ) if cls._descriptor_path_is_trusted(lp, workspace_dir)]
         for lp in lock_paths:
             if os.path.isfile(lp):
                 try:
@@ -414,7 +450,7 @@ class OUMVGateway:
             os.path.join(ws, ".tokensafe", "runtime.json"),
             os.path.join(ws, ".oumv", "runtime.json"),
         ):
-            if not os.path.isfile(lp):
+            if not os.path.isfile(lp) or not cls._descriptor_path_is_trusted(lp, ws):
                 continue
             try:
                 if (now - os.path.getmtime(lp)) > cls._DESCRIPTOR_MAX_AGE_SEC:
