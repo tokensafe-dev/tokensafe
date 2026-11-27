@@ -537,5 +537,53 @@ class TestOUMVGateway(unittest.TestCase):
             pass
 
 
+class TestOumvWorkspaceResolution(unittest.TestCase):
+    """Root-less oumv calls resolve per server, not per machine.
+
+    The active-workspace marker is rewritten by every concurrent session's
+    hooks; a multi-root host's MCP server must default to its own spawn cwd
+    instead of another session's last-touched repo."""
+
+    def _repo_root(self):
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_default_prefers_cwd_over_machine_marker(self):
+        from src import mcp_server
+        proj = tempfile.mkdtemp(prefix="oumv_proj_")
+        # mkdtemp is transient; promote it to a plausible root by patching the filter
+        self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
+        old = os.getcwd()
+        os.chdir(proj)
+        try:
+            with patch("src.mcp_server.current_root", return_value=None), \
+                 patch("src.mcp_server.get_active_workspace", return_value=self._repo_root()), \
+                 patch("src.paths.is_transient_dir", return_value=False):
+                self.assertEqual(
+                    os.path.realpath(mcp_server._oumv_default_workspace()),
+                    os.path.realpath(proj),
+                )
+        finally:
+            os.chdir(old)
+
+    def test_default_falls_back_to_marker_when_cwd_is_scratch(self):
+        from src import mcp_server
+        old = os.getcwd()
+        os.chdir(tempfile.gettempdir())
+        try:
+            with patch("src.mcp_server.current_root", return_value=None), \
+                 patch("src.mcp_server.get_active_workspace", return_value=self._repo_root()):
+                self.assertEqual(mcp_server._oumv_default_workspace(), self._repo_root())
+        finally:
+            os.chdir(old)
+
+    def test_session_scope_wins(self):
+        from src import mcp_server
+        proj = tempfile.mkdtemp(prefix="oumv_session_root_")
+        self.addCleanup(shutil.rmtree, proj, ignore_errors=True)
+        with patch("src.mcp_server.current_root", return_value=proj), \
+             patch("src.mcp_server.get_active_workspace", return_value=self._repo_root()):
+            self.assertEqual(mcp_server._oumv_default_workspace(), proj)
+
+
 if __name__ == "__main__":
     unittest.main()

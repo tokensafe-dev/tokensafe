@@ -86,6 +86,48 @@ def _workspace_root() -> Optional[str]:
     return current_root() or get_active_workspace()
 
 
+def _plausible_project_root(path: Optional[str]) -> bool:
+    """True when a directory can act as this server's workspace root.
+
+    Rejects missing/non-dirs, system/plugin dirs, and OS scratch space — the
+    same classes of roots the lifecycle hooks refuse for the active marker."""
+    if not path or not os.path.isdir(path):
+        return False
+    if is_plugin_or_system_dir(path):
+        return False
+    try:
+        from src.paths import is_transient_dir
+        if is_transient_dir(path):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _oumv_default_workspace() -> Optional[str]:
+    """Default workspace for an oumv call that carries no explicit root.
+
+    Precedence: session scope (ACP agent, in-process loop) > this server's own
+    spawn cwd > the machine-wide active marker. The marker is rewritten by the
+    hooks of EVERY concurrent session, so in multi-root setups it can name a
+    repo the caller never asked about; the MCP server is started by the host
+    with cwd in the primary workspace, which is per-server and race-free.
+    """
+    scoped = current_root()
+    # Session scope is bound explicitly by our own in-process agent / ACP server
+    # (benchmark and smoke workspaces legitimately live in temp dirs), so only
+    # existence and system-dir checks apply here.
+    if scoped and os.path.isdir(scoped) and not is_plugin_or_system_dir(scoped):
+        return scoped
+    cwd = os.getcwd()
+    if _plausible_project_root(cwd):
+        return cwd
+    marker = get_active_workspace()
+    if marker:
+        return marker
+    return cwd or None
+
+
 def _client_supports_pointers() -> bool:
     """Out-of-the-box capability detection (zero env vars): returns True once the
     MCP client has fetched tools/list (seeing force_full) or identified as an
@@ -1067,18 +1109,20 @@ def _shared_batch_root(paths: List[str], real_cwd: str) -> Optional[str]:
 
 
 def _oumv_workspace_arg(args: dict, allow_path: bool = False) -> Tuple[Optional[str], Optional[str]]:
-    """Validated workspace root for an OUMV call; None means "use the active one".
+    """Validated workspace root for an OUMV call; falls back to a per-server default.
 
     The MCP server inherits the host process cwd, so without this an explicit
     target repo was either dropped (unadvertised property) or ignored, and the
     answer described the bound workspace. A root that does not exist now fails
-    closed instead of reporting another repo's stack.
+    closed instead of reporting another repo's stack. With no explicit root the
+    default is the session scope or this server's own cwd — not the machine-wide
+    marker another concurrent session may have just rewritten.
     """
     raw = str(args.get("workspace_dir") or "").strip()
     if not raw and allow_path:
         raw = str(args.get("path") or "").strip()
     if not raw:
-        return None, None
+        return _oumv_default_workspace(), None
     ws = os.path.abspath(raw)
     if os.path.isfile(ws):
         ws = os.path.dirname(ws)
@@ -3246,7 +3290,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             ws, ws_err = _oumv_workspace_arg(args, allow_path=True)
             if ws_err:
                 return _fallback_error("oumv_status", ws_err)
-            ws = ws or get_active_workspace() or os.getcwd()
+            ws = ws or _oumv_default_workspace() or os.getcwd()
             res = OUMVGateway.status(workspace_dir=ws)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
@@ -3918,15 +3962,23 @@ def run_mcp_server():
             }
             # Routing brief (MCP `instructions`): which stacks this workspace
             # works through OUMV and which through the TokenSafe tools. The
-            # server usually runs from the plugin dir, so prefer the session
-            # workspace marker; extra roots (TOKENSAFE_WORKSPACES) are
+            # default root resolves per server (session scope, then the spawn
+            # cwd, then the active marker), and extra roots — TOKENSAFE_WORKSPACES
+            # plus any multi-root payload the host passed to initialize — are
             # classified one by one so a single-root verdict is never global.
             try:
-                from src.session_brief import build_workspace_brief, workspace_roots_from_env
+                from src.session_brief import (
+                    build_workspace_brief,
+                    workspace_roots_from_env,
+                    workspace_roots_from_payload,
+                )
+                extra_roots = workspace_roots_from_env() + workspace_roots_from_payload(params)
+                seen_roots = set()
+                extra_roots = [r for r in extra_roots if not (r in seen_roots or seen_roots.add(r))]
                 brief = build_workspace_brief(
-                    _workspace_root() or os.getcwd(),
+                    _oumv_default_workspace() or os.getcwd(),
                     include_live=False,
-                    extra_workspaces=workspace_roots_from_env(),
+                    extra_workspaces=extra_roots,
                 )
                 if brief:
                     response["result"]["instructions"] = brief
