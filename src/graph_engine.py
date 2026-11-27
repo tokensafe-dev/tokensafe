@@ -52,7 +52,9 @@ _SKIP_CALLS = {
     "true", "false", "null", "undefined", "None", "True", "False",
 }
 
-_CACHE_SCHEMA_VERSION = 5
+# v6: client-call extraction learned local HTTP wrappers (request(...), generic
+# call shapes); a v5 cache would keep serving the old, incomplete api-call set.
+_CACHE_SCHEMA_VERSION = 6
 
 _STATIC_ASSET_EXTS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
@@ -87,6 +89,12 @@ _FRONTEND_CALL_PATTERNS = [
     (re.compile(r'\buseSWR\(\s*[`"\']([^`"\'?#]+)'), "GET"),
     # axios("/api/users")  (method unknown: depends on config)
     (re.compile(r'\baxios\(\s*[`"\']([^`"\'?#]+)'), None),
+    # Local HTTP wrappers: request('/wheel/spin') and TypeScript generics
+    # (request<SpinWheelResponse>('/wheel/spin', ...)) carrying a literal absolute
+    # route were invisible to cross-stack linking. Requiring a leading "/" keeps
+    # arg-of-something calls such as request('users') out.
+    (re.compile(r'\b(?:request|apiRequest|httpRequest|sendRequest|requestJson|fetchJson)'
+                r'(?:\s*<[^<>()]{1,120}>)?\s*\(\s*[`"\'](/[^`"\'?#]*)'), None),
 ]
 
 # HTTP method extraction from route-declaration / API-call matched text.
@@ -1629,8 +1637,12 @@ class CodeGraph:
 
         matching_symbols = []
         if target:
+            t = target.lower()
             for sk, sym in self.symbols.items():
-                if target.lower() in sym.name.lower():
+                # Match both names and file paths, like get_static_impact: a target
+                # that is a file path ("src/api/wheel.ts") must resolve to that
+                # file's symbols, or every path-shaped target silently matches none.
+                if t in sym.name.lower() or t in sym.file_path.lower():
                     matching_symbols.append({
                         "name": sym.name,
                         "kind": sym.kind,
@@ -1638,7 +1650,7 @@ class CodeGraph:
                         "lines": [sym.line_start, sym.line_end],
                     })
 
-        return {
+        result = {
             "level": "L1",
             "target": target,
             "mode": "STATIC_SURFACE",
@@ -1648,6 +1660,16 @@ class CodeGraph:
             "matchingSymbols": matching_symbols[:20],
             "evidence": evidence,
         }
+        if lvl != "L1":
+            # Asking for L2-L4 offline used to return this L1 payload with
+            # confidence "confirmed" and no marker, so callers could not tell a
+            # served level from a substituted one.
+            result["requestedLevel"] = lvl
+            result["degraded"] = True
+            result["degradedReason"] = (
+                f"static engine serves L1 surface only; {lvl} requires a live OUMV runtime"
+            )
+        return result
 
     def get_static_impact(self, target: str, max_depth: int = 3) -> Dict[str, Any]:
         """

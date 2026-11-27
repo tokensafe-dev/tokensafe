@@ -120,6 +120,35 @@ export async function submitOrder(order: any) {
         files = [d.get("file") for d in res["directDependents"] if d.get("type") == "file"]
         self.assertIn("frontend/src/api.ts", files)
 
+    def test_requested_level_above_l1_is_reported_as_degraded(self):
+        res = self.graph.get_static_oumv_slice(level="L3")
+        self.assertEqual(res["level"], "L1")
+        self.assertEqual(res["requestedLevel"], "L3")
+        self.assertTrue(res["degraded"])
+        self.assertIn("live OUMV runtime", res["degradedReason"])
+
+    def test_served_level_carries_no_degradation_marker(self):
+        res = self.graph.get_static_oumv_slice(level="L1")
+        self.assertNotIn("degraded", res)
+        self.assertNotIn("requestedLevel", res)
+
+    def test_matching_symbols_accept_a_file_path_target(self):
+        res = self.graph.get_static_oumv_slice(level="L1", target="frontend/src/api.ts")
+        files = {sym["file"] for sym in res["matchingSymbols"]}
+        self.assertIn("frontend/src/api.ts", files)
+
+    def test_client_calls_capture_local_http_wrapper_literals(self):
+        _write(os.path.join(self.test_dir, "frontend", "src", "wheel.ts"), """import { request } from './client'
+
+export async function spinWheel() {
+    return request('/api/v1/wheel/spin')
+}
+""")
+        self.graph.scan()
+        res = self.graph.get_static_oumv_slice(level="L1", target="wheel")
+        routes = {call["route"] for call in res["clientCalls"]}
+        self.assertIn("/api/v1/wheel/spin", routes)
+
 
 if __name__ == "__main__":
     unittest.main()

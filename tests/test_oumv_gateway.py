@@ -278,6 +278,33 @@ class TestOUMVGateway(unittest.TestCase):
             )
             self.assertTrue(res["missingEvidence"])
 
+    def test_understand_rejects_prose_query_instead_of_dumping_surface(self):
+        self._make_fullstack_fixture()
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            OUMVGateway._last_scan_time = 9999999999.0
+            OUMVGateway._cached_fe = None
+            OUMVGateway._cached_be = None
+            with patch.object(OUMVGateway, "get_endpoints", return_value=(None, None)):
+                res = OUMVGateway.understand(
+                    query="WheelModal spin button click handler chain", target=None, runtime="auto"
+                )
+        self.assertEqual(res["error"], "UNSUPPORTED_QUERY")
+        self.assertEqual(res["supportedQueries"], ["impact", "causality"])
+        self.assertNotIn("clientCalls", res)
+        self.assertIn("smart_read_file", res["hint"])
+
+    def test_understand_causality_with_explicit_runtime_keeps_static_backbone(self):
+        self._make_fullstack_fixture()
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            OUMVGateway._last_scan_time = 9999999999.0
+            OUMVGateway._cached_fe = None
+            OUMVGateway._cached_be = None
+            with patch.object(OUMVGateway, "get_endpoints", return_value=(None, None)):
+                res = OUMVGateway.understand(query="causality", target="/api/orders", runtime="frontend")
+        self.assertEqual(res["query"], "causality")
+        self.assertIn("staticAnalysis", res)
+        self.assertGreaterEqual(res["crossStack"]["count"], 1)
+
     @patch.object(OUMVGateway, "_rpc_call", side_effect=OUMVRpcError("JSON-RPC error (-32002): SYNTAX_ERROR"))
     def test_mutate_propagates_live_rpc_error_without_offline_bypass(self, _mock_rpc):
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):

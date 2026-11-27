@@ -635,8 +635,10 @@ class OUMVGateway:
                         report["backendError"] = str(e)
             return report
 
-        # Cross-layer causality query
-        if query == "causality" and runtime in ("auto", ""):
+        # Cross-layer causality query. Handled for every runtime value: with an
+        # explicit runtime this used to skip the static backbone entirely, and
+        # offline it fell through to the generic slice below.
+        if query == "causality":
             report = {
                 "query": "causality",
                 "target": target,
@@ -666,12 +668,26 @@ class OUMVGateway:
             return report
 
         try:
+            # A live adapter may accept queries beyond the offline contract.
             url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
             return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target, "componentId": target})
         except RuntimeError:
-            if query == "impact":
-                return graph.get_static_impact(target or "")
-            return graph.get_static_oumv_slice(level="L1", target=target)
+            # Prose in `query` is not a question: the offline contract answers
+            # impact/causality only. Returning a surface dump here looked like an
+            # answer (level "L1", confidence "confirmed") to a query nobody parsed.
+            return {
+                "query": query,
+                "target": target,
+                "error": "UNSUPPORTED_QUERY",
+                "mode": "STATIC_SURFACE",
+                "supportedQueries": ["impact", "causality"],
+                "hint": (
+                    "query is an enum, not text: 'impact' answers who depends on the target, "
+                    "'causality' answers why state X / how frontend calls map to endpoints. "
+                    "For 'what does this handler do', read the symbol with smart_read_file."
+                ),
+                "evidence": {"provenance": "static", "confidence": "confirmed", "sourceAdapter": "tokensafe-graph-engine"},
+            }
 
     @staticmethod
     def _static_cross_stack(graph: Any, target: Optional[str]) -> Dict[str, Any]:
