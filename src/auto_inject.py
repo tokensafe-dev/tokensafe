@@ -661,6 +661,24 @@ _DOTNET_PACKAGE = "TokenSafe.Oumv.AspNetCore"
 _DOTNET_PACKAGE_VERSION = "0.1.0"
 
 
+
+def _dotnet_cli() -> str:
+    """Resolves the dotnet executable: explicit override, then DOTNET_ROOT, then PATH.
+
+    A machine can carry an old SDK on PATH (this one had 7.0) while a current one
+    lives under DOTNET_ROOT; the build pre-flight must use the latter or a net10
+    project fails to compile for the wrong reason.
+    """
+    override = os.environ.get("TOKENSAFE_DOTNET")
+    if override and os.path.isfile(override):
+        return override
+    root = os.environ.get("DOTNET_ROOT")
+    if root:
+        candidate = os.path.join(root, "dotnet.exe" if os.name == "nt" else "dotnet")
+        if os.path.isfile(candidate):
+            return candidate
+    return "dotnet"
+
 def _dotnet_web_project(workspace: str) -> Optional[str]:
     """Finds a web csproj (Microsoft.NET.Sdk.Web or the ASP.NET Core framework reference)."""
     for root, dirs, files in os.walk(workspace):
@@ -710,7 +728,7 @@ def dotnet_patch_state(workspace: str) -> Dict[str, Any]:
 def _dotnet_build(project: str) -> Tuple[bool, str]:
     try:
         result = subprocess.run(
-            ["dotnet", "build", project, "-c", "Release", "--nologo", "-v", "quiet"],
+            [_dotnet_cli(), "build", project, "-c", "Release", "--nologo", "-v", "quiet"],
             capture_output=True,
             text=True,
             timeout=600,
@@ -733,7 +751,7 @@ def _ensure_dotnet_dependency(project: str) -> Optional[str]:
         return None
     try:
         result = subprocess.run(
-            ["dotnet", "add", project, "package", _DOTNET_PACKAGE, "--version", _DOTNET_PACKAGE_VERSION],
+            [_dotnet_cli(), "add", project, "package", _DOTNET_PACKAGE, "--version", _DOTNET_PACKAGE_VERSION],
             capture_output=True,
             text=True,
             timeout=300,
