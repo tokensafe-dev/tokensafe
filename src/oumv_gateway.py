@@ -801,7 +801,7 @@ class OUMVGateway:
 
     # 5. Tool: oumv_verify
     @classmethod
-    def verify(cls, target: str, action: str = "invoke", payload: Optional[dict] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+    def verify(cls, target: str, action: str = "invoke", payload: Optional[dict] = None, runtime: str = "auto", workspace_dir: Optional[str] = None, sandbox: Optional[dict] = None) -> Any:
         cls.mark_oumv_used(workspace_dir)
         if runtime == "backend":
             _, be = cls.get_endpoints(workspace_dir=workspace_dir)
@@ -810,12 +810,17 @@ class OUMVGateway:
                 if notice:
                     return {"status": "unsupported", **notice}
         url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
-        res = cls._rpc_call(url, "oumv/verify", {
+        params = {
             "target": target,
             "componentId": target,
             "action": action,
             "payload": payload or {},
-        })
+        }
+        # spec §4 (wire 1.4.0): the runtime decides whether it can honour the
+        # sandbox; we forward the request instead of guessing.
+        if isinstance(sandbox, dict) and sandbox.get("mode"):
+            params["sandbox"] = sandbox
+        res = cls._rpc_call(url, "oumv/verify", params)
         # Honest verification scope (spec §13): state exactly what was verified.
         if isinstance(res, dict):
             scope = res.setdefault("scope", {})

@@ -147,6 +147,16 @@ class TestOUMVGateway(unittest.TestCase):
         self.assertEqual(res["status"], "PASS")
         self.assertEqual(res["statusCode"], 201)
         self.assertTrue(res["rolledBack"])
+        sent = mock_rpc.call_args[0][2]
+        self.assertNotIn("sandbox", sent)
+
+        OUMVGateway.verify(
+            target="POST /api/products",
+            payload={"title": "Widget"},
+            sandbox={"mode": "rollback"},
+        )
+        sent = mock_rpc.call_args[0][2]
+        self.assertEqual(sent["sandbox"], {"mode": "rollback"})
 
     def test_mutate_out_of_the_box_direct_edit(self):
         with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):

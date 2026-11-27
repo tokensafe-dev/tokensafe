@@ -25,9 +25,10 @@ _FRONTEND_LINES = {
         "before reading files; run `tokensafe dev` if no runtime is live."
     ),
     "vue": (
-        "frontend {provider}/{framework}: no OUMV adapter yet (the Vite plugin serves no "
-        "OUMV endpoints for Vue). Use tokensafe:repo_map, smart_read_file and scoped_search; "
-        "verify UI changes with the app's own tests."
+        "frontend {provider}/{framework}: OUMV live via `tokensafe dev --framework vue` "
+        "(zero repo footprint, L0-L4, OCC edits; certified L3 in a browser). Call "
+        "tokensafe:oumv(action='observe', level='L1') before reading files; run "
+        "`tokensafe dev --framework vue` if no runtime is live."
     ),
 }
 

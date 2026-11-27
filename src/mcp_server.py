@@ -489,6 +489,15 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                                            "'backend', or 'auto')",
                                                             'enum': ['frontend', 'backend', 'auto'],
                                                             'type': 'string'},
+                                             'sandbox': {   'description': 'Transactional sandbox (backend only): '
+                                                                           '{"mode": "rollback"} runs the whole '
+                                                                           'verify in one transaction and rolls it '
+                                                                           'back; the result reports rolledBack, '
+                                                                           'rollbackStatus and dbDiff',
+                                                            'properties': {   'mode': {'enum': ['rollback'],
+                                                                                       'type': 'string'}},
+                                                            'required': ['mode'],
+                                                            'type': 'object'},
                                              'target': {   'description': "Action target (component ID, e.g. 'cart', "
                                                                           "or 'POST /api/v1/orders' or '#submit-btn')",
                                                            'type': 'string'},
@@ -3295,7 +3304,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             ws, ws_err = _oumv_workspace_arg(args)
             if ws_err:
                 return _fallback_error("oumv_verify", ws_err)
-            res = OUMVGateway.verify(target=tgt, action=act, payload=payload, runtime=rt, workspace_dir=ws)
+            sandbox = args.get("sandbox") if isinstance(args.get("sandbox"), dict) else None
+            res = OUMVGateway.verify(target=tgt, action=act, payload=payload, runtime=rt, workspace_dir=ws, sandbox=sandbox)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_verify", f"failed to verify OUMV action: {e}")

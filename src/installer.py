@@ -2818,16 +2818,9 @@ WantedBy=default.target
                 except Exception:
                     pass
 
-        if pip_cmd:
-            try:
-                res = subprocess.run([pip_cmd, "list"], capture_output=True, text=True, timeout=10)
-                if "tokensafe-python" in (res.stdout or ""):
-                    print(f"    {CYAN}→{RESET} Updating backend package ({pip_cmd} install --upgrade tokensafe-python)...")
-                    up_res = subprocess.run([pip_cmd, "install", "--upgrade", "tokensafe-python"], capture_output=True, text=True, timeout=120)
-                    if up_res.returncode == 0:
-                        print(f"    {GREEN}✔{RESET} tokensafe-python upgraded successfully.")
-            except Exception:
-                pass
+        # The Python backend runtime is installed per project from git
+        # (`tokensafe-backend-python @ git+…`), not as a global pip distribution —
+        # there is no `tokensafe-python` package to upgrade here.
 
         # Project-level dependencies update (if inside a TokenSafe project)
         cwd = os.getcwd()
@@ -2846,18 +2839,7 @@ WantedBy=default.target
                 except Exception:
                     pass
 
-        for cand_py in [os.path.join(cwd, "pyproject.toml"), os.path.join(cwd, "backend", "pyproject.toml")]:
-            if os.path.isfile(cand_py):
-                try:
-                    with open(cand_py, "r", encoding="utf-8") as f:
-                        txt = f.read()
-                    if "tokensafe-python" in txt and pip_cmd:
-                        pdir = os.path.dirname(cand_py)
-                        print(f"    {CYAN}→{RESET} Updating local tokensafe-python in {pdir}...")
-                        subprocess.run([pip_cmd, "install", "--upgrade", "tokensafe-python"], cwd=pdir, capture_output=True, text=True, timeout=60)
-                        print(f"    {GREEN}✔{RESET} Local tokensafe-python updated.")
-                except Exception:
-                    pass
+        # Per-project Python backend installs come from git; nothing global to update.
 
         # 4. Re-synchronize active/configured agents using the FRESHLY upgraded binary when available
         # (so plugins, hooks, skills, and rules come from the new release instead of the old process).

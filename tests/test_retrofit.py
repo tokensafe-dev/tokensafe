@@ -48,7 +48,7 @@ class TestRetrofitEngine(unittest.TestCase):
         self.assertIsNone(stack["backend"])
 
     def test_backend_precedence_prefers_supported_stack(self):
-        """A supported Go/Python backend must outrank an unsupported Node one."""
+        """A supported Go/Python backend must outrank another supported one."""
         os.makedirs(os.path.join(self.test_dir, "api"))
         os.makedirs(os.path.join(self.test_dir, "python"))
         with open(os.path.join(self.test_dir, "api", "package.json"), "w", encoding="utf-8") as f:
@@ -56,7 +56,8 @@ class TestRetrofitEngine(unittest.TestCase):
 
         stack = detect_project_stack(self.test_dir)
         self.assertEqual(stack["backend"]["provider"], "node")
-        self.assertFalse(stack["backend"]["oumv_supported"])
+        # Express ships a certified adapter now, so the node root is supported too.
+        self.assertTrue(stack["backend"]["oumv_supported"])
 
         with open(os.path.join(self.test_dir, "python", "pyproject.toml"), "w", encoding="utf-8") as f:
             f.write("[project]\ndependencies = ['fastapi']\n")

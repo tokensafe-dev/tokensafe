@@ -34,6 +34,54 @@ class TestAutoInject(unittest.TestCase):
         self.env = patch.dict(os.environ, {"TOKENSAFE_HOME": self.home})
         self.env.start()
 
+    def test_node_patch_is_byte_reversible(self):
+        with open(os.path.join(self.tmp, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "api", "main": "server.js", "dependencies": {"express": "^4.19.0"}}, f)
+        server_path = os.path.join(self.tmp, "server.js")
+        original = "const express = require('express');\nconst app = express();\napp.listen(3000);\n"
+        with open(server_path, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        plan = auto_inject.plan(self.tmp)
+        node_action = next(action for action in plan["actions"] if action["kind"] == "node_one_line_patch")
+        self.assertEqual(node_action["framework"], "express")
+        self.assertFalse(node_action["already_patched"])
+
+        patched = auto_inject.apply_node_patch(self.tmp)
+        self.assertEqual(patched["status"], "patched")
+        after = open(server_path, encoding="utf-8").read()
+        self.assertIn("// tokensafe:oumv:begin", after)
+        self.assertIn("mountTokensafe(app)", after)
+
+        again = auto_inject.apply_node_patch(self.tmp)
+        self.assertEqual(again["status"], "already_patched")
+
+        reverted = auto_inject.revert_node_patch(self.tmp)
+        self.assertEqual(reverted["status"], "reverted")
+        self.assertEqual(open(server_path, encoding="utf-8").read(), original)
+
+    def test_spring_and_php_are_detected_and_get_a_sidecar_action(self):
+        os.makedirs(os.path.join(self.tmp, "svc"))
+        with open(os.path.join(self.tmp, "svc", "pom.xml"), "w", encoding="utf-8") as f:
+            f.write("<project><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId>"
+                    "</dependency></dependencies></project>")
+        plan = auto_inject.plan(os.path.join(self.tmp, "svc"))
+        sidecar = next(action for action in plan["actions"] if action["kind"] == "sidecar")
+        self.assertEqual(sidecar["framework"], "spring")
+        self.assertFalse(sidecar["writes_repo"])
+        # A sibling tokensafe-backend checkout is cached; otherwise the note names
+        # OUMV_BACKEND_REPO instead of pretending the sidecar exists.
+        self.assertTrue(sidecar.get("run") or "OUMV_BACKEND_REPO" in sidecar.get("install", ""))
+
+        php_dir = os.path.join(self.tmp, "phpapp")
+        os.makedirs(php_dir)
+        with open(os.path.join(php_dir, "composer.json"), "w", encoding="utf-8") as f:
+            json.dump({"require": {"laravel/framework": "^11.0"}}, f)
+        plan = auto_inject.plan(php_dir)
+        sidecar = next(action for action in plan["actions"] if action["kind"] == "sidecar")
+        self.assertEqual(sidecar["framework"], "laravel")
+        self.assertFalse(sidecar["writes_repo"])
+
     def tearDown(self):
         self.env.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -86,13 +134,14 @@ class TestAutoInject(unittest.TestCase):
 
     def test_go_patch_is_reversible_byte_for_byte(self):
         with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:
-            f.write("module example.com/app\n\ngo 1.21\n")
+            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.6.0\n')
         main_path = os.path.join(self.tmp, "main.go")
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(GIN_MAIN)
         original = open(main_path, "rb").read()
 
-        with patch.object(auto_inject, "_go_build", return_value=(True, "")):
+        with patch.object(auto_inject, "_go_tidy", return_value=(True, "")), \
+             patch.object(auto_inject, "_go_build", return_value=(True, "")):
             patched = auto_inject.apply_go_patch(self.tmp)
 
         self.assertEqual(patched["status"], "patched")
@@ -110,12 +159,13 @@ class TestAutoInject(unittest.TestCase):
 
     def test_go_patch_falls_back_to_mount_when_serve_call_is_not_simple(self):
         with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:
-            f.write("module example.com/app\n\ngo 1.21\n")
+            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.6.0\n')
         main_path = os.path.join(self.tmp, "main.go")
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(GIN_MAIN.replace('r.Run(":8080")', "r.Run(port())"))
 
-        with patch.object(auto_inject, "_go_build", return_value=(True, "")):
+        with patch.object(auto_inject, "_go_tidy", return_value=(True, "")), \
+             patch.object(auto_inject, "_go_build", return_value=(True, "")):
             patched = auto_inject.apply_go_patch(self.tmp)
 
         self.assertEqual(patched["status"], "patched")
@@ -147,7 +197,7 @@ func main() {
 
     def test_go_patch_rolls_back_when_build_fails(self):
         with open(os.path.join(self.tmp, "go.mod"), "w", encoding="utf-8") as f:
-            f.write("module example.com/app\n\ngo 1.21\n")
+            f.write('module example.com/app\n\ngo 1.21\n\nrequire github.com/tokensafe-dev/tokensafe-backend/go v0.6.0\n')
         main_path = os.path.join(self.tmp, "main.go")
         with open(main_path, "w", encoding="utf-8") as f:
             f.write(GIN_MAIN)
@@ -159,13 +209,17 @@ func main() {
         self.assertEqual(result["status"], "reverted")
         self.assertEqual(open(main_path, "rb").read(), original)
 
-    def test_unknown_backend_is_reported_as_unsupported(self):
+    def test_express_backend_is_wired_with_a_one_line_patch(self):
         with open(os.path.join(self.tmp, "package.json"), "w", encoding="utf-8") as f:
-            json.dump({"name": "api", "dependencies": {"express": "^4.19.0"}}, f)
+            json.dump({"name": "api", "main": "app.js", "dependencies": {"express": "^4.19.0"}}, f)
+        with open(os.path.join(self.tmp, "app.js"), "w", encoding="utf-8") as f:
+            f.write("const express = require('express');\nconst app = express();\n")
 
         data = auto_inject.plan(self.tmp)
-        kinds = [a["kind"] for a in data["actions"]]
-        self.assertIn("unsupported", kinds)
+        action = next(item for item in data["actions"] if item["profile"] == "backend")
+        self.assertEqual(action["kind"], "node_one_line_patch")
+        self.assertTrue(action["writes_repo"])
+        self.assertIn("mountTokensafe", action["description"])
 
 
 if __name__ == "__main__":

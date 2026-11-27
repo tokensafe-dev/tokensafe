@@ -903,7 +903,7 @@ def main(argv: Optional[List[str]] = None):
         cmd, source = resolve_zero_footprint_vite_command(
             target_dir, port=port_val, host=host_val, open_browser=open_browser
         )
-        print(f"⚡ Launching Zero-Footprint Vite+React OUMV server ({source})...")
+        print(f"⚡ Launching Zero-Footprint Vite OUMV server ({source})...")
         proc = subprocess.run(cmd, cwd=target_dir)
         sys.exit(proc.returncode)
 

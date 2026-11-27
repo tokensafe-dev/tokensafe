@@ -49,12 +49,12 @@ class TestOumvRoutingBrief(unittest.TestCase):
         self.assertIn("backend go", brief)
         self.assertIn("tokensafe inject", brief)
 
-    def test_unsupported_stack_points_at_tokensafe_tools(self):
-        # Vue has no Vite-integrated OUMV adapter yet: the brief must say so.
+    def test_vue_brief_points_at_the_zero_footprint_dev_server(self):
+        # Vue ships a certified adapter: the brief must route agents to it, not to grep.
         self._write("package.json", json.dumps({"dependencies": {"vue": "^3.5.0", "vite": "^6.0.0"}}))
         brief = build_workspace_brief(self.tmp)
-        self.assertIn("no OUMV adapter yet", brief)
-        self.assertIn("scoped_search", brief)
+        self.assertIn("tokensafe dev --framework vue", brief)
+        self.assertIn("tokensafe:oumv", brief)
 
     def test_node_brief_explains_how_to_mount(self):
         self._write("package.json", json.dumps({"dependencies": {"express": "^4.19.0"}}))
@@ -100,15 +100,15 @@ class TestOumvRoutingBrief(unittest.TestCase):
         return other
 
     def test_each_extra_root_is_routed_with_its_own_workspace_dir(self):
-        # The primary root is unsupported-ish (vue); the second root is Go and
-        # must be routed on its own instead of inheriting the primary verdict.
+        # The primary root is Vue; the second root is Go and must be routed on its
+        # own instead of inheriting the primary verdict.
         self._write("package.json", json.dumps({"dependencies": {"vue": "^3.5.0", "vite": "^6.0.0"}}))
         other = self._go_repo()
         brief = build_workspace_brief(self.tmp, extra_workspaces=[other])
-        self.assertIn("no OUMV adapter yet", brief)          # primary verdict stays
-        self.assertIn(other, brief)                          # extra root is named
-        self.assertIn("backend go", brief)                   # with its own stack
-        self.assertIn(f"workspace_dir='{other}'", brief)     # exact call to make
+        self.assertIn("tokensafe dev --framework vue", brief)  # primary verdict stays
+        self.assertIn(other, brief)                            # extra root is named
+        self.assertIn("backend go", brief)                     # with its own stack
+        self.assertIn(f"workspace_dir='{other}'", brief)       # exact call to make
 
     def test_scope_sentence_is_always_present(self):
         self._write("package.json", json.dumps({"dependencies": {"vue": "^3.5.0", "vite": "^6.0.0"}}))

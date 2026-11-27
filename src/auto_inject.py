@@ -233,7 +233,17 @@ def go_patch_state(workspace: str) -> Dict[str, Any]:
 
 
 _GO_MODULE = "github.com/tokensafe-dev/tokensafe-backend/go"
-_GO_MODULE_VERSION = "v0.4.3"
+# Keep in step with the backend release tag (go/vX.Y.Z): injection must never
+# downgrade an adapter that is already newer than this pin.
+_GO_MODULE_VERSION = "v0.6.0"
+
+
+def _version_tuple(tag: str):
+    """`v1.2.3` -> (1, 2, 3); raises ValueError when the tag is not semver."""
+    parts = tag.lstrip("v").split(".")
+    if len(parts) < 2:
+        raise ValueError(tag)
+    return tuple(int(part) for part in parts[:3] + ["0"] * (3 - len(parts[:3])))
 
 
 def _ensure_go_dependency(workspace: str) -> Optional[str]:
@@ -247,10 +257,10 @@ def _ensure_go_dependency(workspace: str) -> Optional[str]:
     except OSError as exc:
         return f"cannot read go.mod: {exc}"
 
-    # Skip only when the pinned version is already required; an older requirement
-    # would build against an adapter that lacks AutoMount.
+    # Never downgrade: a project already on a newer go/v* tag keeps it, and an
+    # older requirement is raised to the pin.
     match = re.search(re.escape(_GO_MODULE) + r"\s+v([0-9][\w.+-]*)", content)
-    if match and f"v{match.group(1)}" == _GO_MODULE_VERSION:
+    if match and _version_tuple(f"v{match.group(1)}") >= _version_tuple(_GO_MODULE_VERSION):
         return None
 
     go_bin = shutil.which("go")
@@ -502,6 +512,181 @@ def revert_go_patch(workspace: str) -> Dict[str, Any]:
 # Plan / apply / revert for the CLI and the first-prompt hook
 # --------------------------------------------------------------------------- #
 
+def _find_node_entrypoint(workspace: str) -> Optional[str]:
+    """Finds the Node entry file that creates the framework app."""
+    candidates: List[str] = []
+    pkg_path = os.path.join(workspace, "package.json")
+    try:
+        with open(pkg_path, "r", encoding="utf-8") as f:
+            pkg = json.load(f)
+        main = pkg.get("main")
+        if isinstance(main, str) and main:
+            candidates.append(main)
+    except Exception:
+        pass
+    candidates += ["src/index.js", "src/server.js", "src/app.js", "index.js", "server.js", "app.js"]
+    for rel in candidates:
+        path = os.path.join(workspace, rel)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _node_framework_of(workspace: str) -> Optional[str]:
+    try:
+        with open(os.path.join(workspace, "package.json"), "r", encoding="utf-8") as f:
+            pkg = json.load(f)
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+    except Exception:
+        return None
+    if "fastify" in deps:
+        return "fastify"
+    if "express" in deps:
+        return "express"
+    return None
+
+
+def node_patch_state(workspace: str) -> Dict[str, Any]:
+    """Reports whether the one-line OUMV mount is already in the Node entrypoint."""
+    path = _find_node_entrypoint(workspace)
+    if not path:
+        return {"entrypoint": None, "patched": False, "framework": _node_framework_of(workspace)}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            source = f.read()
+    except OSError:
+        return {"entrypoint": path, "patched": False, "framework": _node_framework_of(workspace)}
+    return {
+        "entrypoint": os.path.relpath(path, workspace),
+        "patched": _MARK_BEGIN in source and _MARK_END in source,
+        "framework": _node_framework_of(workspace),
+    }
+
+
+def apply_node_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
+    """Inserts one mount line between tokensafe markers, with a byte-exact backup."""
+    framework = _node_framework_of(workspace)
+    path = _find_node_entrypoint(workspace)
+    if framework not in ("express", "fastify"):
+        return {"status": "skipped", "reason": "no supported Node framework (express/fastify) found"}
+    if not path:
+        return {"status": "skipped", "reason": "no Node entrypoint found"}
+
+    with open(path, "r", encoding="utf-8") as f:
+        source = f.read()
+    if _MARK_BEGIN in source:
+        return {"status": "already_patched", "entrypoint": os.path.relpath(path, workspace)}
+
+    if framework == "express":
+        pattern = re.compile(r"(?m)^(?P<indent>[ \t]*)(?:const|let|var)\s+\w+\s*=\s*express\(\)[ \t]*;?[ \t]*$")
+        mount = (
+            f"{_MARK_BEGIN}\n"
+            "require('tokensafe-backend-node').mountTokensafe(app);\n"
+            f"{_MARK_END}\n"
+        )
+    else:
+        pattern = re.compile(r"(?m)^(?P<indent>[ \t]*)(?:const|let|var)\s+(?P<var>\w+)\s*=\s*(?:Fastify|fastify)\([^)]*\)[ \t]*;?[ \t]*$")
+        mount = (
+            f"{_MARK_BEGIN}\n"
+            "void require('tokensafe-backend-node').registerTokensafe(app);\n"
+            f"{_MARK_END}\n"
+        )
+
+    found = pattern.search(source)
+    if not found:
+        return {
+            "status": "skipped",
+            "reason": f"could not find `{framework}(...)` assignment in {os.path.relpath(path, workspace)}",
+        }
+
+    line_end = source.find("\n", found.end())
+    insert_at = len(source) if line_end < 0 else line_end + 1
+    patched = source[:insert_at] + mount + source[insert_at:]
+
+    if dry_run:
+        return {"status": "dry_run", "entrypoint": os.path.relpath(path, workspace), "preview": mount.strip()}
+
+    backup_dir = _inject_dir(workspace)
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, os.path.relpath(path, workspace).replace(os.sep, "__") + ".bak")
+    shutil.copy2(path, backup_path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(patched)
+    with open(os.path.join(backup_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({"entrypoint": path, "backup": backup_path, "framework": framework, "mode": "node_mount"}, f, indent=2)
+    return {
+        "status": "patched",
+        "entrypoint": os.path.relpath(path, workspace),
+        "framework": framework,
+        "mode": "node_mount",
+        "backup": backup_path,
+        "line": mount.splitlines()[1],
+    }
+
+
+def revert_node_patch(workspace: str) -> Dict[str, Any]:
+    manifest_path = os.path.join(_inject_dir(workspace), "manifest.json")
+    if not os.path.isfile(manifest_path):
+        return {"status": "clean", "reason": "no Node patch manifest"}
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception as exc:
+        return {"status": "error", "reason": f"cannot read manifest: {exc}"}
+    if manifest.get("mode") != "node_mount":
+        return {"status": "clean", "reason": "manifest is not a Node patch"}
+    entrypoint = manifest.get("entrypoint")
+    backup = manifest.get("backup")
+    if not (entrypoint and backup and os.path.isfile(backup)):
+        return {"status": "error", "reason": "backup missing; restore manually"}
+    shutil.copy2(backup, entrypoint)
+    os.unlink(manifest_path)
+    return {"status": "reverted", "entrypoint": os.path.relpath(entrypoint, workspace)}
+
+
+def _sidecar_cache_dir() -> str:
+    return os.path.join(_tokensafe_home(), "sidecars")
+
+
+def ensure_sidecar(kind: str) -> Tuple[Optional[str], str]:
+    """Copies OumvSpring.java / oumv-php into ~/.tokensafe/sidecars.
+
+    Prefers a local backend checkout (OUMV_BACKEND_REPO or a sibling directory);
+    returns (path, note) where path is None when the source is not available.
+    """
+    source_map = {
+        "spring": ("java/src/dev/tokensafe/oumv/OumvSpring.java", "OumvSpring.java"),
+        "php": ("php/bin/oumv-php", "oumv-php"),
+    }
+    if kind not in source_map:
+        return None, f"unknown sidecar {kind!r}"
+    rel_source, filename = source_map[kind]
+
+    repo_candidates = []
+    env_repo = os.environ.get("OUMV_BACKEND_REPO")
+    if env_repo:
+        repo_candidates.append(env_repo)
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_candidates += [
+        os.path.join(os.path.dirname(here), "tokensafe-backend"),
+        os.path.join(here, "..", "tokensafe-backend"),
+    ]
+    for repo in repo_candidates:
+        candidate = os.path.join(os.path.abspath(repo), rel_source)
+        if os.path.isfile(candidate):
+            cache_dir = _sidecar_cache_dir()
+            os.makedirs(cache_dir, exist_ok=True)
+            target = os.path.join(cache_dir, filename)
+            shutil.copy2(candidate, target)
+            if kind == "php":
+                os.chmod(target, 0o755)
+            return target, f"cached from {candidate}"
+    return None, (
+        "sidecar source not found: set OUMV_BACKEND_REPO to a tokensafe-backend "
+        "checkout or clone it next to this one"
+    )
+
+
 def plan(workspace: str) -> Dict[str, Any]:
     """Describes what apply would do, without touching anything."""
     stack = detect_project_stack(workspace)
@@ -523,8 +708,15 @@ def plan(workspace: str) -> Dict[str, Any]:
     backend = stack.get("backend")
     if backend:
         provider = backend.get("provider")
-        entry_id = "backend/fastapi" if provider == "fastapi" else "backend/go"
+        entry_id = {
+            "fastapi": "backend/fastapi",
+            "go": "backend/go",
+            "node": "backend/node",
+            "spring": "backend/spring",
+            "php": "backend/php",
+        }.get(provider, "backend/go")
         entry = catalog.get(entry_id, {})
+        install = entry.get("technology", {}).get("package", {}).get("install")
         if provider == "fastapi":
             actions.append({
                 "kind": "python_autoload",
@@ -532,7 +724,7 @@ def plan(workspace: str) -> Dict[str, Any]:
                 "framework": "fastapi",
                 "writes_repo": False,
                 "description": "sitecustomize patches uvicorn; mount_tokensafe(app) runs on import",
-                "install": entry.get("technology", {}).get("package", {}).get("install", 'pip install "tokensafe-backend-python @ git+https://github.com/tokensafe-dev/tokensafe-backend.git#subdirectory=python"'),
+                "install": install or 'pip install "tokensafe-backend-python @ git+https://github.com/tokensafe-dev/tokensafe-backend.git#subdirectory=python"',
                 "run": python_run_hint(workspace),
             })
         elif provider == "go":
@@ -545,7 +737,36 @@ def plan(workspace: str) -> Dict[str, Any]:
                 "already_patched": state["patched"],
                 "entrypoint": state["entrypoint"],
                 "description": "one AutoMount() line between tokensafe markers; byte-exact backup + --revert",
-                "install": entry.get("technology", {}).get("package", {}).get("install"),
+                "install": install,
+            })
+        elif provider == "node":
+            state = node_patch_state(workspace)
+            actions.append({
+                "kind": "node_one_line_patch",
+                "profile": "backend",
+                "framework": state.get("framework") or backend.get("framework"),
+                "writes_repo": True,
+                "already_patched": state["patched"],
+                "entrypoint": state["entrypoint"],
+                "description": "one mountTokensafe(app)/registerTokensafe(app) line between tokensafe markers; byte-exact backup + --revert",
+                "install": install or "npm install tokensafe-backend-node",
+            })
+        elif provider in ("spring", "php"):
+            sidecar_path, note = ensure_sidecar(provider)
+            command = (
+                f"tokensafe run-backend java {sidecar_path}"
+                if provider == "spring" and sidecar_path
+                else (f"tokensafe run-backend {sidecar_path}" if sidecar_path else None)
+            )
+            actions.append({
+                "kind": "sidecar",
+                "profile": "backend",
+                "framework": backend.get("framework", provider),
+                "writes_repo": False,
+                "sidecar": sidecar_path,
+                "install": note,
+                "run": command,
+                "description": "static route scan + OCC edits + verify through the single-file sidecar; nothing is written into the project",
             })
         else:
             actions.append({
@@ -595,9 +816,28 @@ def apply(workspace: str, dry_run: bool = False, include_go: bool = True) -> Dic
 
     if backend.get("provider") == "go" and include_go:
         results["actions"].append({"kind": "go_one_line_patch", **apply_go_patch(workspace, dry_run=dry_run)})
+    elif backend.get("provider") == "node":
+        results["actions"].append({"kind": "node_one_line_patch", **apply_node_patch(workspace, dry_run=dry_run)})
+    elif backend.get("provider") in ("spring", "php"):
+        sidecar_path, note = ensure_sidecar(backend["provider"])
+        results["actions"].append({
+            "kind": "sidecar",
+            "status": "ready" if sidecar_path else "needs-source",
+            "sidecar": sidecar_path,
+            "note": note,
+            "run": (
+                f"tokensafe run-backend java {sidecar_path}"
+                if backend["provider"] == "spring" and sidecar_path
+                else (f"tokensafe run-backend {sidecar_path}" if sidecar_path else None)
+            ),
+        })
 
     return results
 
 
 def revert(workspace: str) -> Dict[str, Any]:
-    return {"workspace": workspace, "go": revert_go_patch(workspace)}
+    return {
+        "workspace": workspace,
+        "go": revert_go_patch(workspace),
+        "node": revert_node_patch(workspace),
+    }

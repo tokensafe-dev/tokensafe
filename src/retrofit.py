@@ -47,16 +47,18 @@ def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[
             "root": rel_dir,
         }
 
+        has_vite = "vite" in deps
         if "next" in deps:
-            fe_info.update({"framework": "nextjs", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("next"), "oumv_supported": True, "status": "ready"})
+            # Next has no Vite dev server; the zero-footprint plugin cannot mount there.
+            fe_info.update({"framework": "nextjs", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("next"), "oumv_supported": False, "status": "needs-vite"})
         elif "react" in deps:
-            fe_info.update({"framework": "react", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("react"), "oumv_supported": True, "status": "ready"})
+            fe_info.update({"framework": "react", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("react"), "oumv_supported": has_vite, "status": "ready" if has_vite else "needs-vite"})
         elif "vue" in deps:
-            fe_info.update({"framework": "vue", "provider": "vue", "adapter": "tokensafe-ui/oumv/vue", "version": deps.get("vue"), "oumv_supported": True, "status": "ready"})
+            fe_info.update({"framework": "vue", "provider": "vue", "adapter": "tokensafe-ui/oumv/vue", "version": deps.get("vue"), "oumv_supported": has_vite, "status": "ready" if has_vite else "needs-vite"})
         elif "solid-js" in deps or "@tokensafe-ui/core" in deps:
-            fe_info.update({"framework": "solid", "provider": "solid", "adapter": "tokensafe-ui/core", "version": deps.get("solid-js") or deps.get("@tokensafe-ui/core"), "oumv_supported": True, "status": "ready"})
+            fe_info.update({"framework": "solid", "provider": "solid", "adapter": "tokensafe-ui/core", "version": deps.get("solid-js") or deps.get("@tokensafe-ui/core"), "oumv_supported": False, "status": "planned"})
         elif "svelte" in deps:
-            fe_info.update({"framework": "svelte", "provider": "svelte", "adapter": "tokensafe-ui/core", "version": deps.get("svelte"), "oumv_supported": True, "status": "ready"})
+            fe_info.update({"framework": "svelte", "provider": "svelte", "adapter": "tokensafe-ui/core", "version": deps.get("svelte"), "oumv_supported": False, "status": "planned"})
 
         if "framework" in fe_info:
             fe_out = fe_info
@@ -81,8 +83,10 @@ def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[
                 "adapter": "tokensafe-backend/node",
                 "language": "node",
                 "root": rel_dir,
-                "oumv_supported": False,
-                "status": "planned",
+                # Express/Fastify ship a certified adapter (npm tokensafe-backend-node);
+                # Nest/Hono/Koa do not yet.
+                "oumv_supported": node_fw in ("express", "fastify"),
+                "status": "ready" if node_fw in ("express", "fastify") else "planned",
             }
 
         if isinstance(pkg_data.get("workspaces"), (list, dict)):
@@ -244,7 +248,7 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
                         framework = "flask"
                     elif "starlette" in c:
                         framework = "starlette"
-                    supported = framework in ("fastapi", "starlette")
+                    supported = framework in ("fastapi",)
                     py_entry = {
                         "framework": framework,
                         "provider": "fastapi" if framework == "fastapi" else "python",
@@ -270,6 +274,77 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
                 except Exception:
                     pass
                 break
+
+        # Spring (JDK-only sidecar) and PHP (Laravel/Symfony sidecar) detection.
+        # Both are source-level adapters: nothing is written into the project.
+        for java_manifest in ("pom.xml", "build.gradle", "build.gradle.kts"):
+            java_path = os.path.join(target_dir, java_manifest)
+            if not os.path.isfile(java_path):
+                continue
+            try:
+                with open(java_path, "r", encoding="utf-8", errors="replace") as f:
+                    java_content = f.read().lower()
+            except Exception:
+                continue
+            if "spring-boot" in java_content or "org.springframework" in java_content:
+                _add_detected(os.path.relpath(java_path, workspace_dir))
+                sidecar = {
+                    "framework": "spring",
+                    "provider": "spring",
+                    "adapter": "tokensafe-backend/java",
+                    "language": "java",
+                    "root": os.path.dirname(os.path.relpath(java_path, workspace_dir)) or ".",
+                    "oumv_supported": True,
+                    "status": "ready",
+                }
+                if not stack["backend"] or not stack["backend"].get("oumv_supported", False):
+                    stack["backend"] = sidecar
+                _add_package({
+                    "role": "backend",
+                    "path": sidecar["root"],
+                    "framework": "spring",
+                    "provider": "spring",
+                    "adapter": "tokensafe-backend/java",
+                    "oumvSupported": True,
+                    "status": "ready",
+                })
+                break
+
+        composer_path = os.path.join(target_dir, "composer.json")
+        if os.path.isfile(composer_path):
+            try:
+                with open(composer_path, "r", encoding="utf-8") as f:
+                    composer = json.load(f)
+                requires = {**(composer.get("require") or {}), **(composer.get("require-dev") or {})}
+            except Exception:
+                requires = {}
+            php_framework = (
+                "laravel"
+                if any(str(name).startswith("laravel/") for name in requires)
+                else ("symfony" if any(str(name).startswith("symfony/") for name in requires) else None)
+            )
+            if php_framework:
+                _add_detected("composer.json")
+                sidecar = {
+                    "framework": php_framework,
+                    "provider": "php",
+                    "adapter": "tokensafe-backend/php",
+                    "language": "php",
+                    "root": ".",
+                    "oumv_supported": True,
+                    "status": "ready",
+                }
+                if not stack["backend"] or not stack["backend"].get("oumv_supported", False):
+                    stack["backend"] = sidecar
+                _add_package({
+                    "role": "backend",
+                    "path": ".",
+                    "framework": php_framework,
+                    "provider": "php",
+                    "adapter": "tokensafe-backend/php",
+                    "oumvSupported": True,
+                    "status": "ready",
+                })
 
     _scan_dir(workspace_dir)
     if os.path.isfile(os.path.join(workspace_dir, "pnpm-workspace.yaml")):
@@ -424,12 +499,12 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "profiles": ["frontend"],
             "repo": "tokensafe-ui",
             "mode": "hybrid",
-            "status": "planned",
-            "description": "Programmatic adapter exists (manual component registration); no Vite integration or OUMV certification yet — use static analysis for Vue today",
+            "status": "ready",
+            "description": "Vue 3 runtime adapter: tokensafe-ui() mounts /__oumv/rpc in the Vite dev server without touching the repo, reads the app instance through the bridge and is certified Level 3 in a real browser (agent-dom/certification/vue-vite-browser.json)",
             "technology": {
                 "language": "typescript",
                 "framework": "vue",
-                "package": {"manager": "npm", "name": "tokensafe-ui", "install": "npm install tokensafe-ui"},
+                "package": {"manager": "npm", "name": "tokensafe-ui", "install": "npm install -D tokensafe-ui"},
             },
             "capabilities": [
                 {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
@@ -445,7 +520,7 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "repo": "tokensafe-backend/go",
             "mode": "hybrid",
             "status": "ready",
-            "description": "Go AST pre-flight compiler guard + transactional DB sandbox with rollback",
+            "description": "Go AST pre-flight compiler guard + optional database/sql sandbox: verify.sandboxRollback runs the request in one transaction and rolls it back (opt-in via SetDBSandbox)",
             "technology": {
                 "language": "go",
                 "framework": "gin/chi/net-http",
@@ -471,7 +546,7 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "repo": "tokensafe-backend/python",
             "mode": "hybrid",
             "status": "ready",
-            "description": "FastAPI automatic route & schema introspection + SQLAlchemy dry-run sandbox",
+            "description": "FastAPI automatic route & schema introspection + SQLAlchemy sandbox: verify.sandboxRollback needs a SQLAlchemy engine and an app that honours X-TokenSafe-Dry-Run; otherwise the result says not_applicable/unverified",
             "technology": {
                 "language": "python",
                 "framework": "fastapi",
@@ -508,6 +583,57 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
                 {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": True}},
                 {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": True, "requiresPermission": "permissions.mutate != false"}},
                 {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True}},
+            ],
+        },
+        {
+            "id": "backend/spring",
+            "name": "Spring Boot Adapter (JDK-only sidecar)",
+            "profile": "backend",
+            "profiles": ["backend"],
+            "repo": "tokensafe-backend/java",
+            "mode": "sidecar",
+            "status": "ready",
+            "description": "Single-file JDK sidecar: scans @RestController mappings statically, serves HTTP and stdio, applies OCC edits and runs a real verify command. Certified Level 2 32/33 (no live request traces, L4 not advertised).",
+            "technology": {
+                "language": "java",
+                "framework": "spring",
+                "package": {
+                    "manager": "binary",
+                    "name": "OumvSpring.java",
+                    "install": "tokensafe inject apply (caches the sidecar in ~/.tokensafe/sidecars)",
+                },
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "observe.runtime_state", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "understand.impact", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": False}},
+            ],
+        },
+        {
+            "id": "backend/php",
+            "name": "Laravel / Symfony Adapter (PHP sidecar)",
+            "profile": "backend",
+            "profiles": ["backend"],
+            "repo": "tokensafe-backend/php",
+            "mode": "sidecar",
+            "status": "ready",
+            "description": "Dependency-free PHP sidecar: Laravel Route:: and Symfony #[Route] discovery, token_get_all handler ranges, php -l pre-flight, OCC edits and stdio. Certified Level 2 32/33 (no live traces).",
+            "technology": {
+                "language": "php",
+                "framework": "laravel | symfony",
+                "package": {
+                    "manager": "binary",
+                    "name": "oumv-php",
+                    "install": "tokensafe inject apply (caches the sidecar in ~/.tokensafe/sidecars)",
+                },
+            },
+            "capabilities": [
+                {"name": "observe.resources", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "observe.runtime_state", "constraints": {"readOnly": True, "developmentOnly": False}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": False, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": False}},
             ],
         },
     ]
@@ -763,7 +889,7 @@ def resolve_zero_footprint_vite_command(
     host: Optional[str] = None,
     open_browser: bool = False,
 ) -> Tuple[List[str], str]:
-    """Resolves zero-footprint tokensafe-ui Vite+React runner command without editing repo files."""
+    """Resolves the zero-footprint tokensafe-ui Vite runner command without editing repo files."""
     import shutil
 
     ws = os.path.abspath(workspace_dir)
@@ -774,6 +900,13 @@ def resolve_zero_footprint_vite_command(
         cli_flags.append(f"--host={host}")
     if open_browser:
         cli_flags.append("--open")
+    # `dev` defaults to React; a Vue project must say so explicitly or it gets the
+    # React controller and bridge.
+    stack = detect_project_stack(ws)
+    frontend = stack.get("frontend") or {}
+    framework = frontend.get("framework") if isinstance(frontend, dict) else None
+    if framework in ("react", "vue"):
+        cli_flags.append(f"--framework={framework}")
 
     resolved = resolve_tokensafe_ui_cli(ws)
     if resolved:
@@ -899,7 +1032,12 @@ def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str, use_cach
                     if "/" in rel and top in _FRONTEND_SOURCE_DIRS:
                         return pkg
                 return None
-            if role == "backend" and ext in (".go", ".py"):
-                return pkg
+            if role == "backend":
+                if ext in (".go", ".py"):
+                    return pkg
+                # Express/Fastify adapters ship from npm; their sources are in scope.
+                if pkg.get("provider") == "node" and ext in (".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx"):
+                    return pkg
+                return None
             return None
     return None

@@ -91,28 +91,29 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
         self.assertIsNotNone(stack["backend"])
         self.assertEqual(stack["backend"]["provider"], "node")
         self.assertEqual(stack["backend"]["framework"], "express")
-        self.assertFalse(stack["backend"]["oumv_supported"])
+        # Express ships a certified adapter (npm tokensafe-backend-node).
+        self.assertTrue(stack["backend"]["oumv_supported"])
 
         brief = format_oumv_workspace_brief(self.test_dir, include_live=False)
         self.assertIn("react/react (apps/web): OUMV SUPPORTED", brief)
-        self.assertIn("node/express (apps/api): OUMV UNSUPPORTED yet", brief)
+        self.assertIn("node/express (apps/api): OUMV SUPPORTED", brief)
 
         self.assertIsNotNone(
             is_path_in_supported_oumv_scope(self.test_dir, os.path.join(web_dir, "src", "App.tsx"))
         )
-        self.assertIsNone(
+        # The Node backend is supported now, so its sources are in scope too.
+        self.assertIsNotNone(
             is_path_in_supported_oumv_scope(self.test_dir, os.path.join(api_dir, "src", "server.js"))
         )
 
         with patch.object(OUMVGateway, "_probe_candidates", return_value=None):
             status = OUMVGateway.status(workspace_dir=self.test_dir)
-            self.assertEqual(status["backend"]["status"], "UNSUPPORTED")
+            self.assertNotEqual(status["backend"]["status"], "UNSUPPORTED")
             be_adapter = [a for a in status["adapters"] if a["profile"] == "backend"][0]
-            self.assertEqual(be_adapter["lifecycle"]["state"], "UNSUPPORTED")
+            self.assertEqual(be_adapter["lifecycle"]["state"], "HANDSHAKE")
 
             obs = OUMVGateway.observe(level="L1", runtime="backend", workspace_dir=self.test_dir)
-            self.assertEqual(obs.get("unsupportedRuntime"), "backend/node")
-            self.assertEqual(obs.get("supportedProfiles"), ["frontend/react"])
+            self.assertNotEqual(obs.get("unsupportedRuntime"), "backend/node")
 
     def test_command_sanitizer_rewrites_vite_dev_to_tokensafe_dev(self):
         web_dir, _ = self._create_react_plus_node_monorepo()
@@ -220,8 +221,10 @@ class TestOumvEnforcementAndMonorepo(unittest.TestCase):
         node_path = os.path.join(api_dir, "src", "server.js")
 
         with patch.dict(os.environ, {"TOKENSAFE_HOME": self.tmp_home, "TOKENSAFE_DATA_DIR": self.tmp_data}):
-            # Unsupported Node file gets no OUMV nudge
-            self.assertIsNone(get_oumv_read_edit_advisory(self.test_dir, node_path, session_id="s1"))
+            # Node backend is supported now: its files get the same one-shot nudge.
+            node_advisory = get_oumv_read_edit_advisory(self.test_dir, node_path, session_id="s-node")
+            self.assertIsNotNone(node_advisory)
+            self.assertIn("node/express", node_advisory)
 
             # First Read on React file emits one-shot advisory via CC PreToolUse
             res1 = evaluate_cc_pre_tool_use(
