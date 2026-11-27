@@ -752,21 +752,30 @@ def main(argv: Optional[List[str]] = None):
             print(f"  ✔ Existing configuration preserved: \033[1m{conf_file}\033[0m (use --force to overwrite)\n")
 
     elif command in ("run-backend", "run_backend"):
-        # Executes the user's dev-server command with the OUMV autoload hook active.
-        # Nothing is written into the repository: the hook lives in ~/.tokensafe.
+        # Executes the user's dev-server command. Python/uvicorn gets the OUMV
+        # autoload hook from ~/.tokensafe; Java/PHP/Node sidecars run as-is (they
+        # mount the runtime themselves and write their own descriptor).
         from src.auto_inject import backend_env, ensure_python_autoload
 
         argv_rest = [a for a in args[1:]]
         if not argv_rest:
-            print("usage: tokensafe run-backend <command...>   e.g. tokensafe run-backend uvicorn app:app --reload")
+            print(
+                "usage: tokensafe run-backend <command...>\n"
+                "  tokensafe run-backend uvicorn app:app --reload\n"
+                "  tokensafe run-backend java OumvSpring.java --root . --port 7331\n"
+                "  tokensafe run-backend php -S 127.0.0.1:7332 oumv-php --root ."
+            )
             return
-        ensure_python_autoload()
-        env = backend_env()
         tool = argv_rest[0]
         resolved = shutil.which(tool)
         if not resolved:
             print(f"tokensafe run-backend: `{tool}` not found on PATH")
             return
+        if os.path.basename(tool) in ("java", "php", "node", "npm", "npx"):
+            print(f"⚡ Launching {os.path.basename(tool)} with the Sextant runtime")
+            os.execvpe(resolved, argv_rest, dict(os.environ))
+        ensure_python_autoload()
+        env = backend_env()
         os.execvpe(resolved, argv_rest, env)
 
     elif command in ("inject", "wire"):

@@ -648,19 +648,66 @@ def _sidecar_cache_dir() -> str:
     return os.path.join(_tokensafe_home(), "sidecars")
 
 
-def ensure_sidecar(kind: str) -> Tuple[Optional[str], str]:
-    """Copies OumvSpring.java / oumv-php into ~/.tokensafe/sidecars.
+# Pinned to the backend release: the sidecars are single files, so the cache is
+# content-addressed by SHA-256 and a clean machine downloads the exact bytes the
+# release was certified from. Bump both the tag and the hashes together.
+_SIDECAR_RELEASE_TAG = "v0.6.0"
+_SIDECARS = {
+    "spring": (
+        "java/src/dev/tokensafe/oumv/OumvSpring.java",
+        "OumvSpring.java",
+        "7259028dac6470d09b6af80982ce77b242b03d4a1472cb9a3a15cc75c88108a2",
+    ),
+    "php": (
+        "php/bin/oumv-php",
+        "oumv-php",
+        "6df768962fed811c0f8d46d9b78e96ffc846f4f87732863fe6b85c544114617d",
+    ),
+}
 
-    Prefers a local backend checkout (OUMV_BACKEND_REPO or a sibling directory);
-    returns (path, note) where path is None when the source is not available.
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sidecar_run_command(kind: str, sidecar_path: str, workspace: str) -> Optional[str]:
+    """The exact command that starts the sidecar against `workspace`."""
+    if not sidecar_path:
+        return None
+    if kind == "spring":
+        return f"tokensafe run-backend java {sidecar_path} --root {workspace} --port 7331"
+    if kind == "php":
+        return f"tokensafe run-backend php -S 127.0.0.1:7332 {sidecar_path} --root {workspace}"
+    return None
+
+
+def ensure_sidecar(kind: str) -> Tuple[Optional[str], str]:
+    """Caches OumvSpring.java / oumv-php at the pinned release and verifies SHA-256.
+
+    Order: a valid cache → a local checkout whose bytes match the pin (developer
+    flow, no network) → download from the release tag. A hash mismatch is never
+    accepted silently; the note says what failed instead of handing back a
+    different file under the certified name.
     """
-    source_map = {
-        "spring": ("java/src/dev/tokensafe/oumv/OumvSpring.java", "OumvSpring.java"),
-        "php": ("php/bin/oumv-php", "oumv-php"),
-    }
-    if kind not in source_map:
+    if kind not in _SIDECARS:
         return None, f"unknown sidecar {kind!r}"
-    rel_source, filename = source_map[kind]
+    rel_source, filename, expected_sha = _SIDECARS[kind]
+    cache_dir = _sidecar_cache_dir()
+    target = os.path.join(cache_dir, filename)
+
+    def adopt(source: str, note: str) -> Tuple[str, str]:
+        os.makedirs(cache_dir, exist_ok=True)
+        shutil.copy2(source, target)
+        if kind == "php":
+            os.chmod(target, 0o755)
+        return target, note
+
+    if os.path.isfile(target) and _sha256_file(target) == expected_sha:
+        return target, f"cached at {_SIDECAR_RELEASE_TAG}"
 
     repo_candidates = []
     env_repo = os.environ.get("OUMV_BACKEND_REPO")
@@ -671,20 +718,43 @@ def ensure_sidecar(kind: str) -> Tuple[Optional[str], str]:
         os.path.join(os.path.dirname(here), "tokensafe-backend"),
         os.path.join(here, "..", "tokensafe-backend"),
     ]
+    local_mismatch = None
     for repo in repo_candidates:
         candidate = os.path.join(os.path.abspath(repo), rel_source)
-        if os.path.isfile(candidate):
-            cache_dir = _sidecar_cache_dir()
-            os.makedirs(cache_dir, exist_ok=True)
-            target = os.path.join(cache_dir, filename)
-            shutil.copy2(candidate, target)
-            if kind == "php":
-                os.chmod(target, 0o755)
-            return target, f"cached from {candidate}"
-    return None, (
-        "sidecar source not found: set OUMV_BACKEND_REPO to a tokensafe-backend "
-        "checkout or clone it next to this one"
+        if not os.path.isfile(candidate):
+            continue
+        if _sha256_file(candidate) == expected_sha:
+            return adopt(candidate, f"cached from local checkout matching {_SIDECAR_RELEASE_TAG}")
+        local_mismatch = candidate
+
+    if os.environ.get("TOKENSAFE_SIDECAR_OFFLINE") == "1":
+        if local_mismatch:
+            return adopt(local_mismatch, f"local checkout (unpinned, offline): {local_mismatch}")
+        return None, "offline (TOKENSAFE_SIDECAR_OFFLINE=1) and no cached sidecar"
+
+    url = (
+        f"https://raw.githubusercontent.com/tokensafe-dev/tokensafe-backend/"
+        f"{_SIDECAR_RELEASE_TAG}/{rel_source}"
     )
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(url, timeout=30) as response:
+            payload = response.read()
+    except Exception as exc:
+        if local_mismatch:
+            return adopt(local_mismatch, f"download failed ({exc}); local checkout (unpinned): {local_mismatch}")
+        return None, f"cannot download {url}: {exc}"
+
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != expected_sha:
+        return None, f"sha256 mismatch for {url}: expected {expected_sha}, got {actual}"
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(target, "wb") as handle:
+        handle.write(payload)
+    if kind == "php":
+        os.chmod(target, 0o755)
+    return target, f"downloaded from {_SIDECAR_RELEASE_TAG}"
 
 
 def plan(workspace: str) -> Dict[str, Any]:
@@ -753,11 +823,7 @@ def plan(workspace: str) -> Dict[str, Any]:
             })
         elif provider in ("spring", "php"):
             sidecar_path, note = ensure_sidecar(provider)
-            command = (
-                f"tokensafe run-backend java {sidecar_path}"
-                if provider == "spring" and sidecar_path
-                else (f"tokensafe run-backend {sidecar_path}" if sidecar_path else None)
-            )
+            command = sidecar_run_command(provider, sidecar_path or "", workspace)
             actions.append({
                 "kind": "sidecar",
                 "profile": "backend",
@@ -825,11 +891,7 @@ def apply(workspace: str, dry_run: bool = False, include_go: bool = True) -> Dic
             "status": "ready" if sidecar_path else "needs-source",
             "sidecar": sidecar_path,
             "note": note,
-            "run": (
-                f"tokensafe run-backend java {sidecar_path}"
-                if backend["provider"] == "spring" and sidecar_path
-                else (f"tokensafe run-backend {sidecar_path}" if sidecar_path else None)
-            ),
+            "run": sidecar_run_command(backend["provider"], sidecar_path or "", workspace),
         })
 
     return results

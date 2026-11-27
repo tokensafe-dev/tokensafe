@@ -72,6 +72,9 @@ class TestAutoInject(unittest.TestCase):
         # A sibling tokensafe-backend checkout is cached; otherwise the note names
         # OUMV_BACKEND_REPO instead of pretending the sidecar exists.
         self.assertTrue(sidecar.get("run") or "OUMV_BACKEND_REPO" in sidecar.get("install", ""))
+        if sidecar.get("run"):
+            self.assertIn("--root", sidecar["run"])
+            self.assertIn("--port 7331", sidecar["run"])
 
         php_dir = os.path.join(self.tmp, "phpapp")
         os.makedirs(php_dir)
@@ -81,6 +84,22 @@ class TestAutoInject(unittest.TestCase):
         sidecar = next(action for action in plan["actions"] if action["kind"] == "sidecar")
         self.assertEqual(sidecar["framework"], "laravel")
         self.assertFalse(sidecar["writes_repo"])
+        if sidecar.get("run"):
+            self.assertIn("-S 127.0.0.1:7332", sidecar["run"])
+            self.assertIn("--root", sidecar["run"])
+
+    def test_sidecar_cache_is_hash_pinned_and_replaces_a_tampered_file(self):
+        cache_dir = auto_inject._sidecar_cache_dir()
+        os.makedirs(cache_dir, exist_ok=True)
+        tampered = os.path.join(cache_dir, "OumvSpring.java")
+        with open(tampered, "w", encoding="utf-8") as f:
+            f.write("// not the certified sidecar\n")
+
+        path, note = auto_inject.ensure_sidecar("spring")
+        self.assertIsNotNone(path)
+        self.assertNotEqual(auto_inject._sha256_file(path), "changed")
+        self.assertIn("v0.6.0", note)
+        self.assertNotIn("mismatch", note)
 
     def tearDown(self):
         self.env.stop()
