@@ -1986,25 +1986,54 @@ class CodeGraph:
         frontier = list(start)
         unresolved: Set[str] = set()
         truncated = False
+
+        def _pick(name: str, caller_file: Optional[str]) -> Tuple[List[str], bool]:
+            """Callee candidates scoped like a compiler would: same file first, then
+            files the caller imports, and only then a globally unique name.
+
+            Name-only resolution used to drop every edge to a helper whose name
+            recurs (four `loadStatus` closures in one app), which cut the flow at
+            exactly the local-closure hop it was supposed to follow.
+            """
+            targets = name_to_syms.get(name) or []
+            if not targets:
+                return [], False
+            if len(targets) == 1:
+                return targets, False
+            if caller_file:
+                same = [tk for tk in targets if self.symbols[tk].file_path == caller_file]
+                if same:
+                    return same, False
+                imported: Set[str] = set()
+                for spec in self.file_imports.get(caller_file, set()):
+                    resolved = self._resolve_relative_module(caller_file, spec)
+                    if resolved:
+                        imported.add(resolved)
+                near = [tk for tk in targets if self.symbols[tk].file_path in imported]
+                if near:
+                    return near, False
+            return [], True
+
         while frontier:
             node = frontier.pop(0)
             d = depth_of[node]
+            caller_sym = self.symbols.get(node)
+            caller_file = caller_sym.file_path if caller_sym else None
             for nxt in self.edges.get(node, ()):
                 if nxt.startswith("call:"):
-                    # Exact-name resolution only, and only when it is not ambiguous:
-                    # `get`/`map` would otherwise drag half the repo into the flow.
                     callee_name = nxt[5:]
-                    targets = name_to_syms.get(callee_name) or []
+                    # Language builtins are not code this graph could resolve.
                     if callee_name in _STATIC_FLOW_NOISE or callee_name[:1].isupper():
+                        continue
+                    targets, ambiguous = _pick(callee_name, caller_file)
+                    if ambiguous:
+                        unresolved.add(callee_name + " (ambiguous)")
                         continue
                     if not targets:
                         unresolved.add(callee_name)
                         continue
-                    if len(targets) > 3:
-                        unresolved.add(callee_name + " (ambiguous)")
-                        continue
                 elif nxt.startswith("sym:"):
-                    targets = name_to_syms.get(nxt[4:]) or []
+                    targets, _ambiguous = _pick(nxt[4:], caller_file)
                     if not targets:
                         continue
                 elif nxt.startswith(("file:", "mod:")):

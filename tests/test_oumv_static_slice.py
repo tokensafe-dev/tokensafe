@@ -320,6 +320,47 @@ export async function spinWheel(payload: any) {
         self.assertTrue(res["degraded"])
         self.assertIn("target", res["degradedReason"])
 
+    def test_flow_follows_the_same_file_closure_not_a_namesake(self):
+        _write(os.path.join(self.test_dir, "frontend", "src", "a.tsx"), """export function Handler() {
+  const loadStatus = async () => {
+    return request('/a/status')
+  }
+  return loadStatus()
+}
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "b.tsx"), """export function Other() {
+  const loadStatus = async () => {
+    return request('/b/status')
+  }
+  return loadStatus()
+}
+""")
+        self.graph.scan()
+        res = self.graph.get_static_flow("Handler")
+        routes = {r["route"] for r in res["clientCalls"]}
+        self.assertIn("/a/status", routes)
+        self.assertNotIn("/b/status", routes)
+
+    def test_flow_reports_cross_file_ambiguity_instead_of_picking(self):
+        _write(os.path.join(self.test_dir, "frontend", "src", "x.ts"), """export function sharedHelper() {
+  return request('/x/route')
+}
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "y.ts"), """export function sharedHelper() {
+  return request('/y/route')
+}
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "handler.ts"), """export async function run() {
+  return sharedHelper()
+}
+""")
+        self.graph.scan()
+        res = self.graph.get_static_flow("run")
+        routes = {r["route"] for r in res["clientCalls"]}
+        self.assertNotIn("/x/route", routes)
+        self.assertNotIn("/y/route", routes)
+        self.assertIn("sharedHelper (ambiguous)", res["unresolvedCalls"])
+
     def test_mounts_and_links_survive_the_disk_cache(self):
         _write(os.path.join(self.test_dir, "backend", "users.ts"), """import { Router } from 'express'
 
