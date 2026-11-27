@@ -494,7 +494,13 @@ class OUMVGateway:
 
     @staticmethod
     def _adapter_lifecycle(stack_info: Dict[str, Any], fe: Optional[Dict[str, Any]], be: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Per-adapter lifecycle + health per the OUMV Adapter Contract (schemas/adapter.json)."""
+        """Per-adapter readiness per the OUMV Adapter Contract (schemas/adapter.json).
+
+        Every entry carries ONE machine-readable readiness verdict (`status`, mirrored
+        by `effective`): active > supported > partial > planned > unsupported. A runtime
+        that answers UNSUPPORTED for a detected stack can no longer be reported as a
+        `ready` adapter from the catalog at the same time.
+        """
         adapters: List[Dict[str, Any]] = []
         fe_info = stack_info.get("frontend") or {}
         be_info = stack_info.get("backend") or {}
@@ -510,38 +516,64 @@ class OUMVGateway:
             catalog = []
 
         def _find_adapter(profile: str, provider: Optional[str]) -> Dict[str, Any]:
+            """Exact catalog match only — never substitute a ready adapter of the same
+            profile for a different provider (that is how planned stacks looked ready)."""
             if provider:
                 for a in catalog:
                     if a.get("id") == f"{profile}/{provider}":
                         return a
-            for a in catalog:
-                if a.get("profile") == profile and a.get("status") == "ready":
-                    return a
             return {}
 
         def _entry(profile: str, connected: Optional[Dict[str, Any]], detected: bool, info: Dict[str, Any]) -> Dict[str, Any]:
             provider = info.get("provider")
             adapter = _find_adapter(profile, provider)
-            is_planned = detected and (info.get("status") == "planned" or info.get("oumv_supported") is False or adapter.get("status") == "planned")
+            catalog_status = adapter.get("status", "planned")
+            catalog_ready = catalog_status == "ready"
+            exact_match = bool(adapter)
+            detection_planned = info.get("status") == "planned" or info.get("oumv_supported") is False
+
             if connected:
-                state, health, detail = "ACTIVE", "healthy", f"Live runtime: {connected.get('name', 'unknown')}"
-            elif is_planned:
-                state = "UNSUPPORTED"
-                health = "unsupported"
+                effective = "active"
+            elif not detected:
+                effective = "unsupported"
+            elif detection_planned or not catalog_ready:
+                effective = "planned"
+            elif not exact_match:
+                # A ready adapter exists for the profile but not for this provider.
+                effective = "partial"
+            else:
+                effective = "supported"
+
+            if effective == "active":
+                state, health = "ACTIVE", "healthy"
+                detail = f"Live runtime: {connected.get('name', 'unknown')}"
+            elif effective in ("supported", "partial"):
+                state, health = "HANDSHAKE", "degraded"
                 detail = (
-                    f"{adapter.get('id', f'{profile}/{provider}')} is not implemented yet (planned). "
+                    f"Detected statically ({info.get('framework', 'unknown')}); runtime offline — "
+                    "hybrid static fallback active"
+                )
+                if effective == "partial":
+                    detail += f"; no exact adapter for {profile}/{provider} yet"
+            elif effective == "planned":
+                state, health = "UNSUPPORTED", "unsupported"
+                detail = (
+                    f"{f'{profile}/{provider}' if provider else profile} has no implemented OUMV runtime adapter yet. "
                     "Do not use tokensafe:oumv for this profile — use repo_map, smart_read_file, and scoped_search instead."
                 )
-            elif detected:
-                state, health, detail = "HANDSHAKE", "degraded", "Detected statically; runtime offline — hybrid static fallback active"
             else:
-                state, health, detail = "DISCOVER", "unavailable", "Not detected in this workspace"
+                state, health = "DISCOVER", "unavailable"
+                detail = "Not detected in this workspace"
+
+            caps = adapter.get("capabilities") if effective in ("active", "supported", "partial") else []
             return {
                 "profile": profile,
-                "adapter": adapter.get("id", f"{profile}/unknown"),
-                "status": adapter.get("status", "unknown"),
+                "adapter": adapter.get("id", f"{profile}/{provider or 'unknown'}"),
+                "status": effective,
+                "effective": effective,
+                "catalogStatus": catalog_status,
                 "technology": adapter.get("technology"),
-                "capabilities": adapter.get("capabilities"),
+                "capabilities": caps,
                 "lifecycle": {"state": state, "health": {"status": health, "detail": detail}},
                 "security": {
                     "productionFailClosed": True,
