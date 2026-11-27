@@ -667,24 +667,31 @@ class OUMVGateway:
 
             return report
 
+        # Static L2 flow (offline contract): handler -> callees -> literal route.
+        if query == "flow":
+            report = graph.get_static_flow(target or "")
+            report.setdefault("query", "flow")
+            return report
+
         try:
             # A live adapter may accept queries beyond the offline contract.
             url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
             return cls._rpc_call(url, "oumv/understand", {"query": query, "target": target, "componentId": target})
         except RuntimeError:
             # Prose in `query` is not a question: the offline contract answers
-            # impact/causality only. Returning a surface dump here looked like an
-            # answer (level "L1", confidence "confirmed") to a query nobody parsed.
+            # impact/causality/flow only. Returning a surface dump here looked like
+            # an answer (level "L1", confidence "confirmed") to a query nobody parsed.
             return {
                 "query": query,
                 "target": target,
                 "error": "UNSUPPORTED_QUERY",
                 "mode": "STATIC_SURFACE",
-                "supportedQueries": ["impact", "causality"],
+                "supportedQueries": ["impact", "causality", "flow"],
                 "hint": (
                     "query is an enum, not text: 'impact' answers who depends on the target, "
-                    "'causality' answers why state X / how frontend calls map to endpoints. "
-                    "For 'what does this handler do', read the symbol with smart_read_file."
+                    "'causality' answers why state X / how frontend calls map to endpoints, "
+                    "'flow' answers which client routes a handler reaches (L2). "
+                    "For 'what this handler does', read the symbol with smart_read_file."
                 ),
                 "evidence": {"provenance": "static", "confidence": "confirmed", "sourceAdapter": "tokensafe-graph-engine"},
             }

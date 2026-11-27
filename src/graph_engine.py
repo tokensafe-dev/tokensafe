@@ -65,6 +65,8 @@ _STATIC_ASSET_EXTS = {
 }
 
 _BACKEND_ROUTE_PATTERNS = [
+    # (regex, default_method). Group 1 is always the route literal; the declaring
+    # receiver (if any) is read back from the match text with _RECEIVER_RE.
     # Python: @app.get("/users"), @router.post('/login'), @bp.route('/data')
     (re.compile(r'@(?:app|router|api|bp)\.(?:get|post|put|delete|patch|route)\(\s*["\']([^"\']+)["\']', re.IGNORECASE), None),
     # JS/TS: app.get("/users", ...), router.post('/login', ...)
@@ -88,6 +90,23 @@ _BACKEND_ROUTE_PATTERNS = [
     # PHP Laravel: Route::get('/users', ...), Route::post('/login', ...)
     (re.compile(r'Route::(?:get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']'), None),
 ]
+
+# Call targets that are language/runtime builtins rather than code this graph
+# could resolve: reported as unresolved would drown the real gaps.
+_STATIC_FLOW_NOISE = {
+    "Boolean", "Number", "String", "Object", "Array", "Date", "Promise", "Map",
+    "Set", "JSON", "Math", "Error", "RegExp", "Symbol", "Buffer", "console",
+    "process", "require", "setTimeout", "setInterval", "clearTimeout",
+    "clearInterval", "requestAnimationFrame", "cancelAnimationFrame",
+    "parseInt", "parseFloat", "isNaN", "fetch", "len", "str", "int", "float",
+    "list", "dict", "set", "tuple", "range", "print", "open", "super",
+    "self", "this", "None", "True", "False",
+}
+
+# The object a route is declared on, read from the start of the matched text:
+# `app.get(...)` -> "app", `.post(...)` -> None (chained builder).
+_RECEIVER_RE = re.compile(r'^\s*([A-Za-z_$][\w$]*)\.')
+
 
 _FRONTEND_CALL_PATTERNS = [
     # fetch("/api/users") or fetch(`/api/users/${id}`)  (method unknown: depends on init options)
@@ -783,6 +802,11 @@ class CodeGraph:
                     self.file_endpoints[rel_path].append((norm_route, None, None))
 
         # 2. Backend route definitions
+        same_file_mounts: Dict[str, List[str]] = {}
+        if not file_prefix:
+            for (prefix, ident, module) in self.file_mounts[rel_path]:
+                if module == ".":
+                    same_file_mounts.setdefault(ident, []).append(prefix)
         for rx, _default_method in _BACKEND_ROUTE_PATTERNS:
             for match in rx.finditer(content):
                 route_raw = match.group(1)
@@ -792,13 +816,26 @@ class CodeGraph:
                     full_route = route_raw
                 if file_prefix:
                     full_route = _join_route(file_prefix, full_route)
+                # Same-file mount: app.use("/api", router) prefixes only the routes
+                # declared on `router`, so app.get("/health") in the same file keeps
+                # its own path. A mounted route is not addressable unprefixed, so
+                # only the composed form is recorded.
+                line_no = content[:match.start()].count("\n") + 1
+                method = _match_http_method(match.group(0))
+                receiver_match = _RECEIVER_RE.match(match.group(0))
+                mount_prefixes = same_file_mounts.get(receiver_match.group(1), []) if receiver_match else []
+                if mount_prefixes:
+                    for mount_prefix in mount_prefixes:
+                        norm_composed = _normalize_route_path(_join_route(mount_prefix, full_route))
+                        if norm_composed:
+                            self.file_endpoints[rel_path].append(
+                                (norm_composed, self._find_enclosing_symbol(rel_path, line_no), method)
+                            )
+                    continue
                 norm_route = _normalize_route_path(full_route)
                 if not norm_route:
                     continue
-                line_no = content[:match.start()].count("\n") + 1
-                sym_key = self._find_enclosing_symbol(rel_path, line_no)
-                method = _match_http_method(match.group(0))
-                self.file_endpoints[rel_path].append((norm_route, sym_key, method))
+                self.file_endpoints[rel_path].append((norm_route, self._find_enclosing_symbol(rel_path, line_no), method))
 
         # 3. Frontend API call sites
         for rx, default_method in _FRONTEND_CALL_PATTERNS:
@@ -1720,6 +1757,10 @@ class CodeGraph:
         }
 
         lvl = (level or "L0").upper()
+        if lvl == "L2" and target:
+            # L2 is the flow contract, and it is answerable offline: handler ->
+            # callees -> literal client route.
+            return self.get_static_flow(target)
         if lvl == "L0":
             god_nodes = self.get_god_nodes(top_n=5)
             endpoints_count = sum(len(eps) for eps in self.file_endpoints.values())
@@ -1816,7 +1857,9 @@ class CodeGraph:
             result["requestedLevel"] = lvl
             result["degraded"] = True
             result["degradedReason"] = (
-                f"static engine serves L1 surface only; {lvl} requires a live OUMV runtime"
+                "L2 flow needs a target symbol"
+                if lvl == "L2"
+                else f"static engine serves L1 surface only; {lvl} requires a live OUMV runtime"
             )
         return result
 
@@ -1895,6 +1938,144 @@ class CodeGraph:
             "evidence": evidence,
             "missingEvidence": [
                 "Runtime-confirmed dependencies are not included while dev-servers are offline.",
+            ],
+        }
+
+    def get_static_flow(self, target: str, max_depth: int = 3) -> Dict[str, Any]:
+        """Static L2 flow: handler -> callee symbols -> literal client route.
+
+        Answers "what does this handler reach", not "what does it do": the walk is
+        the forward call graph (handler, local helpers, imported functions) and the
+        API call sites declared in the reached symbols. Dynamic dispatch, call
+        order and runtime values stay out — the evidence says so.
+        """
+        evidence = {
+            "provenance": "static",
+            "sourceAdapter": "tokensafe-graph-engine",
+            "confidence": "probable",
+        }
+        t = (target or "").strip()
+        if not t:
+            return {"target": t, "mode": "STATIC_FLOW", "error": "target is required", "evidence": evidence}
+
+        name_to_syms: Dict[str, List[str]] = {}
+        for sk, sym in self.symbols.items():
+            name_to_syms.setdefault(sym.name, []).append(sk)
+
+        start: Set[str] = set()
+        exact: Set[str] = set()
+        for sk, sym in self.symbols.items():
+            if sym.name.lower() == t.lower():
+                exact.add(sk)
+            elif t.lower() in sym.name.lower() or t.lower() in sym.file_path.lower():
+                start.add(sk)
+        # An exact symbol name beats substring hits: `spinWheel` must not pull in
+        # SpinWheelRequestProtoDto and everything else that merely contains it.
+        start = exact or start
+        if not start:
+            return {
+                "target": t,
+                "mode": "STATIC_FLOW",
+                "error": "NO_MATCHING_SYMBOL",
+                "matchedSymbols": [],
+                "hint": "Pass a symbol or file name (e.g. 'spinWheel', 'src/api/wheel.ts'), not a prose question.",
+                "evidence": evidence,
+            }
+
+        depth_of: Dict[str, int] = {sk: 0 for sk in start}
+        frontier = list(start)
+        unresolved: Set[str] = set()
+        truncated = False
+        while frontier:
+            node = frontier.pop(0)
+            d = depth_of[node]
+            for nxt in self.edges.get(node, ()):
+                if nxt.startswith("call:"):
+                    # Exact-name resolution only, and only when it is not ambiguous:
+                    # `get`/`map` would otherwise drag half the repo into the flow.
+                    callee_name = nxt[5:]
+                    targets = name_to_syms.get(callee_name) or []
+                    if callee_name in _STATIC_FLOW_NOISE or callee_name[:1].isupper():
+                        continue
+                    if not targets:
+                        unresolved.add(callee_name)
+                        continue
+                    if len(targets) > 3:
+                        unresolved.add(callee_name + " (ambiguous)")
+                        continue
+                elif nxt.startswith("sym:"):
+                    targets = name_to_syms.get(nxt[4:]) or []
+                    if not targets:
+                        continue
+                elif nxt.startswith(("file:", "mod:")):
+                    continue
+                elif nxt in self.symbols:
+                    targets = [nxt]
+                else:
+                    continue
+                for tk in targets:
+                    if tk in depth_of or tk in start:
+                        continue
+                    if d >= max_depth:
+                        truncated = True
+                        continue
+                    depth_of[tk] = d + 1
+                    frontier.append(tk)
+
+        def _sym_info(sk: str) -> Dict[str, Any]:
+            sym = self.symbols[sk]
+            return {
+                "name": sym.name,
+                "kind": sym.kind,
+                "file": sym.file_path,
+                "lines": [sym.line_start, sym.line_end],
+                "depth": depth_of[sk],
+            }
+
+        callees = sorted(
+            (_sym_info(sk) for sk in depth_of if depth_of[sk] > 0),
+            key=lambda item: (item["depth"], item["file"], item["name"]),
+        )
+
+        # Client route literals reached by the walk: the handler itself or any
+        # callee that declares the call. Declared routes of the start symbol's own
+        # file are included only when that symbol declares them.
+        routes: List[Dict[str, Any]] = []
+        seen_routes = set()
+        for rel_path, calls in self.file_api_calls.items():
+            for norm_route, caller_sym, method in calls:
+                if not norm_route:
+                    continue
+                if caller_sym is not None and caller_sym not in depth_of:
+                    continue
+                if caller_sym is None and rel_path != self.symbols[next(iter(start))].file_path:
+                    continue
+                key = (norm_route, method, rel_path, caller_sym)
+                if key in seen_routes:
+                    continue
+                seen_routes.add(key)
+                routes.append({
+                    "route": norm_route,
+                    "method": method,
+                    "file": rel_path,
+                    "via": self.symbols[caller_sym].name if caller_sym else None,
+                })
+
+        return {
+            "target": t,
+            "level": "L2",
+            "mode": "STATIC_FLOW",
+            "matchedSymbols": [
+                {"name": self.symbols[sk].name, "file": self.symbols[sk].file_path}
+                for sk in sorted(start)
+            ][:10],
+            "callees": callees[:40],
+            "clientCalls": routes[:20],
+            "unresolvedCalls": sorted(unresolved)[:20],
+            "truncated": truncated,
+            "evidence": evidence,
+            "missingEvidence": [
+                "Runtime-confirmed call order and dynamic dispatch are not included while dev-servers are offline.",
             ],
         }
 

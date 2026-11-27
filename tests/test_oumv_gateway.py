@@ -289,9 +289,27 @@ class TestOUMVGateway(unittest.TestCase):
                     query="WheelModal spin button click handler chain", target=None, runtime="auto"
                 )
         self.assertEqual(res["error"], "UNSUPPORTED_QUERY")
-        self.assertEqual(res["supportedQueries"], ["impact", "causality"])
+        self.assertEqual(res["supportedQueries"], ["impact", "causality", "flow"])
         self.assertNotIn("clientCalls", res)
         self.assertIn("smart_read_file", res["hint"])
+
+    def test_understand_flow_returns_static_l2_flow(self):
+        frontend_dir = os.path.join(self.test_dir, "frontend")
+        os.makedirs(os.path.join(frontend_dir, "api"), exist_ok=True)
+        with open(os.path.join(frontend_dir, "api", "wheel.ts"), "w", encoding="utf-8") as f:
+            f.write("export async function spinRequest(p: any) {\n"
+                    "    return request('/wheel/spin', p)\n}\n")
+        with open(os.path.join(frontend_dir, "handler.ts"), "w", encoding="utf-8") as f:
+            f.write("import { spinRequest } from './api/wheel'\n"
+                    "export async function spinWheel(p: any) { return spinRequest(p) }\n")
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            OUMVGateway._last_scan_time = 9999999999.0
+            OUMVGateway._cached_fe = None
+            OUMVGateway._cached_be = None
+            res = OUMVGateway.understand(query="flow", target="spinWheel", runtime="auto")
+        self.assertEqual(res["mode"], "STATIC_FLOW")
+        self.assertEqual(res["level"], "L2")
+        self.assertIn("/wheel/spin", {r["route"] for r in res["clientCalls"]})
 
     def test_understand_causality_with_explicit_runtime_keeps_static_backbone(self):
         self._make_fullstack_fixture()

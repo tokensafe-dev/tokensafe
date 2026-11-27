@@ -242,6 +242,84 @@ export const routes = new Elysia({ prefix: "/wheel" })
         routes = [e[0] for e in g.file_endpoints.get("backend/dup.ts", [])]
         self.assertEqual(routes, ["/wheel/spin"])
 
+    def test_same_file_mount_prefixes_only_that_router(self):
+        _write(os.path.join(self.test_dir, "backend", "app.ts"), """import express from 'express'
+const app = express()
+const router = Router()
+
+router.get('/users', (req, res) => res.json([]))
+app.get('/health', (req, res) => res.json({ ok: true }))
+app.use('/v1', router)
+""")
+        g = self._scan()
+        routes = {e[0] for e in g.file_endpoints.get("backend/app.ts", [])}
+        self.assertIn("/v1/users", routes)
+        self.assertIn("/health", routes)
+        self.assertNotIn("/users", routes)
+        self.assertNotIn("/v1/health", routes)
+
+    def test_no_endpoint_for_relative_client_calls(self):
+        _write(os.path.join(self.test_dir, "frontend", "src", "map.ts"),
+               "export const hit = (cache: Map<string, number>) => cache.get('/wheel/spin');\n")
+        g = self._scan()
+        self.assertEqual(g.file_endpoints.get("frontend/src/map.ts"), [])
+
+
+class TestStaticFlow(unittest.TestCase):
+    """L2: handler -> callee symbols -> literal client route."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="tokensafe_flow_test_")
+        _write(os.path.join(self.test_dir, "frontend", "src", "api", "wheel.ts"), """import { request } from './client'
+
+export async function spinRequest(payload: any) {
+    return request<SpinWheelResponse>('/wheel/spin', { method: 'POST', body: payload })
+}
+""")
+        _write(os.path.join(self.test_dir, "frontend", "src", "handlers", "wheel.ts"), """import { spinRequest } from '../api/wheel'
+
+export async function spinWheel(payload: any) {
+    return spinRequest(payload)
+}
+""")
+        self.graph = CodeGraph(self.test_dir, use_disk_cache=False)
+        self.graph.scan()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_flow_reaches_the_imported_helper_and_its_route(self):
+        res = self.graph.get_static_flow("spinWheel")
+        self.assertEqual(res["mode"], "STATIC_FLOW")
+        self.assertEqual(res["level"], "L2")
+        names = {c["name"] for c in res["callees"]}
+        self.assertIn("spinRequest", names)
+        routes = [(r["route"], r["via"]) for r in res["clientCalls"]]
+        self.assertIn(("/wheel/spin", "spinRequest"), routes)
+        self.assertTrue(res["missingEvidence"])
+
+    def test_flow_by_file_path_reports_the_file_handlers(self):
+        res = self.graph.get_static_flow("src/api/wheel.ts")
+        self.assertIn("spinRequest", {c["name"] for c in res["callees"]} | {s["name"] for s in res["matchedSymbols"]})
+
+    def test_flow_without_symbol_match_is_explicit(self):
+        res = self.graph.get_static_flow("WheelModal spin button click handler chain")
+        self.assertEqual(res["error"], "NO_MATCHING_SYMBOL")
+        self.assertNotIn("clientCalls", res)
+
+    def test_l2_slice_serves_flow_when_targeted(self):
+        res = self.graph.get_static_oumv_slice(level="L2", target="spinWheel")
+        self.assertEqual(res["mode"], "STATIC_FLOW")
+        self.assertEqual(res["level"], "L2")
+        self.assertNotIn("degraded", res)
+
+    def test_l2_slice_without_target_is_marked_degraded(self):
+        res = self.graph.get_static_oumv_slice(level="L2")
+        self.assertEqual(res["level"], "L1")
+        self.assertEqual(res["requestedLevel"], "L2")
+        self.assertTrue(res["degraded"])
+        self.assertIn("target", res["degradedReason"])
+
     def test_mounts_and_links_survive_the_disk_cache(self):
         _write(os.path.join(self.test_dir, "backend", "users.ts"), """import { Router } from 'express'
 

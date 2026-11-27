@@ -435,13 +435,15 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                            'type': 'object'},
         'name': 'oumv_observe'},
     {   'annotations': {'readOnlyHint': True},
-        'description': "Answers 'Why is state X / why is button disabled?' (causality/why_state) or performs impact "
+        'description': "Answers 'Why is state X / why is button disabled?' (causality/why_state), performs impact "
                        'analysis: causality merges both runtimes and adds static cross-stack edges (frontend action '
                        '-> backend endpoint) with evidence; impact walks reverse dependencies plus cross-stack '
-                       'frontend callers of matching backend endpoints.',
+                       'frontend callers of matching backend endpoints; flow resolves the L2 path from a handler '
+                       'through its callees to the client routes it calls.',
         'inputSchema': {   'properties': {   'query': {   'default': 'causality',
-                                                          'description': 'Query type (causality, impact, why_state)',
-                                                          'enum': ['causality', 'impact', 'why_state'],
+                                                          'description': 'Query type (causality, impact, why_state, '
+                                                                         'flow)',
+                                                          'enum': ['causality', 'impact', 'why_state', 'flow'],
                                                           'type': 'string'},
                                              'runtime': {   'default': 'auto',
                                                             'description': 'Target runtime',
