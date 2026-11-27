@@ -625,6 +625,28 @@ class TestOumvIndexAndPreview(unittest.TestCase):
         method = mock_rpc.call_args[0][1]
         self.assertEqual(method, "oumv/previewEdit")
 
+    @patch.object(OUMVGateway, "_rpc_call")
+    def test_build_delegates_and_falls_back_honestly(self, mock_rpc):
+        from src.oumv_gateway import OUMVUnsupportedMethodError
+        with patch("src.oumv_gateway.get_active_workspace", return_value=self.test_dir):
+            # 1. live runtime answers
+            self._prime_state(be={"url": "http://localhost:8000/__oumv/rpc"})
+            mock_rpc.return_value = {"status": "passed", "command": "go build ./...", "diagnostics": []}
+            res = OUMVGateway.build(runtime="backend", workspace_dir=self.test_dir)
+            self.assertEqual(res["status"], "passed")
+            self.assertEqual(mock_rpc.call_args[0][1], "oumv/build")
+
+            # 2. runtime lacks the method -> OUMVUnsupportedMethodError
+            mock_rpc.side_effect = OUMVUnsupportedMethodError("JSON-RPC error (-32601): METHOD_NOT_FOUND")
+            with self.assertRaises(OUMVUnsupportedMethodError):
+                OUMVGateway.build(runtime="backend", workspace_dir=self.test_dir)
+
+            # 3. no live runtime -> honest skip, never a fabricated verdict
+            OUMVGateway._workspace_states.clear()
+            res2 = OUMVGateway.build(runtime="auto", workspace_dir=self.test_dir)
+            self.assertEqual(res2["status"], "skipped")
+            self.assertTrue(res2["requiresRuntime"])
+
 
 class TestOumvWorkspaceResolution(unittest.TestCase):
     """Root-less oumv calls resolve per server, not per machine.

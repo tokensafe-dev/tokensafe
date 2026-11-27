@@ -1154,6 +1154,51 @@ class OUMVGateway:
                 return offline
             raise
 
+    # 9. Tool: oumv build — run the runtime's build/test command (spec §14.3)
+    @classmethod
+    def build(cls, command: Optional[str] = None, target: Optional[str] = None,
+              timeout_ms: Optional[int] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        """Proxies `oumv/build` to a live runtime; no fabricated offline diagnostics.
+
+        §14.3 is an optional extension: a runtime that does not implement it
+        answers -32601, and without a live runtime the honest answer is that the
+        gateway cannot run the application's own build — not a guessed verdict.
+        """
+        cls.mark_oumv_used(workspace_dir)
+        params: Dict[str, Any] = {}
+        if command:
+            params["command"] = command
+        if target:
+            params["target"] = target
+        if timeout_ms:
+            params["timeoutMs"] = int(timeout_ms)
+        try:
+            url = cls._resolve_client_url(runtime=runtime, target=target, workspace_dir=workspace_dir)
+            res = cls._rpc_call(url, "oumv/build", params)
+            if isinstance(res, dict) and "evidence" not in res:
+                res["evidence"] = {"provenance": "runtime", "confidence": "confirmed", "sourceAdapter": "live-devserver"}
+            return res
+        except OUMVRpcError as e:
+            if not any(hint in str(e).lower() for hint in _UNSUPPORTED_HINTS):
+                raise
+            raise OUMVUnsupportedMethodError(str(e))
+        except RuntimeError as e:
+            # A plain RuntimeError here means no runtime is reachable: the honest
+            # answer is a skip with a reason, never a fabricated verdict.
+            if any(hint in str(e).lower() for hint in _UNSUPPORTED_HINTS):
+                raise
+            return {
+                "status": "skipped",
+                "command": command or "none",
+                "diagnostics": [],
+                "skipReason": (
+                    "oumv/build needs a live OUMV runtime implementing §14.3; "
+                    "no DevServer is reachable in this workspace"
+                ),
+                "requiresRuntime": True,
+                "hint": "start 'tokensafe dev' (or the app's OUMV adapter) and retry; or run the build/test command yourself",
+            }
+
     @staticmethod
     def _hash_version(abs_path: str) -> Optional[str]:
         import hashlib as _hashlib

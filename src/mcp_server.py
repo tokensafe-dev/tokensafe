@@ -832,7 +832,8 @@ TOOLS = [{'name': 'smart_read_file',
                                                      'mutate',
                                                      'graph',
                                                      'index',
-                                                     'preview']},
+                                                     'preview',
+                                                     'build']},
                                  'level': {'type': 'string'},
                                  'query': {'type': 'string'},
                                  'target': {'type': 'string'},
@@ -847,6 +848,8 @@ TOOLS = [{'name': 'smart_read_file',
                                  'batch': {'type': 'array',
                                            'items': {'type': 'object'},
                                            'description': 'preview: batch edits envelope (wire 1.5.0+)'},
+                                 'timeout_ms': {'type': 'integer',
+                                                'description': 'preview/build: per-call budget (§3/§14.3)'},
                                  'verify_action': {'type': 'string'},
                                  'payload': {'type': 'object'},
                                  'workspace_dir': {'type': 'string',
@@ -1922,6 +1925,7 @@ _OUMV_ACTIONS = {
     "graph": "oumv_graph",
     "index": "oumv_index",
     "preview": "oumv_preview",
+    "build": "oumv_build",
 }
 _HELPER_ACTIONS = {
     "sanitize": "sanitize_command",
@@ -2013,7 +2017,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         # wrong answer. Resolve the explicit root here and fail closed on a bad one.
         ws, ws_err = _oumv_workspace_arg(
             args,
-            allow_path=action in ("status", "observe", "understand", "verify", "graph", "index", "preview"),
+            allow_path=action in ("status", "observe", "understand", "verify", "graph", "index", "preview", "build"),
         )
         if ws_err:
             return _fallback_error("oumv", ws_err)
@@ -3416,6 +3420,21 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_preview", f"failed to preview OUMV mutation: {e}")
+
+    elif name == "oumv_build":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            cmd = str(args.get("command") or "").strip() or None
+            tgt = str(args.get("target") or "").strip() or None
+            tms = args.get("timeout_ms") if isinstance(args.get("timeout_ms"), int) else None
+            rt = str(args.get("runtime") or "auto").strip()
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_build", ws_err)
+            res = OUMVGateway.build(command=cmd, target=tgt, timeout_ms=tms, runtime=rt, workspace_dir=ws)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_build", f"failed to run OUMV build: {e}")
 
     elif name == "apply_edits":
         try:
