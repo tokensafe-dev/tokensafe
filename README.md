@@ -240,26 +240,30 @@ Full matrix and details: [docs/OUMV.md](docs/OUMV.md).
 
 ## Benchmarks
 
-### Measured agent matrix (Go, DeepSeek — 3 tasks × 5 runs × 3 arms)
+### Measured agent matrix v5 (Go, DeepSeek — 3 tasks × 5 runs × 3 arms, 200-file target)
 
 Real 12-assertion oracle re-run after every step; tokens and cost from the provider's `usage`
 payload. `baseline` = file/search/command tools, `tokensafe` = this product's MCP server
-(`scoped_search` → `smart_read_file` → `apply_edits` with inline `verify="auto"`), `oumv` = the
-OUMV protocol runtime. All three arms solve every session.
+(`smart_read_file(endpoint="POST /api/…")` in one call → `apply_edits` with the hunk and inline
+`verify="auto"`), `oumv` = the OUMV protocol runtime (`observe L3` on the endpoint →
+`applyEdit mode=patch`). The sandbox is the benchmark module plus **200 generated service
+files**; all three arms solve every session.
 
 | Arm | Solved | Mean steps | Mean input | Mean output | Cost/run |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `baseline` | 15/15 | 4.5 | 19,538 | 1,599 | $0.0035 |
-| `tokensafe` | 15/15 | 4.7 | 17,616 | **750** | **$0.0025** |
-| `oumv` | 15/15 | 4.3 | **12,323** | 1,735 | $0.0032 |
+| `baseline` | 15/15 | 5.6 | 26,412 | 1,670 | $0.0044 |
+| `tokensafe` | 15/15 | **3.1** | **8,177** | **414** | **$0.0012** |
+| `oumv` | 15/15 | 3.7 | 9,553 | 521 | $0.0014 |
 
-**vs baseline: −9.8% input tokens, −53.1% output tokens, −28.7% cost.** The output column is
-where the product's advantage is structural: `apply_edits` sends the hunk and its target
-snippet, so a one-line fix never resends the file — the other arms reread and rewrite whole
-files. Full method, per-task table, artifacts and limits (including the ±5% run-to-run noise at
-this sample size): [`OUMV_AGENT_MATRIX_V4.md`](https://github.com/tokensafe-dev/tokensafe-backend/blob/main/go/benchmark/OUMV_AGENT_MATRIX_V4.md)
+**vs baseline: −69.0% input tokens, −75.2% output tokens, −73.3% cost.** Tree size is the
+lever: on the same tasks with a 69-file tree the file-tool arm costs 22,356 input tokens per
+run and the two endpoint-keyed arms 8,823 / 9,756 — growing the tree by 200 files moves only
+`baseline` (+18%). Full method, per-task table, the small-target comparison, artifacts and
+limits (one model, ±5% run-to-run noise at this sample size):
+[`OUMV_AGENT_MATRIX_V5.md`](https://github.com/tokensafe-dev/tokensafe-backend/blob/main/go/benchmark/OUMV_AGENT_MATRIX_V5.md)
 in the backend repo, generated from the run JSON by
-`go/benchmark/render_agent_matrix.py`.
+`go/benchmark/render_agent_matrix.py`. The previous measured run is
+[`OUMV_AGENT_MATRIX_V4.md`](https://github.com/tokensafe-dev/tokensafe-backend/blob/main/go/benchmark/OUMV_AGENT_MATRIX_V4.md).
 
 ### Agent Usability Benchmarks (AUB) — Full-Stack Agent Velocity
 
