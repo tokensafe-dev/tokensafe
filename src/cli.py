@@ -952,21 +952,25 @@ def main(argv: Optional[List[str]] = None):
         budget = float(_flag("--budget", "1.0"))
         model = _flag("--model", "deepseek-chat")
         max_steps = int(_flag("--max-steps", "14"))
+        files = int(_flag("--files", "0"))
 
         if "--dry-run" in args:
             from src.bench.driver import PRICES
 
             sessions = len(task_ids) * len(arms) * runs
-            print(f"\n  dry run: {target} · tasks={task_ids} · arms={arms} · runs={runs} → {sessions} sessions")
+            print(f"\n  dry run: {target} · tasks={task_ids} · arms={arms} · runs={runs} → {sessions} sessions"
+                  + (f" · sandbox_files={files} (generated)" if files and target == "go" else ""))
             print(f"  model={model} prices={PRICES.get(model)} budget=${budget}")
             print("  no provider call was made\n")
             return
 
-        print(f"\n⚡ OUMV bench ({target}): tasks={task_ids} runs={runs} model={model} budget=${budget}\n")
+        print(f"\n⚡ OUMV bench ({target}): tasks={task_ids} runs={runs} model={model} budget=${budget}"
+              + (f" sandbox_files={files}" if files and target == "go" else "") + "\n")
         if target == "react":
             report = run_react_matrix(task_ids, arms, runs=runs, model=model, max_steps=max_steps, budget_usd=budget)
         else:
-            report = run_matrix(task_ids, arms, runs=runs, model=model, max_steps=max_steps, budget_usd=budget)
+            report = run_matrix(task_ids, arms, runs=runs, model=model, max_steps=max_steps, budget_usd=budget,
+                                files=files)
         paths = write_artifacts(report)
         if "--json" in args:
             import json as _json

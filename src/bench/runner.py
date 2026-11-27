@@ -18,8 +18,9 @@ def run_one(
     model: str = "deepseek-chat",
     max_steps: int = 14,
     budget_usd: float = 1.0,
+    files: int = 0,
 ) -> Dict[str, Any]:
-    ws = go_target.GoWorkspace(task_id)
+    ws = go_target.GoWorkspace(task_id, files=files)
     started = time.time()
     try:
         before = ws.oracle()
@@ -69,6 +70,7 @@ def run_matrix(
     model: str = "deepseek-chat",
     max_steps: int = 14,
     budget_usd: float = 1.0,
+    files: int = 0,
 ) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     spent = 0.0
@@ -80,7 +82,8 @@ def run_matrix(
                     aborted = f"global budget ${budget_usd} exhausted after ${spent:.4f}"
                     break
                 per_run_budget = max(budget_usd - spent, 0.01)
-                row = run_one(arm, task_id, model=model, max_steps=max_steps, budget_usd=per_run_budget)
+                row = run_one(arm, task_id, model=model, max_steps=max_steps,
+                              budget_usd=per_run_budget, files=files)
                 row["run"] = run_idx
                 results.append(row)
                 spent += float((row.get("usage") or {}).get("usd") or 0.0)
@@ -90,6 +93,7 @@ def run_matrix(
             break
     return {
         "target": "go",
+        "sandbox_files": files,
         "tasks": tasks,
         "arms": arms,
         "runs": runs,
@@ -260,6 +264,12 @@ def render_markdown(report: Dict[str, Any]) -> str:
         else "the real 12-assertion oracle (`go test ./benchmark -run TestGroundTruthOracleVanilla`)"
     )
     sandbox = "the `agent-dom` React benchmark sandbox" if target == "react" else "the `tokensafe-backend/go` module"
+    files = int(report.get("sandbox_files") or 0)
+    sandbox_line = (
+        f"- Each arm starts from a throwaway copy of {sandbox} with one deliberate regression"
+        + (f", plus {files} generated service files so discovery competes with a realistic tree" if files else "")
+        + "."
+    )
     lines = [
         f"# OUMV benchmark — {target} sandbox (measured)",
         "",
@@ -268,10 +278,12 @@ def render_markdown(report: Dict[str, Any]) -> str:
         "",
         "## Methodology",
         "",
-        f"- Each arm starts from a throwaway copy of {sandbox} with one deliberate regression.",
+        sandbox_line,
         f"- Correctness is {oracle}, re-run after every agent step.",
         "- Token and cost numbers come from the provider `usage` payload; prices are a pinned snapshot printed in the JSON artifact.",
-        "- `baseline` uses file/command tools only; `oumv` gets the same tools plus observe/getSource/applyEdit/understand served by the shipped OUMV adapter.",
+        "- `baseline` uses file/command tools only; `tokensafe` adds the shipped MCP tools (`smart_read_file` with "
+        "`endpoint=`, `scoped_search`, `apply_edits` with inline verify); `oumv` adds observe L3 (endpoint → handler "
+        "source + version) and `applyEdit` `mode=patch` (hunks) served by the shipped OUMV adapter.",
         "",
         "## Results",
         "",
@@ -324,8 +336,10 @@ def write_artifacts(report: Dict[str, Any], out_dir: Optional[Path] = None) -> D
     base.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     target = report.get("target", "go")
-    json_path = base / f"{target}-{stamp}.json"
-    md_path = base / f"{target}-{stamp}.md"
+    files = int(report.get("sandbox_files") or 0)
+    label = f"{target}-{files}f" if files else target
+    json_path = base / f"{label}-{stamp}.json"
+    md_path = base / f"{label}-{stamp}.md"
     json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     md_path.write_text(render_markdown(report), encoding="utf-8")
     return {"json": str(json_path), "markdown": str(md_path)}

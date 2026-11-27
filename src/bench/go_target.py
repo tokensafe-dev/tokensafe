@@ -75,11 +75,54 @@ def _run(cmd: List[str], cwd: Path, timeout: float = 240.0, env: Optional[Dict[s
     return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env)
 
 
+_FILLER_VERBS = ("List", "Create", "Pay", "Ship", "Cancel", "Get", "Update", "Delete")
+_FILLER_NOUNS = ("Products", "Orders", "Carts", "Invoices", "Users", "Coupons")
+
+
+def _generate_filler(root: Path, count: int) -> None:
+    """`count` generated service files so discovery competes with a real tree.
+
+    The oracle and the broken handler are untouched: only the amount of code a
+    workspace search or a read has to get through grows, which is the variable
+    matrix v4 could not measure on 69 files. Generated at copy time, never
+    committed — the product repo stays clean and the target is reproducible from
+    `--files N` alone.
+    """
+    pkg = root / "benchmark" / "sandboxes" / "gen"
+    pkg.mkdir(parents=True, exist_ok=True)
+    for idx in range(count):
+        noun = _FILLER_NOUNS[idx % len(_FILLER_NOUNS)]
+        verb = _FILLER_VERBS[(idx // len(_FILLER_NOUNS)) % len(_FILLER_VERBS)]
+        name = f"Svc{idx:03d}"
+        route = f"/api/{noun.lower()}"
+        (pkg / f"svc{idx:03d}.go").write_text(
+            f'''package gen
+
+// Generated benchmark fixture — an unrelated service that mirrors the
+// {noun.lower()} API surface ({verb}{noun} -> {route}) and mentions
+// StatusCreated / StatusConflict / CONFLICT: so a status-code search has to
+// distinguish a placeholder from the real handler.
+
+import "net/http"
+
+// {name} is not mounted anywhere; it exists so discovery has real competition.
+type {name} struct{{}}
+
+// {verb}{noun} is a placeholder for {route}.
+func (h {name}) {verb}{noun}(w http.ResponseWriter, r *http.Request) {{
+\tw.WriteHeader(http.StatusOK)
+}}
+''',
+            encoding="utf-8",
+        )
+
+
 class GoWorkspace:
-    def __init__(self, task_id: str):
+    def __init__(self, task_id: str, files: int = 0):
         if task_id not in TASKS:
             raise ValueError(f"unknown task {task_id}; valid: {', '.join(TASKS)}")
         self.task_id = task_id
+        self.files = int(files or 0)
         self.dir = Path(tempfile.mkdtemp(prefix=f"oumv-bench-{task_id}-")) / "go"
         self.dir.mkdir(parents=True)
         for item in COPY_ITEMS:
@@ -89,6 +132,8 @@ class GoWorkspace:
                 shutil.copytree(src, dst)
             else:
                 shutil.copy2(src, dst)
+        if self.files:
+            _generate_filler(self.dir, self.files)
         # The runtime must serve the *workspace* code: build the helper inside the
         # copied module and rebuild it when an edit changes the sources, otherwise
         # oumv/verify would keep reporting the pristine app's behaviour.
@@ -471,18 +516,33 @@ OUMV_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [
             "name": "oumv_applyEdit",
             "description": (
                 "OUMV guarded edit: applies only if `expectedVersion` matches the file on disk. "
-                "mode='symbol' replaces one declaration (cheaper than the whole file)."
+                "mode='patch' splices hunks (cheapest — the file is never re-sent); mode='symbol' "
+                "replaces one declaration; mode='replace' rewrites the whole file."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "replacement": {"type": "string", "description": "New file content, or the new declaration body for mode='symbol'"},
-                    "expectedVersion": {"type": "string", "description": "sha256 version from oumv_getSource"},
-                    "mode": {"type": "string", "enum": ["replace", "symbol"]},
+                    "expectedVersion": {"type": "string", "description": "version from oumv_observe L3 or oumv_getSource"},
+                    "mode": {"type": "string", "enum": ["patch", "symbol", "replace"]},
+                    "hunks": {
+                        "type": "array",
+                        "description": "mode='patch': exact snippets to splice, applied in order",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target": {"type": "string", "description": "Exact snippet from the source"},
+                                "replacement": {"type": "string", "description": "Replacement snippet"},
+                                "startLine": {"type": "integer"},
+                                "endLine": {"type": "integer"},
+                            },
+                            "required": ["target", "replacement"],
+                        },
+                    },
+                    "replacement": {"type": "string", "description": "New content, or the new declaration body for mode='symbol'"},
                     "symbol": {"type": "string", "description": "Declaration to replace when mode='symbol'"},
                 },
-                "required": ["path", "replacement", "expectedVersion"],
+                "required": ["path", "expectedVersion"],
             },
         },
     },
@@ -587,14 +647,15 @@ def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
         tools.update({
             "oumv_observe": lambda level, target="": ws.oumv("oumv/observe", {"level": level, "target": target}),
             "oumv_getSource": lambda path, symbol="": ws.oumv("oumv/getSource", {"path": path, "symbol": symbol}),
-            "oumv_applyEdit": lambda path, replacement, expectedVersion, mode="", symbol="": ws.oumv(
+            "oumv_applyEdit": lambda path, expectedVersion, mode="", replacement="", symbol="", hunks=None: ws.oumv(
                 "oumv/applyEdit",
                 {
                     "path": path,
-                    "replacement": replacement,
                     "expectedVersion": expectedVersion,
                     **({"mode": mode} if mode else {}),
+                    **({"replacement": replacement} if replacement else {}),
                     **({"symbol": symbol} if symbol else {}),
+                    **({"hunks": hunks} if hunks else {}),
                 },
             ),
             "oumv_verify": lambda target, payload=None: ws.oumv(
@@ -630,12 +691,15 @@ SYSTEM_OUMV = (
     "You are a senior Go engineer working in a small Go module that exposes the OUMV runtime. "
     "The bug report includes a repro; use it to go straight to the right handler instead of guessing payloads. "
     "Use this loop and stop as soon as the oracle passes: (1) oumv_observe L3 with the failing endpoint target "
-    "(e.g. \"POST /api/products\") — it returns the handler body, its workspace path and the sha256 OCC version; "
-    "(2) oumv_getSource for that path once to get the full file bytes; (3) oumv_applyEdit with the fixed file and "
-    "the version from step 1 or 2 (it rejects a stale version); (4) confirm with oumv_verify when the repro is a "
-    "single request. When the failure needs state created by earlier requests, run the oracle with run_command "
-    "instead — oumv_verify intentionally starts a fresh app per call. Do not call list_files/read_file unless an "
-    "OUMV tool returns an error. Tests are read-only."
+    "(e.g. \"POST /api/products\") — ONE call returns the handler source, its workspace path, startLine/endLine and "
+    "the sha256 OCC version; (2) oumv_applyEdit with that path + expectedVersion and mode=\"patch\", "
+    "hunks=[{target: the exact line(s) you change, replacement: the fix, startLine: the line number from step 1, "
+    "endLine: the same line}] — scoping the hunk keeps it unique when the snippet appears elsewhere in the file; "
+    "the file is never re-sent and the edit is rejected on a "
+    "stale version; (3) if the result is an error, read the reported reason and repeat (2); (4) run_command to run "
+    "the oracle (oumv_verify starts a fresh app per call, so use it only for a single stateless request). "
+    "Do not fetch whole files with getSource and do not use write_file: the patch IS the edit. Do not call "
+    "list_files/read_file unless an OUMV tool returns an error. Tests are read-only."
 )
 
 
