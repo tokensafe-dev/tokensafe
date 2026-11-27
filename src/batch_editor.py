@@ -320,7 +320,12 @@ def _apply_hunk_to_text(
                 occ.append(str(s_idx + sub_text.count("\n", 0, pos) + 1))
                 scan = pos + 1
             locs = f" (near lines {', '.join(occ)})" if occ else ""
-            return None, f"Target occurs {count} times within lines {s_idx+1}..{e_idx}{locs}. Specify replace_all=True or narrow the range."
+            retry = ""
+            if occ:
+                first = int(occ[0])
+                span = max(1, target.count("\n") + 1)
+                retry = f" Retry with start_line={first}, end_line={first + span - 1}."
+            return None, f"Target occurs {count} times within lines {s_idx+1}..{e_idx}{locs}.{retry} Or set replace_all=True."
         prepared_replacement = _normalize_eol(replacement, nl)
         new_sub = sub_text.replace(match_target, prepared_replacement) if replace_all else sub_text.replace(match_target, prepared_replacement, 1)
         new_lines = lines[:s_idx] + [new_sub] + lines[e_idx:]
@@ -339,7 +344,12 @@ def _apply_hunk_to_text(
             if match_target in l:
                 occ_lines.append(str(i + 1))
         locs = f"lines {', '.join(occ_lines[:5])}" if occ_lines else "multiple locations"
-        return None, f"Target occurs {count} times (near {locs}). Specify replace_all=True or pass start_line/end_line."
+        retry = ""
+        if occ_lines:
+            first = int(occ_lines[0])
+            span = max(1, target.count("\n") + 1)
+            retry = f" Retry with start_line={first}, end_line={first + span - 1}."
+        return None, f"Target occurs {count} times (near {locs}).{retry} Or set replace_all=True."
 
     prepared_replacement = _normalize_eol(replacement, nl)
     new_content = content.replace(match_target, prepared_replacement) if replace_all else content.replace(match_target, prepared_replacement, 1)

@@ -806,6 +806,33 @@ TOOLS = [{'name': 'smart_read_file',
                                  'max_edge': {'type': 'integer'},
                                  'prompt': {'type': 'string'}}}}]
 
+
+def _tighten_apply_edits_schema() -> None:
+    """Put the scoping rule where the model reads it on every request.
+
+    The 2026-11-27 matrix left one outlier: the model dropped start_line/end_line,
+    got -32011 target_not_unique, and paid a re-read before retrying. The runtime
+    now answers with occurrence lines and suggested hunks, and the tool text says
+    where the range comes from, so the retry is a one-parameter fix.
+    """
+    for tool in TOOLS:
+        if tool.get("name") != "apply_edits":
+            continue
+        hunks = tool["inputSchema"]["properties"]["edits"]["items"]["properties"]["hunks"]
+        hunks["description"] = (
+            "Replacement hunks. Copy start_line/end_line from the read slice header "
+            "(`// --- Lx-Ly`): a target that occurs more than once is rejected with the "
+            "occurrence lines and a scoped retry, and a ranged hunk is never ambiguous. "
+            "The tool auto-scopes when the last read window contains exactly one occurrence."
+        )
+        hunks["items"]["properties"]["start_line"]["description"] = (
+            "1-based first line to search; take it from the slice header (// --- Lx-Ly)"
+        )
+        hunks["items"]["properties"]["end_line"]["description"] = "1-based last line to search"
+
+
+_tighten_apply_edits_schema()
+
 def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024:
         return f"{size_bytes} B"
@@ -1139,6 +1166,113 @@ def _is_binary_file(path: str, probe_bytes: int = 4096) -> bool:
         return b"\x00" in chunk
     except OSError:
         return False
+
+
+# Line windows this session actually delivered per file. A batch hunk with no
+# start_line/end_line can be scoped to one of them when a target repeats: the
+# agent just read those lines, so an occurrence outside them is not the one it
+# means. Only a window containing exactly one occurrence qualifies — the tool
+# never chooses between two candidates.
+_LAST_READ_WINDOWS: Dict[str, List[Tuple[int, int]]] = {}
+_LAST_READ_WINDOWS_LOCK = threading.Lock()
+_MAX_READ_WINDOWS = 8
+
+
+def _remember_read_window(path: str, start: Any, end: Any) -> None:
+    try:
+        first, last = int(start), int(end)
+    except (TypeError, ValueError):
+        return
+    if not path or first < 1 or last < first:
+        return
+    try:
+        key = os.path.realpath(path)
+    except OSError:
+        key = os.path.abspath(path)
+    with _LAST_READ_WINDOWS_LOCK:
+        windows = _LAST_READ_WINDOWS.setdefault(key, [])
+        entry = (first, last)
+        if entry in windows:
+            windows.remove(entry)
+        windows.append(entry)
+        del windows[:-_MAX_READ_WINDOWS]
+
+
+def _remember_rendered_windows(path: str, text: str) -> None:
+    """Records every `// --- Lx-Ly` slice header in a rendered read (symbol hits,
+    cross-file inlines). The header names the file when it is not the one read."""
+    for match in re.finditer(r"// --- L(\d+)-L(\d+)(?: \(([^,()]+),)?", text or ""):
+        target = os.path.join(os.path.dirname(path), match.group(3)) if match.group(3) else path
+        _remember_read_window(target, match.group(1), match.group(2))
+
+
+def _autoscope_edits(edits: Any, cwd: str) -> Tuple[Any, List[str]]:
+    """Scopes unambiguous hunks to the window the agent last read.
+
+    Returns (edits, notes). A hunk is touched only when it has no range, its
+    target repeats in the file, and exactly one remembered window contains it.
+    """
+    if not isinstance(edits, list):
+        return edits, []
+    notes: List[str] = []
+    out: List[Any] = []
+    for edit in edits:
+        if not isinstance(edit, dict) or not isinstance(edit.get("hunks"), list) or not edit.get("path"):
+            out.append(edit)
+            continue
+        rel = str(edit.get("path"))
+        abs_path = rel if os.path.isabs(rel) else os.path.join(cwd, rel)
+        key = os.path.realpath(abs_path)
+        with _LAST_READ_WINDOWS_LOCK:
+            windows = list(_LAST_READ_WINDOWS.get(key) or [])
+        if not windows:
+            out.append(edit)
+            continue
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+        except OSError:
+            out.append(edit)
+            continue
+        lines = content.splitlines()
+        new_hunks: List[Any] = []
+        changed = False
+        for hunk in edit["hunks"]:
+            if not isinstance(hunk, dict) or not isinstance(hunk.get("target"), str) or not hunk["target"]:
+                new_hunks.append(hunk)
+                continue
+            if hunk.get("start_line") is not None or hunk.get("end_line") is not None:
+                new_hunks.append(hunk)
+                continue
+            target = hunk["target"]
+            if content.count(target) <= 1:
+                new_hunks.append(hunk)
+                continue
+            candidates = []
+            for start, end in windows:
+                if start > len(lines):
+                    continue
+                window_text = "\n".join(lines[start - 1:min(end, len(lines))])
+                if window_text.count(target) == 1:
+                    candidates.append((start, min(end, len(lines))))
+            if len(candidates) == 1:
+                scoped = dict(hunk)
+                scoped["start_line"], scoped["end_line"] = candidates[0]
+                new_hunks.append(scoped)
+                changed = True
+                notes.append(
+                    f"`{rel}`: hunk auto-scoped to lines {candidates[0][0]}-{candidates[0][1]} "
+                    "(the target repeats; it occurs once in the window last read)"
+                )
+            else:
+                new_hunks.append(hunk)
+        if changed:
+            clone = dict(edit)
+            clone["hunks"] = new_hunks
+            out.append(clone)
+        else:
+            out.append(edit)
+    return out, notes
 
 
 def _read_line_slice(path: str, start_line: Optional[int], end_line: Optional[int]) -> Tuple[Optional[str], Optional[str]]:
@@ -1498,6 +1632,7 @@ def _render_endpoint_slice(
             f"ver={version} via {hit.via}]"
         )
         body_lines, first, last = hit.body, hit.line, hit.end_line
+        body_file = hit.file
         if hit.handler_kind == "named" and hit.handler:
             short = hit.handler.split(".")[-1]
             decls = [d for d in index.get(short, []) if d[0] != hit.file] or index.get(short, [])
@@ -1507,6 +1642,7 @@ def _render_endpoint_slice(
                     with open(os.path.join(root, file), "r", encoding="utf-8", errors="replace") as handle:
                         src = handle.read().splitlines()
                     body_lines, first, last = src[start - 1:end], start, end
+                    body_file = file
                     head = (
                         f"// [TS endpoint {prefix}{verb} {route} → handler {short} in {file} "
                         f"L{start}-L{end} ver={route_index.file_version(os.path.join(root, file))}]"
@@ -1524,6 +1660,7 @@ def _render_endpoint_slice(
             entries.append(f"// calls: {callees}")
         entries.append(f"// --- L{first}-L{last}")
         entries.extend(body_lines)
+        _remember_read_window(os.path.join(root, body_file), first, last)
     delivered = "\n".join(entries) + "\n"
     if tracker is not None:
         try:
@@ -1980,6 +2117,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             slice_lines = (content or "").splitlines()
             slice_first = start_line if start_line is not None else 1
             slice_last = slice_first + len(slice_lines) - 1 if slice_lines else max(1, slice_first - 1)
+            _remember_read_window(path, slice_first, slice_last)
             range_label = f"{slice_first}-{slice_last}" if slice_lines else str(slice_first)
             prefetch_block = ""
             if not sym_clean or eff_dep_mode == "full":
@@ -2017,6 +2155,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 scope_plan = None
             if scope_plan and scope_plan["status"] in ("body_here", "absent"):
                 anchored = _render_symbol_scope_miss(scope_plan, path, symbol, raw_for_scope)
+                _remember_rendered_windows(path, anchored)
                 tracker.record_event(
                     session_id=_mcp_session_id(),
                     event_type="SYMBOL_TEXT_ANCHOR",
@@ -3102,6 +3241,11 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             if is_plugin_or_system_dir(cwd):
                 return _fallback_error("apply_edits", f"refusing to run apply_edits in system root or plugin dir '{cwd}'")
 
+            # Deterministic recovery for a repeated hunk target: if the session just
+            # read a window that contains exactly one occurrence, scope the hunk to
+            # it instead of handing the model another round trip.
+            edits, scope_notes = _autoscope_edits(edits, cwd)
+
             res = execute_batch_edits(
                 edits=edits,
                 best_effort=best_effort,
@@ -3137,6 +3281,8 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                     is_cr = f.get("is_create", False)
                     label = "created" if is_cr else f"{h_cnt} hunk(s)"
                     lines.append(f"  - `{f.get('path')}` ({label})")
+            for note in scope_notes:
+                lines.append(f"  ↳ {note}")
 
             if "verify" in res:
                 v = res["verify"]

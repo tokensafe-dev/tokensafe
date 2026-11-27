@@ -117,6 +117,48 @@ func (h {name}) {verb}{noun}(w http.ResponseWriter, r *http.Request) {{
         )
 
 
+def choose_scoped_hunk(
+    hunks: Optional[List[Dict[str, Any]]],
+    error: Dict[str, Any],
+    window: Optional[Tuple[int, int]],
+) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, int]]]:
+    """Pick a scoped retry for `-32011 target_not_unique`, or None.
+
+    The retry is deterministic: it is chosen only when exactly one reported
+    occurrence falls inside the line window the agent last read. Zero or two
+    candidates mean the tool refuses to guess and hands the error back.
+    """
+    if not isinstance(error, dict) or error.get("reason") != "target_not_unique":
+        return None
+    if not window or not isinstance(hunks, list) or not hunks:
+        return None
+    try:
+        start, end = int(window[0]), int(window[1])
+    except (TypeError, ValueError):
+        return None
+    if end < start:
+        return None
+    lines = []
+    for value in error.get("lines") or []:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            lines.append(int(value))
+    inside = [line for line in lines if start <= line <= end]
+    if len(inside) != 1:
+        return None
+    index = error.get("hunk")
+    index = int(index) if isinstance(index, (int, float)) and not isinstance(index, bool) else 0
+    if index < 0 or index >= len(hunks):
+        return None
+    line = inside[0]
+    target = str(hunks[index].get("target") or "")
+    scope_start = max(start, line - 2)
+    scope_end = min(end, line + target.count("\n") + 2)
+    scoped = [dict(hunk) for hunk in hunks]
+    scoped[index]["startLine"] = scope_start
+    scoped[index]["endLine"] = scope_end
+    return scoped, {"hunk": index, "startLine": scope_start, "endLine": scope_end}
+
+
 class GoWorkspace:
     def __init__(self, task_id: str, files: int = 0):
         if task_id not in TASKS:
@@ -140,6 +182,10 @@ class GoWorkspace:
         self.helper = self.dir.parent / "benchoumv"
         self._helper_built_at = 0.0
         self._mcp = None
+        # Last line window the agent actually read per file (observe L3 / getSource).
+        # A hunk that repeats can be scoped to it without guessing: the caller just
+        # read those lines, so an occurrence outside them is not the one it means.
+        self._read_windows: Dict[str, Tuple[int, int]] = {}
         self.break_build()
 
     # ---- task setup -------------------------------------------------------
@@ -299,7 +345,78 @@ class GoWorkspace:
             return {"error": f"invalid JSON from helper: {line[-1][:200]}"}
         if payload.get("error"):
             return {"error": payload["error"]}
-        return payload.get("result")
+        result = payload.get("result")
+        if isinstance(result, dict):
+            self._remember_read_window(method, result)
+        return result
+
+    # ---- read windows & scoped retries ------------------------------------
+    def _window_key(self, path: str) -> str:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self.dir / candidate
+        return os.path.normpath(str(candidate))
+
+    def _remember_read_window(self, method: str, result: Dict[str, Any]) -> None:
+        if method == "oumv/observe" and isinstance(result.get("data"), dict):
+            data = result["data"]
+            source = "data.source" in data
+        elif method == "oumv/getSource" and "source" in result:
+            data = result
+            source = True
+        else:
+            return
+        if not source:
+            return
+        path = data.get("path")
+        start, end = data.get("startLine"), data.get("endLine")
+        if not path or not isinstance(start, int) or not isinstance(end, int) or end < start:
+            return
+        self._read_windows[self._window_key(str(path))] = (start, end)
+
+    def apply_edit_scoped(
+        self,
+        path: str,
+        expected_version: str,
+        mode: str = "",
+        replacement: str = "",
+        symbol: str = "",
+        hunks: Optional[List[Dict[str, Any]]] = None,
+    ) -> Any:
+        """applyEdit with one deterministic recovery from -32011 target_not_unique.
+
+        If the model omitted startLine/endLine and the target repeats, the runtime
+        answers with the occurrence lines. When exactly one of them lies inside the
+        window this agent just read, retry with that window. Two candidates are
+        never resolved by guessing: the error goes back to the model instead.
+        """
+        params: Dict[str, Any] = {
+            "path": path,
+            "expectedVersion": expected_version,
+            **({"mode": mode} if mode else {}),
+            **({"replacement": replacement} if replacement else {}),
+            **({"symbol": symbol} if symbol else {}),
+            **({"hunks": hunks} if hunks else {}),
+        }
+        result = self.oumv("oumv/applyEdit", params)
+        error = result.get("error") if isinstance(result, dict) else None
+        if mode == "patch" and isinstance(error, dict) and error.get("code") == -32011:
+            data = dict(error.get("data") or {})
+            if not data.get("reason") and "not_unique" in str(error.get("message", "")):
+                data["reason"] = "target_not_unique"
+            window = self._read_windows.get(self._window_key(path))
+            chosen = choose_scoped_hunk(hunks, data, window)
+            if chosen is not None:
+                scoped_hunks, scope = chosen
+                retry = self.oumv("oumv/applyEdit", {**params, "hunks": scoped_hunks})
+                if isinstance(retry, dict) and not retry.get("error"):
+                    annotated = dict(retry)
+                    annotated["autoScoped"] = {
+                        **scope,
+                        "source": "unique occurrence inside the last observe L3 window",
+                    }
+                    return annotated
+        return result
 
     def tokensafe_tool_schemas(self) -> Optional[List[Dict[str, Any]]]:
         """The product's own `tools/list`, renamed to the arm's stable aliases.
@@ -527,14 +644,21 @@ OUMV_TOOLS: List[Dict[str, Any]] = BASE_TOOLS + [
                     "mode": {"type": "string", "enum": ["patch", "symbol", "replace"]},
                     "hunks": {
                         "type": "array",
-                        "description": "mode='patch': exact snippets to splice, applied in order",
+                        "description": (
+                            "mode='patch': exact snippets to splice, applied in order. Copy startLine/endLine "
+                            "from the L3 slice: without them a snippet that occurs more than once is rejected "
+                            "with -32011 (the error carries the occurrence lines and a scoped retry)."
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "target": {"type": "string", "description": "Exact snippet from the source"},
                                 "replacement": {"type": "string", "description": "Replacement snippet"},
-                                "startLine": {"type": "integer"},
-                                "endLine": {"type": "integer"},
+                                "startLine": {
+                                    "type": "integer",
+                                    "description": "1-based first line to search, from observe L3; makes a repeated target unique",
+                                },
+                                "endLine": {"type": "integer", "description": "1-based last line to search"},
                             },
                             "required": ["target", "replacement"],
                         },
@@ -647,16 +771,13 @@ def registry(ws: GoWorkspace, arm: str) -> Dict[str, Any]:
         tools.update({
             "oumv_observe": lambda level, target="": ws.oumv("oumv/observe", {"level": level, "target": target}),
             "oumv_getSource": lambda path, symbol="": ws.oumv("oumv/getSource", {"path": path, "symbol": symbol}),
-            "oumv_applyEdit": lambda path, expectedVersion, mode="", replacement="", symbol="", hunks=None: ws.oumv(
-                "oumv/applyEdit",
-                {
-                    "path": path,
-                    "expectedVersion": expectedVersion,
-                    **({"mode": mode} if mode else {}),
-                    **({"replacement": replacement} if replacement else {}),
-                    **({"symbol": symbol} if symbol else {}),
-                    **({"hunks": hunks} if hunks else {}),
-                },
+            "oumv_applyEdit": lambda path, expectedVersion, mode="", replacement="", symbol="", hunks=None: ws.apply_edit_scoped(
+                path,
+                expectedVersion,
+                mode=mode,
+                replacement=replacement,
+                symbol=symbol,
+                hunks=hunks,
             ),
             "oumv_verify": lambda target, payload=None: ws.oumv(
                 "oumv/verify", {"target": target, "action": "probe", "payload": payload}
