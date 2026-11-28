@@ -171,6 +171,81 @@ ts_print_no_python_guidance() {
 }
 # <<< bootstrap-python <<<
 
+# >>> windows-cli-shim >>>
+# cmd.exe and PowerShell cannot run a POSIX symlink or a shebang script, and
+# MSYS `ln -s` copies files instead of linking them, so `curl | bash` used to
+# leave a Windows machine with a working engine and no `tokensafe` command at
+# all: every "run tokensafe login" hint then failed with "not recognized".
+# This block writes native .cmd shims and puts their directory on the user PATH,
+# preserving REG_EXPAND_SZ entries and broadcasting WM_SETTINGCHANGE so terminals
+# opened after the install see the new PATH.
+
+ts_install_windows_cmd_shim() {
+    local interpreter="$1" cli_script="$2" bin_dir="$3"
+    local win_interpreter="${interpreter}" win_cli="${cli_script}" win_bin="${bin_dir}"
+
+    # Only POSIX-style paths need translating; `node` (a bare command name) must
+    # stay as it is so the shim resolves it from PATH.
+    if command -v cygpath >/dev/null 2>&1; then
+        case "${interpreter}" in /*) win_interpreter=$(cygpath -w "${interpreter}") ;; esac
+        case "${cli_script}" in /*) win_cli=$(cygpath -w "${cli_script}") ;; esac
+        case "${bin_dir}" in /*) win_bin=$(cygpath -w "${bin_dir}") ;; esac
+    fi
+
+    mkdir -p "${bin_dir}"
+    # A bare command name (the Node fallback) stays unquoted, an absolute
+    # Windows path is quoted so spaces in a profile name survive.
+    local interpreter_token="${win_interpreter}"
+    case "${win_interpreter}" in
+        *:*) interpreter_token="\"${win_interpreter}\"" ;;
+    esac
+    # CRLF: cmd.exe parses batch files line by line and LF-only scripts break on
+    # the first label continuation.
+    printf '@echo off\r\n%s "%s" %%*\r\n' "${interpreter_token}" "${win_cli}" > "${bin_dir}/tokensafe.cmd"
+    cp "${bin_dir}/tokensafe.cmd" "${bin_dir}/agy-tokens.cmd"
+
+    if ts_windows_path_add "${win_bin}"; then
+        echo "  Created ${bin_dir}/tokensafe.cmd and added ${win_bin} to the PATH for new terminals."
+    else
+        echo "  Created ${bin_dir}/tokensafe.cmd — add ${win_bin} to PATH to run it as 'tokensafe'."
+    fi
+}
+
+# Adds a directory to the user PATH. Returns non-zero when PowerShell is
+# unavailable, so the caller can print the manual step instead.
+ts_windows_path_add() {
+    local win_dir="$1"
+    command -v powershell >/dev/null 2>&1 || return 1
+
+    TS_PATH_ADD="${win_dir}" powershell -NoProfile -NonInteractive -Command - >/dev/null 2>&1 <<'POWERSHELL'
+$dir = $env:TS_PATH_ADD
+if (-not $dir) { exit 1 }
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+if (-not $key) { exit 1 }
+$current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+if ($current -notlike "*$dir*") {
+    $trimmed = $current.TrimEnd(';')
+    $updated = if ($trimmed) { $trimmed + ';' + $dir } else { $dir }
+    $key.SetValue('Path', $updated, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+}
+$key.Close()
+$source = @"
+using System;
+using System.Runtime.InteropServices;
+public static class TokenSafeNative {
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+}
+"@
+if (Add-Type -TypeDefinition $source -ErrorAction SilentlyContinue) {
+    $result = [UIntPtr]::Zero
+    [void][TokenSafeNative]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+}
+exit 0
+POWERSHELL
+}
+# <<< windows-cli-shim <<<
+
 if ! ts_resolve_python; then
     ts_print_no_python_guidance
     exit 1
@@ -185,6 +260,10 @@ PYTHON_BIN="${TS_PYTHON}"
 echo "  Making CLI executable..."
 chmod +x "${SCRIPT_DIR}/bin/tokensafe"
 chmod +x "${SCRIPT_DIR}/bin/agy-tokens"
+
+if ts_is_windows; then
+    ts_install_windows_cmd_shim "${PYTHON_BIN}" "${SCRIPT_DIR}/bin/tokensafe" "${HOME}/.local/bin"
+fi
 
 echo ""
 echo "✅ TokenSafe successfully installed!"

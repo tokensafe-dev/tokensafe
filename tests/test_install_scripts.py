@@ -35,6 +35,8 @@ REPO_INSTALLER = PROJECT_ROOT / "install.sh"
 SITE_INSTALLER = PROJECT_ROOT.parent / "tokensafe-site" / "public" / "install.sh"
 BLOCK_START = "# >>> bootstrap-python >>>"
 BLOCK_END = "# <<< bootstrap-python <<<"
+SHIM_START = "# >>> windows-cli-shim >>>"
+SHIM_END = "# <<< windows-cli-shim <<<"
 
 FAKE_PYTHON = """#!{python}
 import os, shutil, sys
@@ -93,11 +95,11 @@ exit 9009
 """
 
 
-def extract_block(path):
+def extract_block(path, start=BLOCK_START, end=BLOCK_END):
     text = path.read_text(encoding="utf-8")
-    start = text.index(BLOCK_START)
-    end = text.index(BLOCK_END) + len(BLOCK_END)
-    return text[start:end]
+    begin = text.index(start)
+    stop = text.index(end) + len(end)
+    return text[begin:stop]
 
 
 def write_executable(path, content):
@@ -111,6 +113,7 @@ class InstallerBootstrapTest(unittest.TestCase):
         if not self.bash:
             self.skipTest("bash is not available")
         self.block = extract_block(REPO_INSTALLER)
+        self.shim_block = extract_block(REPO_INSTALLER, SHIM_START, SHIM_END)
         self.tmp = Path(tempfile.mkdtemp(prefix="ts-install-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.bin = self.tmp / "bin"
@@ -131,7 +134,7 @@ class InstallerBootstrapTest(unittest.TestCase):
 
     def run_block(self, body, extra_env=None, path_prefix=None):
         lib = self.tmp / "lib.sh"
-        lib.write_text(self.block + "\n", encoding="utf-8")
+        lib.write_text(self.block + "\n" + self.shim_block + "\n", encoding="utf-8")
         script = "set -eu\nsource \"$1\"\n" + textwrap.dedent(body)
         env = {
             "HOME": str(self.home),
@@ -254,6 +257,74 @@ class InstallerBootstrapTest(unittest.TestCase):
         self.assertIn("does not run CPython 3.10+", result.stdout)
         self.assertNotIn("RESOLVED", result.stdout)
 
+    # -- the Windows command ------------------------------------------------
+
+    def test_windows_shim_is_a_native_cmd_file_on_the_path(self):
+        """`tokensafe` used to be a POSIX symlink: cmd.exe never saw a command."""
+        local_bin = self.tmp / "local" / "bin"
+        powershell_log = self.tmp / "powershell-path.txt"
+        write_executable(
+            self.bin / "cygpath",
+            "#!/bin/sh\n"
+            'printf "C:%s\\n" "$2" | tr "/" "\\\\"\n',
+        )
+        write_executable(
+            self.bin / "powershell",
+            f'#!/bin/sh\ncat >/dev/null\nprintf "%s\\n" "$TS_PATH_ADD" > "{powershell_log}"\n',
+        )
+        self.uname_stub("MINGW64_NT-10.0-26100")
+
+        result = self.run_block(
+            """
+            ts_install_windows_cmd_shim /opt/py/python.exe /opt/ts/bin/tokensafe "$1"
+            """.replace("$1", str(local_bin))
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tokensafe.cmd", result.stdout)
+
+        shim = local_bin / "tokensafe.cmd"
+        raw = shim.read_bytes()
+        self.assertIn(b"@echo off\r\n", raw)
+        self.assertIn(b"%*", raw)
+        text = raw.decode()
+        self.assertIn(r'"C:\opt\py\python.exe"', text)
+        self.assertIn(r'"C:\opt\ts\bin\tokensafe"', text)
+        self.assertTrue((local_bin / "agy-tokens.cmd").is_file())
+        self.assertTrue(powershell_log.is_file())
+        self.assertIn("C:\\", powershell_log.read_text())
+
+    def test_windows_shim_keeps_a_bare_command_name_untranslated(self):
+        """The Node fallback passes `node`; cygpath must not turn it into a path."""
+        write_executable(
+            self.bin / "cygpath",
+            "#!/bin/sh\n"
+            'printf "C:%s\\n" "$2" | tr "/" "\\\\"\n',
+        )
+        write_executable(self.bin / "powershell", "#!/bin/sh\ncat >/dev/null\nexit 0\n")
+
+        result = self.run_block(
+            'ts_install_windows_cmd_shim node /opt/ts/bin/tokensafe.js "$1"'.replace(
+                "$1", str(self.tmp / "local" / "bin")
+            )
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = (self.tmp / "local" / "bin" / "tokensafe.cmd").read_text()
+        self.assertIn('node "C:', text)
+        self.assertNotIn("C:\\node", text)
+
+    def test_windows_shim_reports_the_manual_step_without_powershell(self):
+        result = self.run_block(
+            'ts_install_windows_cmd_shim /opt/py/python.exe /opt/ts/bin/tokensafe "$1"'.replace(
+                "$1", str(self.tmp / "local" / "bin")
+            )
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("add", result.stdout)
+        self.assertIn("to PATH", result.stdout)
+
     # -- the copies --------------------------------------------------------
 
     def test_both_installers_carry_the_same_block(self):
@@ -261,7 +332,12 @@ class InstallerBootstrapTest(unittest.TestCase):
         self.assertGreater(len(repo_block), 2000)
         if not SITE_INSTALLER.is_file():
             self.skipTest(f"sibling checkout not present: {SITE_INSTALLER}")
-        self.assertEqual(repo_block, extract_block(SITE_INSTALLER))
+        for start, end in ((BLOCK_START, BLOCK_END), (SHIM_START, SHIM_END)):
+            with self.subTest(block=start):
+                self.assertEqual(
+                    extract_block(REPO_INSTALLER, start, end),
+                    extract_block(SITE_INSTALLER, start, end),
+                )
 
     def test_site_installer_no_longer_blames_cryptography_blindly(self):
         if not SITE_INSTALLER.is_file():
