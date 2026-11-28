@@ -313,3 +313,52 @@ func main() {
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_next_app_gets_a_route_handler_and_a_clean_revert(tmp_path):
+    """Next inject: one generated Route Handler, no component patching, byte-clean revert."""
+    import json as _json
+    from src import auto_inject
+
+    (tmp_path / "package.json").write_text(
+        _json.dumps({
+            "name": "next-app",
+            "dependencies": {"next": "15.0.0", "react": "19.0.0", "react-dom": "19.0.0"},
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "app").mkdir()
+
+    plan = auto_inject.plan(str(tmp_path))
+    kinds = [action["kind"] for action in plan["actions"]]
+    assert "next_route_handler" in kinds
+    assert "frontend_zero_footprint" not in kinds
+    next_action = next(action for action in plan["actions"] if action["kind"] == "next_route_handler")
+    assert next_action["writes_repo"] is True
+    assert next_action["db"]["sandbox"] == "none"
+
+    applied = auto_inject.apply(str(tmp_path))
+    wrote = [action for action in applied["actions"] if action["kind"] == "next_route_handler"]
+    assert wrote and wrote[0]["status"] == "patched"
+    route = tmp_path / "app" / "api" / "tokensafe" / "route.ts"
+    assert route.is_file()
+    assert "createNextRouteHandlers" in route.read_text(encoding="utf-8")
+
+    reverted = auto_inject.revert(str(tmp_path))
+    assert reverted["next"]["status"] == "reverted"
+    assert not route.exists()
+    assert not (tmp_path / "app" / "api" / "tokensafe").exists()
+
+
+def test_inject_plan_reports_the_orm_sandbox_mode(tmp_path):
+    """The ORM hint names the auto/manual split per stack (the .NET scan is the model)."""
+    import json as _json
+    from src import auto_inject
+
+    (tmp_path / "package.json").write_text(
+        _json.dumps({"name": "svc", "dependencies": {"express": "4.0.0", "@prisma/client": "5.0.0"}}),
+        encoding="utf-8",
+    )
+    plan = auto_inject.plan(str(tmp_path))
+    assert plan["actions"][0]["db"]["orm"] == "prisma"
+    assert plan["actions"][0]["db"]["sandbox"] == "auto"

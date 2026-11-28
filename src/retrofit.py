@@ -51,8 +51,19 @@ def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[
 
         has_vite = "vite" in deps
         if "next" in deps:
-            # Next has no Vite dev server; the zero-footprint plugin cannot mount there.
-            fe_info.update({"framework": "nextjs", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("next"), "oumv_supported": False, "status": "needs-vite"})
+            # The App Router is served by the Node runtime as a Route Handler: there is
+            # no Vite dev server to patch, and the DOM bridge for client components is
+            # separate work. The server profile is what this adapter certifies.
+            fe_info.update({
+                "framework": "nextjs",
+                "provider": "node",
+                "profile": "backend",
+                "adapter": "tokensafe-backend-node/next",
+                "version": deps.get("next"),
+                "oumv_supported": True,
+                "status": "ready",
+                "note": "App Router Route Handler (server profile); client-component DOM bridge is not part of this adapter",
+            })
         elif "react" in deps:
             fe_info.update({"framework": "react", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("react"), "oumv_supported": has_vite, "status": "ready" if has_vite else "needs-vite"})
         elif "vue" in deps:
@@ -666,6 +677,30 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
                 {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": True}},
                 {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": True, "requiresPermission": "permissions.mutate != false"}},
                 {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True}},
+            ],
+        },
+        {
+            "id": "backend/next",
+            "name": "Next.js App Router Adapter (Route Handler, server profile)",
+            "profile": "backend",
+            "profiles": ["backend"],
+            "repo": "tokensafe-backend/node",
+            "mode": "hybrid",
+            "status": "ready",
+            "description": "App Router Route Handler (app/api/tokensafe/route.ts) serving JSON-RPC + SSE over the Node runtime; route surface read from app/**/route.{ts,tsx,js,jsx}, verify dispatched through an adopter-supplied Web handler; the client-component DOM bridge is separate work (certified Level 3)",
+            "technology": {
+                "language": "typescript",
+                "framework": "next (app router)",
+                "package": {"manager": "npm", "name": "tokensafe-backend-node", "install": "npm install --save-dev tokensafe-backend-node"},
+            },
+            "capabilities": [
+                {"name": "observe.pulse", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.surface", "constraints": {"readOnly": True, "developmentOnly": True, "note": "app/**/route.* scan"}},
+                {"name": "observe.source", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.traces", "constraints": {"readOnly": True, "developmentOnly": True, "note": "requires verifyFetch wiring"}},
+                {"name": "understand.impact", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": True, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True, "note": "requires verifyFetch wiring"}},
             ],
         },
         {

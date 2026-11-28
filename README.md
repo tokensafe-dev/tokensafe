@@ -222,7 +222,11 @@ You install TokenSafe, open a project in your agent, and the first turn does the
    * FastAPI — a global `~/.tokensafe/pyhooks/sitecustomize.py` mounts `mount_tokensafe(app)`
      when the server runs through `tokensafe run-backend uvicorn ...`;
    * Go — one `AutoMount()` line between `tokensafe:oumv` markers, byte-exact backup in
-     `~/.tokensafe/inject/`, `go build` validated, `tokensafe inject --revert` restores it.
+     `~/.tokensafe/inject/`, `go build` validated, `tokensafe inject --revert` restores it;
+   * Node (Express/Fastify) — one `mountTokensafe(app)` / `registerTokensafe(app)` line, same
+     markers and byte-exact revert; ASP.NET Core — one `AddTokensafe()`/`UseTokensafe()` pair;
+   * Next.js (App Router) — one generated `app/api/tokensafe/route.ts` Route Handler
+     (`createNextRouteHandlers`), server profile; `--revert` deletes the file.
 3. **Brief the agent** — a short routing block (hook context and MCP `instructions`) says which
    stack is worked through OUMV and which through the TokenSafe tools. Nothing is written into
    the repository by the brief.

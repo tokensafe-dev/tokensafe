@@ -1314,6 +1314,34 @@ class OUMVGateway:
                 "hint": "start 'tokensafe dev' (or the app's OUMV adapter) and retry; or run the build/test command yourself",
             }
 
+    # 10. Tool: oumv cancel — cooperative cancellation by requestId (spec §3)
+    @classmethod
+    def cancel(cls, request_id: Optional[str] = None, target: Optional[str] = None,
+               runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+        """Proxies `oumv/cancel`.
+
+        Cancellation is cooperative and best-effort: the runtime answers
+        `{"cancelled": bool}` — a request that already finished is not an error.
+        There is no offline fallback, because a cancellation no runtime received
+        is not a cancellation.
+        """
+        cls.mark_oumv_used(workspace_dir)
+        request_id = (request_id or "").strip()
+        target = (target or "").strip()
+        if not request_id and not target:
+            raise ValueError("cancel needs requestId or target='last'")
+        params: Dict[str, Any] = {"requestId": request_id} if request_id else {"target": target}
+        url = cls._resolve_client_url(runtime=runtime, workspace_dir=workspace_dir)
+        try:
+            res = cls._rpc_call(url, "oumv/cancel", params)
+        except OUMVRpcError as e:
+            if not any(hint in str(e).lower() for hint in _UNSUPPORTED_HINTS):
+                raise
+            raise OUMVUnsupportedMethodError(str(e))
+        if isinstance(res, dict) and "evidence" not in res:
+            res["evidence"] = {"provenance": "runtime", "confidence": "confirmed", "sourceAdapter": "live-devserver"}
+        return res
+
     @staticmethod
     def _hash_version(abs_path: str) -> Optional[str]:
         import hashlib as _hashlib

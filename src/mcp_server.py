@@ -44,7 +44,7 @@ from src.session_context import current_root, current_session_id
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
-    "version": "4.7.12"
+    "version": "4.7.13"
 }
 
 # MCP client attribution: the initialize handshake carries clientInfo, which
@@ -842,7 +842,8 @@ TOOLS = [{'name': 'smart_read_file',
  {'name': 'oumv',
   'annotations': {'readOnlyHint': False},
   'description': "OUMV runtime: 'status'|'observe' L0-L4|'understand'|'verify'|'mutate' (OCC edit)|'graph'|'index' "
-                 "(repo-wide symbol search: query, kinds?, limit?)|'preview' (dry-run diff, no write).",
+                 "(repo-wide symbol search: query, kinds?, limit?)|'preview' (dry-run diff, no write)|'build' "
+                 "(run the runtime's build/test command, §14.3)|'cancel' (cooperative, by requestId).",
   'inputSchema': {'type': 'object',
                   'properties': {'action': {'type': 'string',
                                             'enum': ['status',
@@ -853,7 +854,8 @@ TOOLS = [{'name': 'smart_read_file',
                                                      'graph',
                                                      'index',
                                                      'preview',
-                                                     'build']},
+                                                     'build',
+                                                     'cancel']},
                                  'level': {'type': 'string'},
                                  'query': {'type': 'string'},
                                  'target': {'type': 'string'},
@@ -876,9 +878,11 @@ TOOLS = [{'name': 'smart_read_file',
                                                 'description': 'preview/build: per-call budget (§3/§14.3)'},
                                  'verify_action': {'type': 'string'},
                                  'payload': {'type': 'object'},
+                                 'requestId': {'type': 'string',
+                                               'description': 'cancel: the requestId echoed by the target call'},
                                  'workspace_dir': {'type': 'string',
                                                    'description': 'Target repo root; for '
-                                                                  'status/observe/understand/verify/graph/index/preview '
+                                                                  'status/observe/understand/verify/graph/index/preview/build/cancel '
                                                                   'also accepted as path'}}}},
  {'name': 'run_helper',
   'annotations': {'readOnlyHint': False},
@@ -1963,6 +1967,7 @@ _OUMV_ACTIONS = {
     "index": "oumv_index",
     "preview": "oumv_preview",
     "build": "oumv_build",
+    "cancel": "oumv_cancel",
 }
 _HELPER_ACTIONS = {
     "sanitize": "sanitize_command",
@@ -2067,7 +2072,7 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             args,
             allow_path=(
                 not file_target
-                and action in ("status", "observe", "understand", "verify", "graph", "index", "preview", "build")
+                and action in ("status", "observe", "understand", "verify", "graph", "index", "preview", "build", "cancel")
             ),
         )
         if ws_err:
@@ -3498,6 +3503,20 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_build", f"failed to run OUMV build: {e}")
+
+    elif name == "oumv_cancel":
+        try:
+            from src.oumv_gateway import OUMVGateway
+            rid = str(args.get("requestId") or "").strip() or None
+            tgt = str(args.get("target") or "").strip() or None
+            rt = str(args.get("runtime") or "auto").strip()
+            ws, ws_err = _oumv_workspace_arg(args)
+            if ws_err:
+                return _fallback_error("oumv_cancel", ws_err)
+            res = OUMVGateway.cancel(request_id=rid, target=tgt, runtime=rt, workspace_dir=ws)
+            return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
+        except Exception as e:
+            return _fallback_error("oumv_cancel", f"failed to cancel OUMV request: {e}")
 
     elif name == "apply_edits":
         try:
