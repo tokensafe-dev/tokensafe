@@ -64,8 +64,9 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
 
 [Run]
 ; `login` opens the browser and waits for the local callback, so the user can
-; activate the free Community license without knowing a command.
-Filename: "{app}\bin\tokensafe.cmd"; Parameters: "login"; \
+; activate the free Community license without knowing a command. CreateProcess
+; cannot start a .cmd directly, hence the explicit {cmd}.
+Filename: "{cmd}"; Parameters: "/c ""{app}\bin\tokensafe.cmd"" login"; \
     Description: "Log in to activate the free Community license"; \
     Flags: postinstall nowait skipifsilent
 

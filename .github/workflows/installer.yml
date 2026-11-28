@@ -132,6 +132,35 @@ jobs:
           path: installer-output/*.exe
           if-no-files-found: error
 
+      # The .exe itself has to be exercised on Windows: silent install (the
+      # bootstrap provisions the runtime and writes the shim), run the installed
+      # CLI, then uninstall and prove the PATH entry is gone again.
+      - name: Install, run and uninstall the built installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Get-ChildItem 'installer-output\*.exe' | Select-Object -First 1).FullName
+          $setupLog = Join-Path $env:RUNNER_TEMP 'tokensafe-setup.log'
+          $proc = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$setupLog"
+          )
+          if ($proc.ExitCode -ne 0) { Get-Content $setupLog -Tail 80; throw "installer exited $($proc.ExitCode)" }
+
+          $cmd = Join-Path $env:LOCALAPPDATA 'Programs\TokenSafe\bin\tokensafe.cmd'
+          if (-not (Test-Path $cmd)) { Get-Content $setupLog -Tail 80; throw "no shim at $cmd" }
+          $out = & $cmd --version
+          Write-Host $out
+          if ($out -notmatch 'TokenSafe v') { throw 'the installed CLI did not run' }
+
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -notlike '*\TokenSafe\bin*') { throw "PATH entry missing after install: $userPath" }
+
+          $uninstall = Join-Path $env:LOCALAPPDATA 'Programs\TokenSafe\unins000.exe'
+          & $uninstall /VERYSILENT /SUPPRESSMSGBOXES /NORESTART | Out-Null
+          Start-Sleep -Seconds 5
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -like '*\TokenSafe\bin*') { throw "PATH entry survived uninstall: $userPath" }
+
       # release.yml creates the release for the tag; a separate workflow can get
       # there first, so retry instead of assuming the release exists.
       - name: Attach to the GitHub release
