@@ -71,17 +71,38 @@ function venvPythonPath() {
 /**
  * Returns the interpreter's own path when it is a usable CPython >= 3.10,
  * optionally requiring importable runtime dependencies. null otherwise.
+ *
+ * `command` is a name, a path, or an argv prefix for the Windows `py` launcher.
  */
-function probePython(cmd, requireDeps) {
+function probePython(command, requireDeps) {
+  const argv = Array.isArray(command) ? command : [command];
   const imports = requireDeps ? 'import sys, cryptography' : 'import sys';
   const probe = `${imports}; assert sys.version_info >= (${MIN_PYTHON[0]}, ${MIN_PYTHON[1]}); print(sys.executable)`;
   try {
-    const res = spawnSync(cmd, ['-c', probe], { encoding: 'utf-8', stdio: 'pipe', timeout: 20000 });
+    const res = spawnSync(argv[0], [...argv.slice(1), '-c', probe], { encoding: 'utf-8', stdio: 'pipe', timeout: 20000 });
     if (res.status !== 0) return null;
-    return (res.stdout || '').trim() || cmd;
+    return (res.stdout || '').trim() || argv[0];
   } catch (_) {
     return null;
   }
+}
+
+/**
+ * Interpreters to try, most specific first.
+ *
+ * The venv this launcher owns comes first, then the PATH names. On Windows the
+ * python.org installer can leave python.exe off PATH while `py` (the launcher)
+ * lands in C:\Windows regardless, so `py -3` is probed too: without it a
+ * perfectly good CPython is skipped and the 47 MB managed runtime downloads for
+ * nothing.
+ */
+function pythonCandidates() {
+  const candidates = [];
+  const venvPy = venvPythonPath();
+  if (fs.existsSync(venvPy)) candidates.push([venvPy]);
+  candidates.push(['python3'], ['python']);
+  if (process.platform === 'win32') candidates.push(['py', '-3']);
+  return candidates;
 }
 
 function moduleAvailable(cmd, name) {
@@ -373,12 +394,14 @@ async function findPython(options = {}) {
   const { allowProvision = true, requireDeps = true } = options;
   const pinned = (process.env.TOKENSAFE_PYTHON || '').trim();
   if (pinned) {
-    if (probePython(pinned, true)) return pinned;
-    if (requireDeps && probePython(pinned, false)) {
-      const bootstrapped = bootstrapDependencies(pinned);
+    const withDeps = probePython(pinned, true);
+    if (withDeps) return withDeps;
+    const bare = probePython(pinned, false);
+    if (requireDeps && bare) {
+      const bootstrapped = bootstrapDependencies(bare);
       if (bootstrapped) return bootstrapped;
     }
-    if (!requireDeps && probePython(pinned, false)) return pinned;
+    if (!requireDeps && bare) return bare;
     fail(`TOKENSAFE_PYTHON=${pinned} is not a usable CPython ${MIN_PYTHON[0]}.${MIN_PYTHON[1]}+ with 'cryptography'.`);
   }
 
@@ -389,28 +412,27 @@ async function findPython(options = {}) {
     return allowProvision ? await ensureManagedRuntime() : null;
   }
 
-  const candidates = [];
-  const venvPy = venvPythonPath();
-  if (fs.existsSync(venvPy)) candidates.push(venvPy);
-  candidates.push('python3', 'python');
+  const candidates = pythonCandidates();
 
   if (!requireDeps) {
     // `help` only prints: a bare interpreter is enough, and a dependency
     // bootstrap there would turn a two-line reference into a pip install.
     for (const cmd of candidates) {
-      if (probePython(cmd, false)) return cmd;
+      const resolved = probePython(cmd, false);
+      if (resolved) return resolved;
     }
     return allowProvision ? await ensureManagedRuntime() : null;
   }
 
   for (const cmd of candidates) {
-    if (probePython(cmd, true)) return cmd;
+    const resolved = probePython(cmd, true);
+    if (resolved) return resolved;
   }
   for (const cmd of candidates) {
-    if (probePython(cmd, false)) {
-      const bootstrapped = bootstrapDependencies(cmd);
-      if (bootstrapped) return bootstrapped;
-    }
+    const resolved = probePython(cmd, false);
+    if (!resolved) continue;
+    const bootstrapped = bootstrapDependencies(resolved);
+    if (bootstrapped) return bootstrapped;
   }
 
   return allowProvision ? await ensureManagedRuntime() : null;
@@ -503,6 +525,7 @@ if (require.main === module) {
     loadManifest,
     platformKey,
     probePython,
+    pythonCandidates,
     findRuntimePython,
     sha256File,
     installDeps,

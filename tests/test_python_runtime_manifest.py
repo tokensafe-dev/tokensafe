@@ -7,6 +7,11 @@ version and release, or a silent typo turns into a broken install path.
 """
 
 import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -79,6 +84,51 @@ class ManagedRuntimeManifestTest(unittest.TestCase):
             (PROJECT_ROOT / "package.json").read_text(encoding="utf-8")
         )
         self.assertIn("bin/python-runtime.json", package["files"])
+
+    @unittest.skipIf(sys.platform == "win32", "the py stub needs a POSIX shebang")
+    @unittest.skipUnless(shutil.which("node"), "node is not available")
+    def test_windows_py_launcher_is_a_candidate(self):
+        """Windows boxes often keep python.exe off PATH but always have `py`.
+
+        Without the `py -3` candidate the launcher misses that interpreter and
+        downloads the 47 MB managed runtime for nothing.
+        """
+        stub_dir = Path(tempfile.mkdtemp(prefix="ts-py-"))
+        self.addCleanup(shutil.rmtree, stub_dir, True)
+        stub = stub_dir / "py"
+        stub.write_text(
+            '#!/bin/sh\n[ "$1" = "-3" ] && shift\n[ "$1" = "-c" ] || exit 2\n'
+            'printf "%s\\n" "$0"\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+
+        driver = stub_dir / "driver.js"
+        driver.write_text(
+            "Object.defineProperty(process, 'platform', { value: process.argv[3] });\n"
+            "const launcher = require(process.argv[2]);\n"
+            "launcher.findPython({ allowProvision: false, requireDeps: false })\n"
+            "  .then((found) => console.log(`FOUND=${found}`));\n",
+            encoding="utf-8",
+        )
+
+        def probe(platform):
+            completed = subprocess.run(
+                [shutil.which("node"), str(driver), str(LAUNCHER_PATH), platform],
+                env={
+                    "PATH": str(stub_dir),
+                    "TOKENSAFE_HOME": str(stub_dir / "home"),
+                },
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout.strip()
+
+        self.assertEqual(probe("win32"), f"FOUND={stub}")
+        # The same PATH on a POSIX platform has no interpreter to find.
+        self.assertEqual(probe("linux"), "FOUND=null")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ npx tokensafe
 # Option 2: Python / PyPI
 pip install tokensafe && tokensafe
 
-# Option 3: Direct shell script (macOS / Linux)
+# Option 3: Direct shell script (macOS / Linux, Windows via Git Bash)
 curl -fsSL https://tokensafe.dev/install.sh | bash
 ```
 
@@ -83,6 +83,7 @@ TokenSafe's AST, MCP, proxy, and guard modules use Python's standard library onl
 
 - `pip install tokensafe` installs `cryptography>=42.0` automatically via `pyproject.toml`.
 - `npx tokensafe` and `install.sh` check for `cryptography` on startup and auto-install it (`--user` or isolated `~/.tokensafe/venv` under PEP 668) if absent.
+- Windows: `install.sh` (Git Bash) probes every candidate for CPython 3.10+ before using it. The Microsoft Store `python3.exe` / `python.exe` App Execution Aliases are placeholders that exit 9009, so they are never treated as an interpreter; the `py -3` launcher is accepted, and a venv is located at `Scripts/python.exe`. With no interpreter at all, `install.sh` hands off to the Node launcher, which provisions the pinned CPython instead of failing on `cryptography`.
 - If no CPython 3.10+ exists at all, the npm launcher downloads a pinned build (`bin/python-runtime.json`, CPython 3.12.16 from `astral-sh/python-build-standalone`) into `~/.tokensafe/runtime`, verifies its SHA-256 before extraction, and installs the dependencies into that private prefix. `TOKENSAFE_NO_DOWNLOAD=1` disables the download; `TOKENSAFE_PYTHON` pins an interpreter.
 - Optional accelerators: `tree-sitter` plus grammar wheels (AST-accurate slicing; without them the slicer uses stdlib heuristics, and `TOKENSAFE_TREESITTER=off` forces that path) and `Pillow` (image downscaling; macOS `sips` is the fallback).
 
