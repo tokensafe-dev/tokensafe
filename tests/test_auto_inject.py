@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from src import auto_inject
@@ -352,10 +353,6 @@ func main() {
 
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _write_next_app(tmp_path, version="15.4.0", src=False):
     import json as _json
     (tmp_path / "package.json").write_text(
@@ -370,123 +367,141 @@ def _write_next_app(tmp_path, version="15.4.0", src=False):
     return app
 
 
-def test_next_app_gets_the_three_file_bridge_patch_and_a_clean_revert(tmp_path):
-    """Next >= 15.3 inject: RPC route + bridge route + instrumentation-client."""
-    from src import auto_inject
+class TestNextInject(unittest.TestCase):
+    """`tokensafe inject` on an App Router project: three files, owned and reversible.
 
-    _write_next_app(tmp_path, "15.4.0")
+    These are TestCase methods on purpose: CI runs `unittest discover`, which
+    ignores module-level test functions.
+    """
 
-    plan = auto_inject.plan(str(tmp_path))
-    kinds = [action["kind"] for action in plan["actions"]]
-    assert "next_route_handler" in kinds
-    assert "frontend_zero_footprint" not in kinds
-    next_action = next(action for action in plan["actions"] if action["kind"] == "next_route_handler")
-    assert next_action["writes_repo"] is True
-    assert next_action["bridge"] == "instrumentation"
-    assert len(next_action["files"]) == 3
-    assert next_action["db"]["sandbox"] == "none"
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
 
-    applied = auto_inject.apply(str(tmp_path))
-    wrote = [action for action in applied["actions"] if action["kind"] == "next_route_handler"]
-    assert wrote and wrote[0]["status"] == "patched"
-    rpc = tmp_path / "app" / "api" / "tokensafe" / "route.ts"
-    bridge = tmp_path / "app" / "api" / "tokensafe" / "bridge" / "route.ts"
-    instrumentation = tmp_path / "instrumentation-client.ts"
-    assert rpc.is_file() and "bridge: true" in rpc.read_text(encoding="utf-8")
-    assert bridge.is_file() and "createNextBridgeHandlers" in bridge.read_text(encoding="utf-8")
-    assert instrumentation.is_file() and "installNextBridge" in instrumentation.read_text(encoding="utf-8")
+    def tearDown(self):
+        self._tmp.cleanup()
 
-    reverted = auto_inject.revert(str(tmp_path))
-    assert reverted["next"]["status"] == "reverted"
-    assert not rpc.exists() and not bridge.exists() and not instrumentation.exists()
-    assert not (tmp_path / "app" / "api" / "tokensafe").exists()
-    assert not (tmp_path / "app" / "api").exists()
+    def test_next_app_gets_the_three_file_bridge_patch_and_a_clean_revert(self):
+        """Next >= 15.3 inject: RPC route + bridge route + instrumentation-client."""
+        _write_next_app(self.tmp, "15.4.0")
+
+        plan = auto_inject.plan(str(self.tmp))
+        kinds = [action["kind"] for action in plan["actions"]]
+        self.assertIn("next_route_handler", kinds)
+        self.assertNotIn("frontend_zero_footprint", kinds)
+        next_action = next(action for action in plan["actions"] if action["kind"] == "next_route_handler")
+        self.assertTrue(next_action["writes_repo"])
+        self.assertEqual(next_action["bridge"], "instrumentation")
+        self.assertEqual(len(next_action["files"]), 3)
+        self.assertEqual(next_action["db"]["sandbox"], "none")
+
+        applied = auto_inject.apply(str(self.tmp))
+        wrote = [action for action in applied["actions"] if action["kind"] == "next_route_handler"]
+        self.assertTrue(wrote)
+        self.assertEqual(wrote[0]["status"], "patched")
+        rpc = self.tmp / "app" / "api" / "tokensafe" / "route.ts"
+        bridge = self.tmp / "app" / "api" / "tokensafe" / "bridge" / "route.ts"
+        instrumentation = self.tmp / "instrumentation-client.ts"
+        self.assertTrue(rpc.is_file() and "bridge: true" in rpc.read_text(encoding="utf-8"))
+        self.assertTrue(bridge.is_file() and "createNextBridgeHandlers" in bridge.read_text(encoding="utf-8"))
+        self.assertTrue(instrumentation.is_file() and "installNextBridge" in instrumentation.read_text(encoding="utf-8"))
+
+        reverted = auto_inject.revert(str(self.tmp))
+        self.assertEqual(reverted["next"]["status"], "reverted")
+        self.assertFalse(rpc.exists() or bridge.exists() or instrumentation.exists())
+        self.assertFalse((self.tmp / "app" / "api" / "tokensafe").exists())
+        self.assertFalse((self.tmp / "app" / "api").exists())
+
+    def test_next_below_15_3_gets_routes_and_a_manual_bridge_snippet(self):
+        """A Next that cannot load instrumentation-client is told so, not patched anyway."""
+        _write_next_app(self.tmp, "15.0.0")
+
+        plan = auto_inject.plan(str(self.tmp))
+        next_action = next(action for action in plan["actions"] if action["kind"] == "next_route_handler")
+        self.assertEqual(next_action["bridge"], "manual")
+        self.assertIn("installNextBridge", next_action["bridge_manual"]["snippet"])
+
+        applied = auto_inject.apply(str(self.tmp))
+        wrote = next(action for action in applied["actions"] if action["kind"] == "next_route_handler")
+        self.assertEqual(wrote["bridge"], "manual")
+        self.assertTrue((self.tmp / "app" / "api" / "tokensafe" / "route.ts").is_file())
+        self.assertTrue((self.tmp / "app" / "api" / "tokensafe" / "bridge" / "route.ts").is_file())
+        self.assertFalse((self.tmp / "instrumentation-client.ts").exists())
+
+    def test_next_existing_instrumentation_loader_is_not_shadowed(self):
+        """A user's instrumentation-client file is theirs: we add routes, never a twin."""
+        _write_next_app(self.tmp, "15.4.0")
+        loader = self.tmp / "instrumentation-client.js"
+        loader.write_text("// user loader\nconst ready = true;\nexport {};\n", encoding="utf-8")
+
+        applied = auto_inject.apply(str(self.tmp))
+        wrote = next(action for action in applied["actions"] if action["kind"] == "next_route_handler")
+        self.assertIn("instrumentation-client.js", wrote["bridge_manual"]["reason"])
+        self.assertIn("installNextBridge", wrote["bridge_manual"]["snippet"])
+        self.assertFalse((self.tmp / "instrumentation-client.ts").exists())
+        self.assertTrue(loader.read_text(encoding="utf-8").startswith("// user loader"))
+
+        auto_inject.revert(str(self.tmp))
+        self.assertTrue(loader.is_file())
+        self.assertFalse((self.tmp / "app" / "api" / "tokensafe").exists())
+
+    def test_next_src_app_project_keeps_instrumentation_under_src(self):
+        """Next resolves instrumentation-client from src/ when the app lives there."""
+        app = _write_next_app(self.tmp, "15.5.0", src=True)
+        health = app / "api" / "health" / "route.ts"
+        health.parent.mkdir(parents=True)
+        health.write_text('export async function GET() { return new Response("ok"); }\n', encoding="utf-8")
+
+        auto_inject.apply(str(self.tmp))
+        self.assertTrue((app / "api" / "tokensafe" / "route.ts").is_file())
+        self.assertTrue((app / "api" / "tokensafe" / "bridge" / "route.ts").is_file())
+        self.assertTrue((self.tmp / "src" / "instrumentation-client.ts").is_file())
+
+        auto_inject.revert(str(self.tmp))
+        self.assertFalse((app / "api" / "tokensafe").exists())
+        # A neighbour route and its directories are untouched.
+        self.assertTrue(health.is_file())
+
+    def test_next_foreign_route_is_never_overwritten(self):
+        """An existing route we did not generate is the user's: skip, do not guess."""
+        app = _write_next_app(self.tmp, "15.4.0")
+        route = app / "api" / "tokensafe" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text("// hand-written\nexport const POST = () => new Response('mine');\n", encoding="utf-8")
+
+        applied = auto_inject.apply(str(self.tmp))
+        wrote = next(action for action in applied["actions"] if action["kind"] == "next_route_handler")
+        self.assertEqual(wrote["status"], "skipped")
+        self.assertIn("without bridge", wrote["reason"])
+        self.assertTrue(route.read_text(encoding="utf-8").startswith("// hand-written"))
+        self.assertFalse((app / "api" / "tokensafe" / "bridge").exists())
+
+    def test_next_v1_route_is_upgraded_in_place(self):
+        """The generated v1 route has no bridge; recognising our own output lets us upgrade."""
+        app = _write_next_app(self.tmp, "15.4.0")
+        route = app / "api" / "tokensafe" / "route.ts"
+        route.parent.mkdir(parents=True)
+        route.write_text(auto_inject._NEXT_LEGACY_ROUTE_SOURCE, encoding="utf-8")
+
+        applied = auto_inject.apply(str(self.tmp))
+        wrote = next(action for action in applied["actions"] if action["kind"] == "next_route_handler")
+        self.assertEqual(wrote["status"], "patched")
+        self.assertIn("bridge: true", route.read_text(encoding="utf-8"))
+        self.assertTrue((app / "api" / "tokensafe" / "bridge" / "route.ts").is_file())
+
+        auto_inject.revert(str(self.tmp))
+        self.assertFalse(route.exists())
+
+    def test_inject_plan_reports_the_orm_sandbox_mode(self):
+        """The ORM hint names the auto/manual split per stack (the .NET scan is the model)."""
+        (self.tmp / "package.json").write_text(
+            json.dumps({"name": "svc", "dependencies": {"express": "4.0.0", "@prisma/client": "5.0.0"}}),
+            encoding="utf-8",
+        )
+        plan = auto_inject.plan(str(self.tmp))
+        self.assertEqual(plan["actions"][0]["db"]["orm"], "prisma")
+        self.assertEqual(plan["actions"][0]["db"]["sandbox"], "auto")
 
 
-def test_next_below_15_3_gets_routes_and_a_manual_bridge_snippet(tmp_path):
-    """A Next that cannot load instrumentation-client is told so, not patched anyway."""
-    from src import auto_inject
-
-    _write_next_app(tmp_path, "15.0.0")
-
-    plan = auto_inject.plan(str(tmp_path))
-    next_action = next(action for action in plan["actions"] if action["kind"] == "next_route_handler")
-    assert next_action["bridge"] == "manual"
-    assert "installNextBridge" in next_action["bridge_manual"]["snippet"]
-
-    applied = auto_inject.apply(str(tmp_path))
-    wrote = next(action for action in applied["actions"] if action["kind"] == "next_route_handler")
-    assert wrote["bridge"] == "manual"
-    assert (tmp_path / "app" / "api" / "tokensafe" / "route.ts").is_file()
-    assert (tmp_path / "app" / "api" / "tokensafe" / "bridge" / "route.ts").is_file()
-    assert not (tmp_path / "instrumentation-client.ts").exists()
-
-
-def test_next_src_app_project_keeps_instrumentation_under_src(tmp_path):
-    """Next resolves instrumentation-client from src/ when the app lives there."""
-    from src import auto_inject
-
-    app = _write_next_app(tmp_path, "15.5.0", src=True)
-    health = app / "api" / "health" / "route.ts"
-    health.parent.mkdir(parents=True)
-    health.write_text('export async function GET() { return new Response("ok"); }\n', encoding="utf-8")
-
-    auto_inject.apply(str(tmp_path))
-    assert (app / "api" / "tokensafe" / "route.ts").is_file()
-    assert (app / "api" / "tokensafe" / "bridge" / "route.ts").is_file()
-    assert (tmp_path / "src" / "instrumentation-client.ts").is_file()
-
-    auto_inject.revert(str(tmp_path))
-    assert not (app / "api" / "tokensafe").exists()
-    # A neighbour route and its directories are untouched.
-    assert health.is_file()
-
-
-def test_next_foreign_route_is_never_overwritten(tmp_path):
-    """An existing route we did not generate is the user's: skip, do not guess."""
-    from src import auto_inject
-
-    app = _write_next_app(tmp_path, "15.4.0")
-    route = app / "api" / "tokensafe" / "route.ts"
-    route.parent.mkdir(parents=True)
-    route.write_text("// hand-written\nexport const POST = () => new Response('mine');\n", encoding="utf-8")
-
-    applied = auto_inject.apply(str(tmp_path))
-    wrote = next(action for action in applied["actions"] if action["kind"] == "next_route_handler")
-    assert wrote["status"] == "skipped"
-    assert "without bridge" in wrote["reason"]
-    assert route.read_text(encoding="utf-8").startswith("// hand-written")
-    assert not (app / "api" / "tokensafe" / "bridge").exists()
-
-
-def test_next_v1_route_is_upgraded_in_place(tmp_path):
-    """The generated v1 route has no bridge; recognising our own output lets us upgrade."""
-    from src import auto_inject
-
-    app = _write_next_app(tmp_path, "15.4.0")
-    route = app / "api" / "tokensafe" / "route.ts"
-    route.parent.mkdir(parents=True)
-    route.write_text(auto_inject._NEXT_LEGACY_ROUTE_SOURCE, encoding="utf-8")
-
-    applied = auto_inject.apply(str(tmp_path))
-    wrote = next(action for action in applied["actions"] if action["kind"] == "next_route_handler")
-    assert wrote["status"] == "patched"
-    assert "bridge: true" in route.read_text(encoding="utf-8")
-    assert (app / "api" / "tokensafe" / "bridge" / "route.ts").is_file()
-
-    auto_inject.revert(str(tmp_path))
-    assert not route.exists()
-
-
-def test_inject_plan_reports_the_orm_sandbox_mode(tmp_path):
-    """The ORM hint names the auto/manual split per stack (the .NET scan is the model)."""
-    import json as _json
-    from src import auto_inject
-
-    (tmp_path / "package.json").write_text(
-        _json.dumps({"name": "svc", "dependencies": {"express": "4.0.0", "@prisma/client": "5.0.0"}}),
-        encoding="utf-8",
-    )
-    plan = auto_inject.plan(str(tmp_path))
-    assert plan["actions"][0]["db"]["orm"] == "prisma"
-    assert plan["actions"][0]["db"]["sandbox"] == "auto"
+if __name__ == "__main__":
+    unittest.main()

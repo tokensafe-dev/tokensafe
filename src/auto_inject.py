@@ -885,6 +885,33 @@ def _next_instrumentation_path(workspace: str) -> str:
     return os.path.join(workspace, source_root, _NEXT_INSTRUMENTATION) if source_root else os.path.join(workspace, _NEXT_INSTRUMENTATION)
 
 
+def _next_instrumentation_candidates(workspace: str) -> List[str]:
+    """Every extension Next would load, so we never shadow a user's own loader."""
+    base = os.path.splitext(_next_instrumentation_path(workspace))[0]
+    return [base + ext for ext in (".ts", ".js", ".tsx", ".jsx", ".mjs")]
+
+
+def _next_existing_instrumentation(workspace: str) -> Optional[str]:
+    for path in _next_instrumentation_candidates(workspace):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _file_mentions(path: Optional[str], needle: str) -> bool:
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return needle in handle.read()
+    except Exception:
+        return False
+
+
+def _next_instrumentation_installed(workspace: str) -> bool:
+    return _file_mentions(_next_existing_instrumentation(workspace), "installNextBridge")
+
+
 def _next_files(workspace: str) -> List[Tuple[str, str]]:
     app_dir, _ = _next_app_dir(workspace)
     files: List[Tuple[str, str]] = [
@@ -895,7 +922,11 @@ def _next_files(workspace: str) -> List[Tuple[str, str]]:
     # that pretends to work. Those apps get the two route files plus the manual
     # snippet; the bridge itself is unchanged once the loader exists.
     if next_bridge_mode(workspace) == "instrumentation":
-        files.append((_next_instrumentation_path(workspace), _NEXT_INSTRUMENTATION_SOURCE))
+        existing = _next_existing_instrumentation(workspace)
+        if existing is None:
+            files.append((_next_instrumentation_path(workspace), _NEXT_INSTRUMENTATION_SOURCE))
+        # An existing loader is the user's file: never create a second one next to
+        # it. apply() reports whether it already calls installNextBridge().
     return files
 
 
@@ -927,12 +958,17 @@ def next_bridge_mode(workspace: str) -> str:
 def next_patch_state(workspace: str) -> Dict[str, Any]:
     files = _next_files(workspace)
     existing = [path for path, _ in files if os.path.isfile(path)]
+    loader = _next_existing_instrumentation(workspace)
+    installed = _next_instrumentation_installed(workspace)
+    mode = next_bridge_mode(workspace)
     return {
         "entrypoint": existing[0] if existing else None,
-        "patched": len(existing) == len(files),
+        "patched": len(existing) == len(files) and (mode != "instrumentation" or installed),
         "files": [os.path.relpath(path, workspace) for path, _ in files],
         "missing": [os.path.relpath(path, workspace) for path, _ in files if not os.path.isfile(path)],
-        "bridge": next_bridge_mode(workspace),
+        "bridge": mode,
+        "instrumentation": os.path.relpath(loader, workspace) if loader else None,
+        "instrumentation_installed": installed,
     }
 
 
@@ -1015,6 +1051,14 @@ def apply_next_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
             "reason": "instrumentation-client requires Next >= 15.3; load the bridge by hand in this app",
             "snippet": "import { installNextBridge } from 'tokensafe-backend-node/next-bridge';\ninstallNextBridge();",
         }
+    else:
+        loader = _next_existing_instrumentation(workspace)
+        own_paths = {path for path, _ in files}
+        if loader and loader not in own_paths and not _next_instrumentation_installed(workspace):
+            result["bridge_manual"] = {
+                "reason": f"{os.path.relpath(loader, workspace)} already exists — add the installer call to it instead of letting the engine shadow it",
+                "snippet": "import { installNextBridge } from 'tokensafe-backend-node/next-bridge';\ninstallNextBridge();",
+            }
     return result
 
 
