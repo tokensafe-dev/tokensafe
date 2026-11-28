@@ -49,6 +49,9 @@ class WindowsInstallerAssetsTest(unittest.TestCase):
         self.assertIn("setup --all", source)
         # A failed bootstrap must surface the log path, not a silent no-op.
         self.assertIn("install.log", source)
+        # And it must never open a dialog in a silent install: a scripted MsgBox
+        # is not covered by /SUPPRESSMSGBOXES and blocks the process forever.
+        self.assertIn("if WizardSilent then", source)
 
     def test_bootstrap_verifies_the_same_pin_as_the_launcher(self):
         manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))

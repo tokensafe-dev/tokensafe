@@ -45,19 +45,42 @@ function Write-Step {
 function Test-CPython {
     # Runs the interpreter's own probe; returns its resolved path or $null.
     param([string[]]$Command)
+    $arguments = @()
+    if ($Command.Count -gt 1) { $arguments = $Command[1..($Command.Count - 1)] }
+    $arguments += @('-c', 'import sys; assert sys.version_info >= (3, 10); print(sys.executable)')
+    $result = Invoke-NativeCapture -File $Command[0] -Arguments $arguments
+    if ($result.ExitCode -ne 0) { return $null }
+    $lines = @($result.Output | Where-Object { "$_".Trim() })
+    if (-not $lines) { return $null }
+    return ($lines | Select-Object -Last 1).ToString().Trim()
+}
+
+# Native tools write diagnostics to stderr, and Windows PowerShell 5.1 turns any
+# redirected stderr into a terminating error while $ErrorActionPreference is
+# 'Stop' - which is how a plain `import cryptography` probe crashed the whole
+# installer run. Every native call goes through these helpers instead.
+function Invoke-Native {
+    param([string]$File, [string[]]$Arguments)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-        $probe = 'import sys; assert sys.version_info >= (3, 10); print(sys.executable)'
-        $arguments = @()
-        if ($Command.Count -gt 1) { $arguments = $Command[1..($Command.Count - 1)] }
-        $arguments += @('-c', $probe)
-        $output = & $Command[0] @arguments 2>$null
-        if ($LASTEXITCODE -eq 0 -and $output) {
-            return ($output | Select-Object -Last 1).ToString().Trim()
-        }
-    } catch {
-        return $null
+        & $File @Arguments *>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $previous
     }
-    return $null
+    return $LASTEXITCODE
+}
+
+function Invoke-NativeCapture {
+    param([string]$File, [string[]]$Arguments)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $File @Arguments *>&1
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return @{ ExitCode = $LASTEXITCODE; Output = @($output) }
 }
 
 function Resolve-BasePython {
@@ -98,23 +121,24 @@ function Resolve-BasePython {
 
 function Test-Cryptography {
     param([string]$Python)
-    & $Python -c 'import cryptography' 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    $result = Invoke-NativeCapture -File $Python -Arguments @('-c', 'import cryptography')
+    return ($result.ExitCode -eq 0)
 }
 
 function Install-Cryptography {
     param([string]$Python)
     Write-Step "Installing cryptography>=42.0 into $Python"
-    & $Python -m pip install --quiet --disable-pip-version-check 'cryptography>=42.0' 2>&1 | Out-Null
+    $code = Invoke-Native -File $Python -Arguments @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', 'cryptography>=42.0')
     if (Test-Cryptography -Python $Python) { return $true }
+    Write-Step "pip exited with $code and cryptography is still missing; trying a private venv"
     # A locked-down interpreter (PEP 668, read-only Store install) gets a venv.
     $venv = Join-Path $TokenSafeHome 'venv'
     if (-not (Test-Path (Join-Path $venv 'Scripts\python.exe'))) {
-        & $Python -m venv $venv 2>&1 | Out-Null
+        Invoke-Native -File $Python -Arguments @('-m', 'venv', $venv) | Out-Null
     }
     $venvPython = Join-Path $venv 'Scripts\python.exe'
     if (Test-Path $venvPython) {
-        & $venvPython -m pip install --quiet --disable-pip-version-check 'cryptography>=42.0' 2>&1 | Out-Null
+        Invoke-Native -File $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', 'cryptography>=42.0') | Out-Null
         if (Test-Cryptography -Python $venvPython) {
             $Script:Python = $venvPython
             return $true
@@ -162,8 +186,8 @@ function Get-ManagedPython {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
     # Windows 10+ ships bsdtar; it handles .tar.gz and keeps the `python/` layout
     # the npm launcher expects (RUNTIME_PYTHON_LAYOUT in bin/tokensafe.js).
-    & tar.exe -xzf $archive -C $runtimeDir
-    if ($LASTEXITCODE -ne 0) { throw "tar.exe failed to extract $archive" }
+    $code = Invoke-Native -File 'tar.exe' -Arguments @('-xzf', $archive, '-C', $runtimeDir)
+    if ($code -ne 0) { throw "tar.exe failed to extract $archive (exit $code)" }
     Remove-Item -Path $archive -Force -ErrorAction SilentlyContinue
 
     $python = Join-Path $runtimeDir 'python\python.exe'
@@ -218,7 +242,13 @@ try {
 
     if ($Mode -eq 'Setup') {
         Write-Step 'Configuring detected agents (tokensafe setup --all)'
-        & $Script:Python (Join-Path $AppDir 'bin\tokensafe') setup --all
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $Script:Python (Join-Path $AppDir 'bin\tokensafe') setup --all
+        } finally {
+            $ErrorActionPreference = $previous
+        }
         if ($LASTEXITCODE -ne 0) { throw "tokensafe setup --all exited with $LASTEXITCODE" }
     }
 

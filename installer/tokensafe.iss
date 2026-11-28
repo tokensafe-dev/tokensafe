@@ -127,11 +127,18 @@ begin
 
   if (not Exec(PowerShell, Params, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode))
      or (ResultCode <> 0) then
-    MsgBox('TokenSafe was installed, but the runtime setup did not finish.' + #13#10 + #13#10 +
-      'The log is at %USERPROFILE%\.tokensafe\install.log' + #13#10 + #13#10 +
-      'Retry from a terminal with:' + #13#10 +
-      '"' + ExpandConstant('{app}\bin\tokensafe.cmd') + '" setup --all',
-      mbError, MB_OK);
+  begin
+    // A scripted MsgBox is NOT suppressed by /SUPPRESSMSGBOXES: a silent install
+    // blocked on an invisible dialog for seven minutes before this guard.
+    if WizardSilent then
+      Log('TokenSafe bootstrap failed (exit ' + IntToStr(ResultCode) + '); see %USERPROFILE%\.tokensafe\install.log')
+    else
+      MsgBox('TokenSafe was installed, but the runtime setup did not finish.' + #13#10 + #13#10 +
+        'The log is at %USERPROFILE%\.tokensafe\install.log' + #13#10 + #13#10 +
+        'Retry from a terminal with:' + #13#10 +
+        '"' + ExpandConstant('{app}\bin\tokensafe.cmd') + '" setup --all',
+        mbError, MB_OK);
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
