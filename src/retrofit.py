@@ -652,7 +652,7 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "repo": "tokensafe-backend/java",
             "mode": "sidecar",
             "status": "ready",
-            "description": "Single-file JDK sidecar: scans @RestController mappings statically, serves HTTP and stdio, applies OCC edits and runs a real verify command. Certified Level 2 32/33 (no live request traces, L4 not advertised).",
+            "description": "Single-file JDK sidecar: scans @RestController mappings statically, serves HTTP and stdio, applies OCC edits and runs a real verify command. Certified Level 2 32/33 (no live request traces, L4 not advertised). Frozen at wire 1.5.0 on purpose: the handshake negotiates 1.5.0 until the 1.6.0 surface is worth implementing.",
             "technology": {
                 "language": "java",
                 "framework": "spring",
@@ -678,7 +678,7 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             "repo": "tokensafe-backend/php",
             "mode": "sidecar",
             "status": "ready",
-            "description": "Dependency-free PHP sidecar: Laravel Route:: and Symfony #[Route] discovery, token_get_all handler ranges, php -l pre-flight, OCC edits and stdio. Certified Level 2 32/33 (no live traces).",
+            "description": "Dependency-free PHP sidecar: Laravel Route:: and Symfony #[Route] discovery, token_get_all handler ranges, php -l pre-flight, OCC edits and stdio. Certified Level 2 32/33 (no live traces). Frozen at wire 1.5.0 on purpose: the handshake negotiates 1.5.0 until the 1.6.0 surface is worth implementing.",
             "technology": {
                 "language": "php",
                 "framework": "laravel | symfony",
