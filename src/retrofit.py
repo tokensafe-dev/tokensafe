@@ -51,9 +51,9 @@ def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[
 
         has_vite = "vite" in deps
         if "next" in deps:
-            # The App Router is served by the Node runtime as a Route Handler: there is
-            # no Vite dev server to patch, and the DOM bridge for client components is
-            # separate work. The server profile is what this adapter certifies.
+            # The App Router is served by the Node runtime as a Route Handler; with
+            # the browser bridge (spec §7.4) the same adapter also covers client
+            # components through instrumentation-client.
             fe_info.update({
                 "framework": "nextjs",
                 "provider": "node",
@@ -62,7 +62,7 @@ def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[
                 "version": deps.get("next"),
                 "oumv_supported": True,
                 "status": "ready",
-                "note": "App Router Route Handler (server profile); client-component DOM bridge is not part of this adapter",
+                "note": "App Router Route Handler plus the client-component browser bridge (instrumentation-client on Next >= 15.3); without a page, DOM targets answer -32008",
             })
         elif "react" in deps:
             fe_info.update({"framework": "react", "provider": "react", "adapter": "tokensafe-ui/oumv/react", "version": deps.get("react"), "oumv_supported": has_vite, "status": "ready" if has_vite else "needs-vite"})
@@ -711,13 +711,13 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
         },
         {
             "id": "backend/next",
-            "name": "Next.js App Router Adapter (Route Handler, server profile)",
+            "name": "Next.js App Router Adapter (Route Handler + browser bridge)",
             "profile": "backend",
             "profiles": ["backend"],
             "repo": "tokensafe-backend/node",
             "mode": "hybrid",
             "status": "ready",
-            "description": "App Router Route Handler (app/api/tokensafe/route.ts) serving JSON-RPC + SSE over the Node runtime; route surface read from app/**/route.{ts,tsx,js,jsx}, verify dispatched through an adopter-supplied Web handler; the client-component DOM bridge is separate work (certified Level 3)",
+            "description": "App Router Route Handler (app/api/tokensafe/route.ts) serving JSON-RPC + SSE over the Node runtime, plus the spec §7.4 browser bridge: api/tokensafe/bridge/route.ts and instrumentation-client.ts register the live page, so observe L0-L2/L4 read client components and verify dispatches DOM actions with surfaceDiff. Route surface read from app/**/route.{ts,tsx,js,jsx}; server verify dispatched through an adopter-supplied Web handler (certified Level 3, fixtures v15)",
             "technology": {
                 "language": "typescript",
                 "framework": "next (app router)",
@@ -725,12 +725,16 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             },
             "capabilities": [
                 {"name": "observe.pulse", "constraints": {"readOnly": True, "developmentOnly": True}},
-                {"name": "observe.surface", "constraints": {"readOnly": True, "developmentOnly": True, "note": "app/**/route.* scan"}},
+                {"name": "observe.surface", "constraints": {"readOnly": True, "developmentOnly": True, "note": "app/**/route.* scan; with a page attached L1 also lists the interactive surface"}},
+                {"name": "observe.contract", "constraints": {"readOnly": True, "developmentOnly": True, "note": "L2 components come from the attached page's snapshot"}},
                 {"name": "observe.source", "constraints": {"readOnly": True, "developmentOnly": True}},
-                {"name": "observe.traces", "constraints": {"readOnly": True, "developmentOnly": True, "note": "requires verifyFetch wiring"}},
+                {"name": "observe.traces", "constraints": {"readOnly": True, "developmentOnly": True, "note": "server traces require verifyFetch wiring; with the bridge, L4 also carries browser traces"}},
                 {"name": "understand.impact", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": True}},
                 {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": True, "requiresPermission": "permissions.mutate != false"}},
-                {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True, "note": "requires verifyFetch wiring"}},
+                {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True, "note": "requires verifyFetch wiring for request targets"}},
+                {"name": "verify.surfaceDiff", "constraints": {"readOnly": True, "developmentOnly": True, "limitations": ["emitted only when the verify ran against the attached page"]}},
+                {"name": "mutate.ephemeralDispatch", "constraints": {"readOnly": True, "developmentOnly": True, "limitations": ["requires the bridge route + instrumentation-client (Next >= 15.3)", "dispatch writes no files and consumes no OCC token"]}},
             ],
         },
         {

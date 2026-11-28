@@ -276,6 +276,9 @@ class OUMVGateway:
                             "healthy": True,
                             "source": "descriptor",
                             "capabilities": be_info.get("capabilities", {}),
+                            # Spec §7.4: the descriptor names its browser bridge, so
+                            # discovery knows client components are reachable.
+                            **({"bridge": be_info.get("frontend")} if be_info.get("frontend") else {}),
                         }
                 except Exception:
                     pass
@@ -301,6 +304,17 @@ class OUMVGateway:
                             # no writing method at all, so the answer is -32601 and this flag
                             # is the authoritative "do not edit behind its back" signal.
                             "readOnly": bool(res.get("capabilities", {}).get("readOnly")),
+                            # Spec §7.4 (revision v1.12): a browser bridge turns the
+                            # server runtime into one that can see client components
+                            # and dispatch DOM actions — surface both claims.
+                            "bridge": {
+                                "ephemeralDispatch": bool(
+                                    res.get("capabilities", {}).get("mutate", {}).get("ephemeralDispatch")
+                                ),
+                                "surfaceDiff": bool(
+                                    res.get("capabilities", {}).get("verify", {}).get("surfaceDiff")
+                                ),
+                            },
                         },
                     }
             except Exception:

@@ -171,8 +171,15 @@ dependencies = [
                 self.assertIn("name", cap)
                 self.assertIn("constraints", cap)
                 self.assertIn("readOnly", cap["constraints"])
-            # Mutations must declare a permission constraint
-            mutators = [c for c in caps if c["name"].startswith("mutate.")]
+            # Mutations must declare a permission constraint. `mutate.ephemeralDispatch`
+            # (spec §7.4) is the exception by design: it dispatches an action into
+            # the running page, writes no files and consumes no OCC token, so
+            # `permissions.mutate` does not gate it.
+            mutators = [
+                c
+                for c in caps
+                if c["name"].startswith("mutate.") and c["name"] != "mutate.ephemeralDispatch"
+            ]
             self.assertTrue(mutators, f"{adapter['id']}: mutating adapters must declare mutate capabilities")
             for cap in mutators:
                 self.assertTrue(cap["constraints"].get("requiresPermission"))

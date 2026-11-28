@@ -225,8 +225,11 @@ You install TokenSafe, open a project in your agent, and the first turn does the
      `~/.tokensafe/inject/`, `go build` validated, `tokensafe inject --revert` restores it;
    * Node (Express/Fastify) — one `mountTokensafe(app)` / `registerTokensafe(app)` line, same
      markers and byte-exact revert; ASP.NET Core — one `AddTokensafe()`/`UseTokensafe()` pair;
-   * Next.js (App Router) — one generated `app/api/tokensafe/route.ts` Route Handler
-     (`createNextRouteHandlers`), server profile; `--revert` deletes the file;
+   * Next.js (App Router) — three generated files: `app/api/tokensafe/route.ts`
+     (`createNextRouteHandlers`, bridge on), `app/api/tokensafe/bridge/route.ts` (the
+     browser bridge) and `instrumentation-client.ts` (`installNextBridge`, Next ≥ 15.3);
+     older Next gets the two route files plus a manual snippet. `--revert` deletes
+     exactly the files it created;
    * Elysia (Bun) — one `app.use(oumv())` line before `app.listen()`
      (`tokensafe-backend-node/elysia`), same markers and byte-exact revert.
 3. **Brief the agent** — a short routing block (hook context and MCP `instructions`) says which
