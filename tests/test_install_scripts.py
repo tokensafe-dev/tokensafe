@@ -118,6 +118,10 @@ class InstallerBootstrapTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
+        # Deterministic npm probe: the shim only prefers npm's global prefix when
+        # that directory is already on PATH, so tests must not inherit the host's
+        # npm configuration.
+        write_executable(self.bin / "npm", "#!/bin/sh\nexit 1\n")
         self.home = self.tmp / "home"
         self.home.mkdir()
 
@@ -132,14 +136,20 @@ class InstallerBootstrapTest(unittest.TestCase):
         write_executable(alias_dir / name, STORE_ALIAS)
         return alias_dir
 
-    def run_block(self, body, extra_env=None, path_prefix=None):
+    def run_block(self, body, extra_env=None, path_prefix=None, extra_path=()):
         lib = self.tmp / "lib.sh"
         lib.write_text(self.block + "\n" + self.shim_block + "\n", encoding="utf-8")
         script = "set -eu\nsource \"$1\"\n" + textwrap.dedent(body)
         env = {
             "HOME": str(self.home),
             "PATH": os.pathsep.join(
-                [str(path_prefix or self.bin), "/usr/bin", "/bin", "/usr/local/bin"]
+                [
+                    str(path_prefix or self.bin),
+                    *[str(item) for item in extra_path],
+                    "/usr/bin",
+                    "/bin",
+                    "/usr/local/bin",
+                ]
             ),
             "FAKE_LAYOUT": "posix",
             "FAKE_VENV": "1",
@@ -322,8 +332,42 @@ class InstallerBootstrapTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("add", result.stdout)
         self.assertIn("to PATH", result.stdout)
+        # The current window gets an instant, copy-pasteable workaround: cmd only
+        # knows the PATH it was started with.
+        self.assertIn('set "PATH=%PATH%;', result.stdout)
+
+    def test_windows_shim_lands_on_the_current_path_when_it_can(self):
+        """No reopen: a directory already on PATH makes the shim work immediately."""
+        prefix = self.tmp / "Roaming" / "npm"
+        prefix.mkdir(parents=True)
+        write_executable(
+            self.bin / "npm",
+            "#!/bin/sh\nprintf 'C:\\\\Users\\\\test\\\\Roaming\\\\npm\\n'\n",
+        )
+        write_executable(
+            self.bin / "cygpath",
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            '  -w) printf "C:%s\\n" "$2" | tr "/" "\\\\" ;;\n'
+            '  -u) printf "%s\\n" "$FAKE_PREFIX" ;;\n'
+            "esac\n",
+        )
+
+        result = self.run_block(
+            'ts_install_windows_cmd_shim /opt/py/python.exe /opt/ts/bin/tokensafe "$1"'.replace(
+                "$1", str(self.tmp / "local" / "bin")
+            ),
+            extra_env={"FAKE_PREFIX": str(prefix)},
+            extra_path=[prefix],
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("works in this window already", result.stdout)
+        self.assertTrue((prefix / "tokensafe.cmd").is_file())
+        # Nothing to register and nothing to explain: the fallback stays untouched.
+        self.assertFalse((self.tmp / "local" / "bin" / "tokensafe.cmd").exists())
+        self.assertNotIn("new terminals", result.stdout)
 
     # -- the copies --------------------------------------------------------
 

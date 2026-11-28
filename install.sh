@@ -180,8 +180,45 @@ ts_print_no_python_guidance() {
 # preserving REG_EXPAND_SZ entries and broadcasting WM_SETTINGCHANGE so terminals
 # opened after the install see the new PATH.
 
+# True when a POSIX directory is already on PATH (Windows is case-insensitive).
+ts_path_contains() {
+    local needle lower_path
+    needle=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    lower_path=$(printf '%s' ":${PATH}:" | tr '[:upper:]' '[:lower:]')
+    case "${lower_path}" in
+        *":${needle}:"*) return 0 ;;
+    esac
+    return 1
+}
+
 ts_install_windows_cmd_shim() {
-    local interpreter="$1" cli_script="$2" bin_dir="$3"
+    local interpreter="$1" cli_script="$2" fallback_bin="$3"
+    local bin_dir="${fallback_bin}" fresh_window=1
+    local npm_prefix posix_prefix
+
+    # cmd.exe and PowerShell re-scan PATH for every command, so a shim dropped
+    # into a directory that is ALREADY on PATH works in the terminal the user is
+    # sitting in - no reopen, nothing to explain. npm's global prefix is the one
+    # such directory every Node install exposes, so it wins when it exists.
+    # (`npm i -g tokensafe` later overwrites this file with npm's own shim.)
+    if command -v npm >/dev/null 2>&1; then
+        npm_prefix=$(npm config get prefix 2>/dev/null | tr -d '\r' | tail -n 1)
+        if [ -n "${npm_prefix}" ]; then
+            posix_prefix="${npm_prefix}"
+            if command -v cygpath >/dev/null 2>&1; then
+                posix_prefix=$(cygpath -u "${npm_prefix}" 2>/dev/null || printf '%s' "${npm_prefix}")
+            fi
+            if [ -d "${posix_prefix}" ] && ts_path_contains "${posix_prefix}"; then
+                bin_dir="${posix_prefix}"
+                fresh_window=0
+            fi
+        fi
+    fi
+    if [ "${fresh_window}" -eq 1 ] && ts_path_contains "${fallback_bin}"; then
+        fresh_window=0
+    fi
+
+    mkdir -p "${bin_dir}"
     local win_interpreter="${interpreter}" win_cli="${cli_script}" win_bin="${bin_dir}"
 
     # Only POSIX-style paths need translating; `node` (a bare command name) must
@@ -192,7 +229,6 @@ ts_install_windows_cmd_shim() {
         case "${bin_dir}" in /*) win_bin=$(cygpath -w "${bin_dir}") ;; esac
     fi
 
-    mkdir -p "${bin_dir}"
     # A bare command name (the Node fallback) stays unquoted, an absolute
     # Windows path is quoted so spaces in a profile name survive.
     local interpreter_token="${win_interpreter}"
@@ -204,11 +240,16 @@ ts_install_windows_cmd_shim() {
     printf '@echo off\r\n%s "%s" %%*\r\n' "${interpreter_token}" "${win_cli}" > "${bin_dir}/tokensafe.cmd"
     cp "${bin_dir}/tokensafe.cmd" "${bin_dir}/agy-tokens.cmd"
 
+    if [ "${fresh_window}" -eq 0 ]; then
+        echo "  Created ${bin_dir}/tokensafe.cmd — 'tokensafe' works in this window already."
+        return 0
+    fi
     if ts_windows_path_add "${win_bin}"; then
         echo "  Created ${bin_dir}/tokensafe.cmd and added ${win_bin} to the PATH for new terminals."
     else
         echo "  Created ${bin_dir}/tokensafe.cmd — add ${win_bin} to PATH to run it as 'tokensafe'."
     fi
+    echo "  This window can use it right away: set \"PATH=%PATH%;${win_bin}\""
 }
 
 # Adds a directory to the user PATH. Returns non-zero when PowerShell is
