@@ -192,8 +192,9 @@ jobs:
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if ($userPath -like '*\TokenSafe\bin*') { throw "PATH entry survived uninstall: $userPath" }
 
-      # release.yml creates the release for the tag; a separate workflow can get
-      # there first, so retry instead of assuming the release exists.
+      # release.yml creates the release only after its npm visibility wait (up to
+      # ~65 minutes), so this job cannot assume it exists: publish the release
+      # itself when needed and let release.yml fill in notes afterwards.
       - name: Attach to the GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -201,13 +202,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $exes = @(Get-ChildItem 'installer-output\*.exe' | ForEach-Object { $_.FullName })
-          for ($attempt = 1; $attempt -le 20; $attempt++) {
-            gh release view $env:GITHUB_REF_NAME 2>$null | Out-Null
+          $tag = $env:GITHUB_REF_NAME
+          for ($attempt = 1; $attempt -le 120; $attempt++) {
+            gh release view $tag 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              gh release create $tag --verify-tag --title "TokenSafe $tag" --notes "Windows installer for $tag." 2>&1 | Out-Null
+            }
             if ($LASTEXITCODE -eq 0) {
-              gh release upload $env:GITHUB_REF_NAME @exes --clobber
+              gh release upload $tag @exes --clobber
               if ($LASTEXITCODE -eq 0) { Write-Host "uploaded: $($exes -join ', ')"; exit 0 }
             }
-            Write-Host "attempt $attempt/20: release $env:GITHUB_REF_NAME not ready yet"
+            Write-Host "attempt $attempt/120: release $tag not ready for upload yet"
             Start-Sleep -Seconds 30
           }
-          throw "release $env:GITHUB_REF_NAME was not available for the installer upload"
+          throw "release $tag was not available for the installer upload"
