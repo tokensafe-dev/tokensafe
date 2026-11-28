@@ -103,6 +103,73 @@ class ScopedSearch:
         return max(4, min(8, max_results // 3))
 
     @classmethod
+    def _graph_symbol_index(cls, root_dir: str):
+        """Cache-only view of the AST symbol index; never starts a repository crawl."""
+        try:
+            from src.graph_engine import CodeGraph
+            graph = CodeGraph(root_dir, use_disk_cache=True)
+        except Exception:
+            return None
+        return graph if graph.symbols else None
+
+    @classmethod
+    def _symbol_matches(
+        cls,
+        query: str,
+        root_dir: str,
+        scope: str,
+        max_results: int,
+        per_file: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Exact declaration lookup across every indexed file.
+
+        An identifier query is a lookup, not a grep: the disk walk stops at a file
+        budget (2,500 by default) and therefore never reaches later packages, which
+        is why a symbol declared in `paidz-workers` answered "0 matches" while the
+        graph index held it. Returns None when this is not a symbol-shaped query or
+        no cache exists — the caller then falls back to the bounded disk scan.
+        """
+        if not re.fullmatch(r"[A-Za-z_$][\w$]{2,}", query or ""):
+            return None
+        graph = cls._graph_symbol_index(root_dir)
+        if graph is None:
+            return None
+        q = query.lower()
+        suffix_ok = any(ch.isupper() for ch in query) or "_" in query
+        hits = []
+        for sym in graph.symbols.values():
+            name = sym.name.lower()
+            if name == q:
+                rank = 0
+            elif suffix_ok and name.endswith(q):
+                rank = 1
+            else:
+                continue
+            if not cls.is_match_file(os.path.basename(sym.file_path), sym.file_path, scope):
+                continue
+            hits.append((rank, sym))
+        if not hits:
+            return None
+        hits.sort(key=lambda item: (item[0], item[1].file_path, item[1].line_start))
+        per_file_cap = cls._resolve_per_file(per_file, max_results)
+        per_file_counts: Dict[str, int] = {}
+        matches: List[Dict[str, Any]] = []
+        for _, sym in hits:
+            if len(matches) >= max_results:
+                break
+            seen = per_file_counts.get(sym.file_path, 0)
+            if seen >= per_file_cap:
+                continue
+            per_file_counts[sym.file_path] = seen + 1
+            text = f"{sym.kind} {sym.name}"
+            if sym.signature:
+                text += f" — {sym.signature}"
+            if len(text) > 100:
+                text = text[:97] + "..."
+            matches.append({"file": sym.file_path, "line": sym.line_start, "text": text})
+        return matches
+
+    @classmethod
     def search(
         cls,
         query: str,
@@ -214,12 +281,14 @@ class ScopedSearch:
                             "success": True,
                             "query": query,
                             "scope": scope,
+                            "source": "fts_trigram",
                             "files_matched": len(fts_hit_files),
                             "scanned_files": len(fts_hit_files),
                             "total_matches": len(fts_matches),
                             "overflow_matches": sum(overflow.values()),
                             "per_file_cap": per_file_cap,
                             "timed_out": False,
+                            "partial": False,
                             "matches": fts_matches,
                             "markdown": cls._render_markdown(
                                 query, fts_matches, len(fts_hit_files), False, max_results,
@@ -229,6 +298,44 @@ class ScopedSearch:
                         }
             except Exception:
                 pass  # Seamless fallback to disk scan
+
+        # Symbol fast path: an identifier is a lookup, and the AST index covers every
+        # file while the bounded disk walk below covers only the first 2,500.
+        if not regex_mode and not case_sensitive:
+            symbol_matches = cls._symbol_matches(query, root_dir, scope, max_results, per_file)
+            if symbol_matches is not None:
+                hit_files = {m["file"] for m in symbol_matches}
+                indexed = 0
+                try:
+                    graph = cls._graph_symbol_index(root_dir)
+                    indexed = len(graph.file_symbols) if graph else 0
+                except Exception:
+                    indexed = 0
+                markdown = cls._render_markdown(
+                    query, symbol_matches, indexed or len(hit_files), False, max_results,
+                    hit_files=hit_files, scope=scope, root_dir=root_dir,
+                )
+                if indexed:
+                    markdown += (
+                        f"\n_Answered from the AST symbol index ({indexed} indexed files): "
+                        f"declarations only, complete across the repository._"
+                    )
+                return {
+                    "success": True,
+                    "query": query,
+                    "scope": scope,
+                    "source": "graph_symbol_index",
+                    "files_matched": len(hit_files),
+                    "scanned_files": indexed or len(hit_files),
+                    "total_matches": len(symbol_matches),
+                    "overflow_matches": 0,
+                    "per_file_cap": cls._resolve_per_file(per_file, max_results),
+                    "timed_out": False,
+                    "partial": False,
+                    "matches": symbol_matches,
+                    "markdown": markdown,
+                }
+
 
         matches: List[Dict[str, Any]] = []
         total_scanned_files = 0
@@ -330,16 +437,35 @@ class ScopedSearch:
             per_file_cap=per_file_cap,
         )
 
+        partial = bool(timed_out or total_scanned_files >= max_scanned_files)
+        if partial and not matches:
+            markdown += (
+                "\n_Scan stopped at its safety budget, so coverage was partial: the match may live "
+                "in a file that was not reached. Narrow 'path'/'project_path' for an exhaustive scan._"
+            )
+            if re.fullmatch(r"[A-Za-z_$][\w$]{2,}", query or ""):
+                markdown += (
+                    f"\n_Declaration lookup: `oumv(action='index', query='{query}')` searches the complete "
+                    "AST symbol index instead of the bounded disk walk._"
+                )
+
         return {
             "success": True,
             "query": query,
             "scope": scope,
+            "source": "disk_scan",
             "total_matches": len(matches),
             "overflow_matches": sum(overflow.values()),
             "per_file_cap": per_file_cap,
             "files_matched": len(hit_files),
             "scanned_files": total_scanned_files,
             "timed_out": timed_out,
+            "partial": partial,
+            "coverage": {
+                "file_budget": max_scanned_files,
+                "time_budget_seconds": timeout_seconds,
+                "stopped_early": partial,
+            },
             "matches": matches,
             "markdown": markdown,
         }

@@ -228,8 +228,13 @@ class TestMCPServer(unittest.TestCase):
     def test_inline_verify_gets_its_own_timeout_budget(self):
         """The edit is on disk before verify runs: cutting the call at the 8s transport
         default loses the verdict and reports 'could not complete' about work that did."""
-        from src.mcp_server import _tool_timeout, MCP_TOOL_TIMEOUT
-        self.assertEqual(_tool_timeout("smart_read_file", {}), MCP_TOOL_TIMEOUT)
+        from src.mcp_server import _tool_timeout, MCP_TOOL_TIMEOUT, MCP_GRAPH_TIMEOUT
+        # Cheap tools keep the transport default...
+        self.assertEqual(_tool_timeout("list_dir", {}), MCP_TOOL_TIMEOUT)
+        # ...while a cold AST crawl may take ~15 s on a monorepo and is cached afterwards.
+        self.assertEqual(_tool_timeout("smart_read_file", {}), max(MCP_TOOL_TIMEOUT, MCP_GRAPH_TIMEOUT))
+        self.assertEqual(_tool_timeout("repo_map", {}), max(MCP_TOOL_TIMEOUT, MCP_GRAPH_TIMEOUT))
+        self.assertEqual(_tool_timeout("oumv", {"action": "observe"}), max(MCP_TOOL_TIMEOUT, MCP_GRAPH_TIMEOUT))
         self.assertGreater(_tool_timeout("apply_edits", {"verify": "auto"}), MCP_TOOL_TIMEOUT)
         self.assertGreater(_tool_timeout("apply_edits", {"verify": "go test", "verify_timeout_sec": 60}), 60)
         self.assertLessEqual(_tool_timeout("apply_edits", {"verify": "x", "verify_timeout_sec": 900}), 180.0)

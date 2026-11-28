@@ -352,6 +352,21 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                                  'type': 'string'},
                                              'query': {   'description': 'Text, identifier, or symbol name',
                                                           'type': 'string'},
+                                             'queries': {   'description': 'Batch mode (same contract as batch_search): '
+                                                                           'up to 20 {query|pattern, type, path, glob, '
+                                                                           'max_results} items in ONE call',
+                                                           'items': {   'properties': {   'case_sensitive': {'type': 'boolean'},
+                                                                                          'glob': {'type': 'string'},
+                                                                                          'max_results': {'type': 'integer'},
+                                                                                          'path': {'type': 'string'},
+                                                                                          'pattern': {'type': 'string'},
+                                                                                          'query': {'type': 'string'},
+                                                                                          'type': {'enum': ['text', 'regex', 'glob', 'fuzzy', 'git'],
+                                                                                                   'type': 'string'},
+                                                                                          'use_regex': {'type': 'boolean'}},
+                                                                        'type': 'object'},
+                                                           'maxItems': 20,
+                                                           'type': 'array'},
                                              'scope': {   'description': "Filter: 'code', 'config', 'all', extension "
                                                                          "('go', '*.py'), or subfolder "
                                                                          "('internal/promo') (default 'all')",
@@ -359,7 +374,6 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                              'use_regex': {   'description': "Omit = auto-detect ('|', \\d → regex); "
                                                                              'false = literal; true = regex',
                                                               'type': 'boolean'}},
-                           'required': ['query'],
                            'type': 'object'},
         'name': 'scoped_search'},
     {   'annotations': {'readOnlyHint': True},
@@ -697,8 +711,14 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                                                                                          'or '
                                                                                                                          'read-only '
                                                                                                                          'git '
-                                                                                                                         'command',
+                                                                                                                         'command '
+                                                                                                                         '(alias: '
+                                                                                                                         'query)',
                                                                                                           'type': 'string'},
+                                                                                           'query': {   'description': 'Alias '
+                                                                                                                       'for '
+                                                                                                                       'pattern',
+                                                                                                        'type': 'string'},
                                                                                            'type': {   'description': 'Query '
                                                                                                                       'type: '
                                                                                                                       'text, '
@@ -713,7 +733,7 @@ FULL_TOOLS = [   {   'annotations': {'readOnlyHint': True},
                                                                                                                    'fuzzy',
                                                                                                                    'git'],
                                                                                                        'type': 'string'}},
-                                                                         'required': ['pattern'],
+                                                                         'required': [],
                                                                          'type': 'object'},
                                                             'maxItems': 20,
                                                             'type': 'array'}},
@@ -758,7 +778,7 @@ TOOLS = [{'name': 'smart_read_file',
                   'anyOf': [{'required': ['path']}, {'required': ['endpoint']}, {'required': ['package_name']}]}},
  {'name': 'scoped_search',
   'annotations': {'readOnlyHint': True},
-  'description': 'Search replacing grep/find: query+scope, or queries=[{pattern,type,path,glob}] batch (max 20).',
+  'description': 'Search replacing grep/find: query+scope, or queries=[{query|pattern,type,path,glob}] batch (max 20).',
   'inputSchema': {'type': 'object',
                   'properties': {'query': {'type': 'string'},
                                  'mode': {'type': 'string',
@@ -837,10 +857,14 @@ TOOLS = [{'name': 'smart_read_file',
                                  'level': {'type': 'string'},
                                  'query': {'type': 'string'},
                                  'target': {'type': 'string'},
-                                 'path': {'type': 'string'},
+                                 'path': {'type': 'string',
+                                          'description': 'File to observe (becomes the target, L1 answers for '
+                                                         'that file) or the target repo root for status'},
                                  'symbol': {'type': 'string'},
                                  'replacement': {'type': 'string'},
-                                 'expectedVersion': {'type': 'string'},
+                                 'expectedVersion': {'type': 'string',
+                                                     'description': 'OCC token from observe file.version; '
+                                                                    'offline mutate enforces it'},
                                  'kinds': {'type': 'array',
                                            'items': {'type': 'string'},
                                            'description': 'index: symbol-kind filter (function, class, ...)'},
@@ -1147,6 +1171,19 @@ def _oumv_workspace_arg(args: dict, allow_path: bool = False) -> Tuple[Optional[
 
 
 MCP_TOOL_TIMEOUT = float(os.environ.get("TOKENSAFE_MCP_TIMEOUT", "8.0"))
+# A cold AST crawl of a large monorepo takes ~15 s and is cached afterwards. Cutting
+# it at the transport default failed the first repo_map/observe/read of every session
+# (2026-11-28 paidz: repo_map, smart_read_file and oumv all died at 8 s while one
+# crawl held the graph lock).
+MCP_GRAPH_TIMEOUT = float(os.environ.get("TOKENSAFE_MCP_GRAPH_TIMEOUT", "30.0"))
+_GRAPH_TOOLS = {
+    "repo_map",
+    "get_architecture_graph",
+    "oumv",
+    "smart_read_file",
+    "smart_bundle",
+    "slice_external_type",
+}
 
 
 def _fallback_error(tool_name: str, reason: str) -> dict:
@@ -2015,14 +2052,38 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
         # inspecting a second repo (workspace_dir, or `path` for the read actions)
         # used to get the bound workspace's stack back with no error — a silently
         # wrong answer. Resolve the explicit root here and fail closed on a bad one.
+        #
+        # `path` is overloaded: for observe/understand a *file* path is the thing to
+        # observe, while a directory is a workspace root. Treating the file as a root
+        # (dirname) produced target:null and a whole-repo dump.
+        file_target: Optional[str] = None
+        raw_path = str(args.get("path") or "").strip()
+        if action in ("observe", "understand") and raw_path:
+            probe_base = str(args.get("workspace_dir") or "").strip() or _oumv_default_workspace() or os.getcwd()
+            probe = raw_path if os.path.isabs(raw_path) else os.path.join(probe_base, raw_path)
+            if os.path.isfile(probe):
+                file_target = os.path.abspath(probe)
         ws, ws_err = _oumv_workspace_arg(
             args,
-            allow_path=action in ("status", "observe", "understand", "verify", "graph", "index", "preview", "build"),
+            allow_path=(
+                not file_target
+                and action in ("status", "observe", "understand", "verify", "graph", "index", "preview", "build")
+            ),
         )
         if ws_err:
             return _fallback_error("oumv", ws_err)
+        if file_target:
+            # NB: no local `from ... import GraphEngine` here — a function-local import
+            # shadows the module-level name for the WHOLE of _dispatch_tool_call, and
+            # the smart_read_file handler below then raises UnboundLocalError.
+            try:
+                ws = GraphEngine.find_project_root(file_target)
+            except Exception:
+                ws = ws or os.path.dirname(file_target)
         if ws:
             args = dict(args, workspace_dir=ws)
+        if file_target:
+            args = dict(args, target=args.get("target") or file_target)
         mapped = _OUMV_ACTIONS[action]
         if action == "verify":
             args = dict(args, action=args.get("verify_action") or "invoke")
@@ -3318,10 +3379,11 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             lvl = str(args.get("level") or "L0").strip()
             tgt = str(args.get("target") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
+            raw_path = str(args.get("path") or "").strip() or None
             ws, ws_err = _oumv_workspace_arg(args)
             if ws_err:
                 return _fallback_error("oumv_observe", ws_err)
-            res = OUMVGateway.observe(level=lvl, target=tgt, runtime=rt, workspace_dir=ws)
+            res = OUMVGateway.observe(level=lvl, target=tgt, runtime=rt, workspace_dir=ws, path=raw_path)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_observe", f"failed to observe OUMV runtime: {e}")
@@ -3332,10 +3394,11 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
             qry = str(args.get("query") or "causality").strip()
             tgt = str(args.get("target") or "").strip() or None
             rt = str(args.get("runtime") or "auto").strip()
+            raw_path = str(args.get("path") or "").strip() or None
             ws, ws_err = _oumv_workspace_arg(args)
             if ws_err:
                 return _fallback_error("oumv_understand", ws_err)
-            res = OUMVGateway.understand(query=qry, target=tgt, runtime=rt, workspace_dir=ws)
+            res = OUMVGateway.understand(query=qry, target=tgt, runtime=rt, workspace_dir=ws, path=raw_path)
             return {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}
         except Exception as e:
             return _fallback_error("oumv_understand", f"failed to query OUMV understanding: {e}")
@@ -3651,6 +3714,9 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
                 if not isinstance(q_copy, dict):
                     safe_queries.append(q_copy)
                     continue
+                # `query` is the scoped_search spelling; batch items use `pattern`.
+                if not q_copy.get("pattern") and q_copy.get("query"):
+                    q_copy["pattern"] = q_copy.pop("query")
                 if is_quota_exceeded:
                     q_copy["max_results"] = min(_safe_int(q_copy.get("max_results"), 3, lo=1, hi=100), 3)
                 safe_queries.append(q_copy)
@@ -3921,6 +3987,10 @@ def _tool_timeout(tool_name: str, tool_args: dict) -> float:
             declared = 30 if has_verify else 0
         if declared > 0:
             return min(max(MCP_TOOL_TIMEOUT, declared + 5.0), 180.0)
+    if tool_name in _GRAPH_TOOLS:
+        # Graph-backed calls may pay a one-time cold crawl; it is cached on disk, so
+        # the next call is milliseconds. TOKENSAFE_MCP_GRAPH_TIMEOUT tunes the ceiling.
+        return max(MCP_TOOL_TIMEOUT, MCP_GRAPH_TIMEOUT)
     return MCP_TOOL_TIMEOUT
 
 

@@ -204,6 +204,19 @@ def validate_verify_command(
     )
 
 
+def _target_occurrence_lines(content: str, target: str, limit: int = 5) -> List[str]:
+    """Start lines of the first `limit` occurrences of `target` in `content`."""
+    out: List[str] = []
+    scan = 0
+    while len(out) < limit:
+        pos = content.find(target, scan)
+        if pos < 0:
+            break
+        out.append(str(content.count("\n", 0, pos) + 1))
+        scan = pos + 1
+    return out
+
+
 def _find_closest_line_hint(target: str, content: str, max_lines_preview: int = 5) -> str:
     """Finds closest matching snippet in content to provide actionable line-drift retry guidance."""
     target_first = target.splitlines()[0].strip() if target.splitlines() else target.strip()
@@ -306,19 +319,37 @@ def _apply_hunk_to_text(
         sub_text = "".join(lines[s_idx:e_idx])
         match_target, nl = _prepare_match(sub_text)
         if match_target not in sub_text:
-            hint = _find_closest_line_hint(target, sub_text)
-            return None, f"Target not found in lines {s_idx+1}..{e_idx}: {hint}"
+            # start_line/end_line disambiguate *where* a snippet lives; they are not a
+            # hard constraint on its span. A window one line short of a multi-line
+            # target used to fail the whole batch even when the snippet was unique in
+            # the file (the caller had simply mis-measured end_line).
+            full_target, full_nl = _prepare_match(content)
+            full_count = content.count(full_target) if full_target else 0
+            if full_count == 1:
+                prepared_replacement = _normalize_eol(replacement, full_nl)
+                return content.replace(full_target, prepared_replacement, 1), None
+            if full_count > 1:
+                occ = _target_occurrence_lines(content, full_target)
+                retry = ""
+                if occ:
+                    first = int(occ[0])
+                    span = max(1, full_target.count("\n") + 1)
+                    retry = (
+                        f" Retry with start_line={first}, end_line={first + span - 1}, "
+                        f"or drop start_line/end_line."
+                    )
+                return None, (
+                    f"Target not found in lines {s_idx+1}..{e_idx}, but it occurs {full_count} times "
+                    f"elsewhere in the file (near lines {', '.join(occ)}).{retry}"
+                )
+            hint = _find_closest_line_hint(target, content)
+            return None, f"Target not found in lines {s_idx+1}..{e_idx} nor anywhere in the file: {hint}"
         count = sub_text.count(match_target)
         if count > 1 and not replace_all:
             # Report where: the caller just narrowed to a window and needs the exact
             # sub-range (or a longer unique snippet) to finish the edit in one retry.
-            occ, scan = [], 0
-            while len(occ) < 5:
-                pos = sub_text.find(match_target, scan)
-                if pos < 0:
-                    break
-                occ.append(str(s_idx + sub_text.count("\n", 0, pos) + 1))
-                scan = pos + 1
+            occ = _target_occurrence_lines(sub_text, match_target)
+            occ = [str(int(o) + s_idx) for o in occ]
             locs = f" (near lines {', '.join(occ)})" if occ else ""
             retry = ""
             if occ:

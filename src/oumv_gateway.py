@@ -526,6 +526,14 @@ class OUMVGateway:
                 }
                 for d in dropped
             ]
+        # A cold AST crawl costs ~15 s on a large monorepo. Start it now, in the
+        # background: the first repo_map/observe/mutate call then finds it warm
+        # instead of spending the whole tool budget waiting for it.
+        try:
+            from src.graph_engine import GraphEngine
+            GraphEngine.warm_async(ws)
+        except Exception:
+            pass
         return result
 
     @staticmethod
@@ -639,7 +647,11 @@ class OUMVGateway:
                     "supportedProfiles": supported,
                     "guidance": (
                         f"OUMV runtime adapter for {be.get('framework', 'Node.js')} is not available yet (planned). "
-                        "Use tokensafe:repo_map, tokensafe:smart_read_file, and tokensafe:scoped_search for this backend; "
+                        "Static L1 still answers for one file: "
+                        "tokensafe:oumv(action='observe', level='L1', path='<file>') returns its symbols, "
+                        "file.version (the OCC token) and mutation how-to. "
+                        "For source edits use tokensafe:apply_edits, or tokensafe:oumv(action='mutate') offline "
+                        "with that expectedVersion (OCC + syntax guard + backup); "
                         + ("keep using tokensafe:oumv(runtime='frontend') for UI." if supported else "use standard tests for verification.")
                     ),
                 }
@@ -649,8 +661,33 @@ class OUMVGateway:
 
     # 2. Tool: oumv_observe
     @classmethod
-    def observe(cls, level: str = "L0", target: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+    def _observe_target(cls, target: Optional[str], path: Optional[str], workspace_dir: Optional[str]) -> Optional[str]:
+        """`path` is a file to observe, not a second spelling of `workspace_dir`.
+
+        The 2026-11-28 paidz session passed path=<file> and got target:null plus a
+        33 KB whole-repo L1 dump: the file path was consumed as a workspace root.
+        """
+        t = (target or "").strip()
+        if t:
+            return t
+        raw = (path or "").strip()
+        if not raw:
+            return None
+        ws = workspace_dir or get_active_workspace() or os.getcwd()
+        candidates = [raw] if os.path.isabs(raw) else [os.path.join(ws, raw), raw]
+        for cand in candidates:
+            if os.path.isfile(cand):
+                try:
+                    return os.path.relpath(os.path.abspath(cand), os.path.abspath(ws)).replace(os.sep, "/")
+                except ValueError:
+                    return os.path.basename(cand)
+        return None
+
+    @classmethod
+    def observe(cls, level: str = "L0", target: Optional[str] = None, runtime: str = "auto",
+                workspace_dir: Optional[str] = None, path: Optional[str] = None) -> Any:
         cls.mark_oumv_used(workspace_dir)
+        target = cls._observe_target(target, path, workspace_dir)
         fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
         if runtime == "backend" and not be:
             notice = cls._unsupported_backend_notice(workspace_dir, runtime)
@@ -705,8 +742,10 @@ class OUMVGateway:
 
     # 3. Tool: oumv_understand
     @classmethod
-    def understand(cls, query: str = "causality", target: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
+    def understand(cls, query: str = "causality", target: Optional[str] = None, runtime: str = "auto",
+                   workspace_dir: Optional[str] = None, path: Optional[str] = None) -> Any:
         cls.mark_oumv_used(workspace_dir)
+        target = cls._observe_target(target, path, workspace_dir)
         fe, be = cls.get_endpoints(workspace_dir=workspace_dir)
         if runtime == "backend" and not be:
             notice = cls._unsupported_backend_notice(workspace_dir, runtime)
@@ -820,6 +859,56 @@ class OUMVGateway:
             })
         return {"edges": edges[:30], "count": len(edges), "evidence": evidence}
 
+    @staticmethod
+    def _file_symbols(ws: str, rel_path: str) -> List[Any]:
+        """Symbols declared in one file, parsed without crawling the repository."""
+        try:
+            from src.graph_engine import CodeGraph
+            full = os.path.join(ws, rel_path)
+            if not os.path.isfile(full):
+                return []
+            graph = CodeGraph(ws, use_disk_cache=False)
+            graph._index_file(full, rel_path)
+        except Exception:
+            return []
+        return [graph.symbols[k] for k in graph.file_symbols.get(rel_path, []) if k in graph.symbols]
+
+    @classmethod
+    def _resolve_symbol_range(cls, ws: str, rel_path: str, symbol: str) -> Optional[tuple]:
+        """Line range of a declaration: exact name, then case-insensitive, then suffix."""
+        syms = cls._file_symbols(ws, rel_path)
+        if not syms:
+            return None
+        wanted = (symbol or "").strip()
+        short = wanted.split("::")[-1].split(".")[-1]
+        matches = [s for s in syms if s.name in (wanted, short)]
+        if not matches:
+            matches = [s for s in syms if s.name.lower() == short.lower()]
+        if not matches:
+            matches = [s for s in syms if s.name.lower().endswith(short.lower())]
+        if not matches:
+            return None
+        # A method outranks a same-named local; among equals the tightest range wins.
+        matches.sort(key=lambda s: (0 if s.kind in ("function", "method") else 1, s.line_end - s.line_start))
+        best = matches[0]
+        if best.line_start < 1 or best.line_end < best.line_start:
+            return None
+        return best.line_start, best.line_end
+
+    @classmethod
+    def _file_symbol_names(cls, ws: str, rel_path: str) -> List[str]:
+        return [s.name for s in cls._file_symbols(ws, rel_path)]
+
+    @staticmethod
+    def _splice_range(content: str, start_line: int, end_line: int, replacement: str) -> str:
+        """Replaces lines [start_line, end_line] (1-based, inclusive) in `content`."""
+        lines = content.splitlines(keepends=True)
+        newline = "\r\n" if "\r\n" in content[:4096] else "\n"
+        rep = replacement
+        if not rep.endswith(("\n", "\r")):
+            rep += newline
+        return "".join(lines[:start_line - 1]) + rep + "".join(lines[end_line:])
+
     # 4. Tool: oumv_mutate
     @classmethod
     def mutate(cls, path: str, symbol: Optional[str] = None, replacement: Optional[str] = None, expected_version: Optional[str] = None, runtime: str = "auto", workspace_dir: Optional[str] = None) -> Any:
@@ -864,6 +953,7 @@ class OUMVGateway:
                     raise RuntimeError(f"[OUMV SECURITY_VIOLATION: -32003] Path traversal blocked: {path}")
 
                 import hashlib
+                content = b""
                 current_version = None
                 if os.path.isfile(abs_path):
                     with open(abs_path, "rb") as f:
@@ -873,9 +963,32 @@ class OUMVGateway:
                 if expected_version and current_version and expected_version != current_version:
                     raise RuntimeError(f"[OUMV CONFLICT: -32001] OCC version mismatch: expected {expected_version}, current is {current_version}")
 
+                # A symbol-scoped edit replaces that declaration only. Writing the
+                # snippet as the whole file — which this path used to do — silently
+                # truncated every other symbol in the target.
+                new_content = replacement
+                symbol_range = None
+                if symbol and os.path.isfile(abs_path):
+                    rel_path = os.path.relpath(abs_path, os.path.abspath(ws)).replace("\\", "/")
+                    symbol_range = cls._resolve_symbol_range(ws, rel_path, symbol)
+                    if not symbol_range:
+                        known = cls._file_symbol_names(ws, rel_path)
+                        raise RuntimeError(
+                            f"[OUMV SYMBOL_NOT_FOUND] '{symbol}' is not declared in {path}. "
+                            f"Known symbols: {', '.join(known[:8]) or 'none'}. "
+                            f"For a non-declaration range use apply_edits(start_line/end_line) instead."
+                        )
+                    start_line, end_line = symbol_range
+                    new_content = cls._splice_range(
+                        content.decode("utf-8", errors="replace"),
+                        start_line,
+                        end_line,
+                        replacement,
+                    )
+
                 # Syntax pre-flight: never persist syntactically broken code (OUMV spec §8 Mutation Policy)
                 from src.syntax_guard import check_syntax
-                syntax_check = check_syntax(abs_path, replacement)
+                syntax_check = check_syntax(abs_path, new_content)
                 if syntax_check.get("status") == "failed":
                     raise RuntimeError(
                         f"[OUMV SYNTAX_ERROR: -32002] Edit rejected by syntax guard "
@@ -897,9 +1010,9 @@ class OUMVGateway:
 
                 os.makedirs(os.path.dirname(abs_path), exist_ok=True)
                 with open(abs_path, "w", encoding="utf-8") as f:
-                    f.write(replacement)
+                    f.write(new_content)
 
-                new_version = "sha256:" + hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+                new_version = "sha256:" + hashlib.sha256(new_content.encode("utf-8")).hexdigest()
                 result = {
                     "success": True,
                     "path": path,
@@ -909,6 +1022,8 @@ class OUMVGateway:
                     "syntaxCheck": syntax_check,
                     "message": "Surgical edit applied directly to workspace file (dev-server offline)",
                 }
+                if symbol_range:
+                    result["symbolRange"] = {"startLine": symbol_range[0], "endLine": symbol_range[1]}
                 if backup_path:
                     result["backupPath"] = backup_path
                     result["rollbackHint"] = f"Previous content backed up at {backup_path}"

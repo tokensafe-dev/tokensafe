@@ -77,18 +77,48 @@ def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[
             node_fw = "hono"
         elif "koa" in deps:
             node_fw = "koa"
+        elif "elysia" in deps:
+            node_fw = "elysia"
+
+        # Bun-only services (queue workers, cron jobs) declare no HTTP framework at
+        # all. They used to vanish from `packages` even though their manifest was
+        # listed in `detected_files`, so a monorepo looked fully covered when 4 of
+        # its 6 packages had no OUMV adapter.
+        pkg_dir = os.path.dirname(pkg_json_path)
+        bun_marker = (
+            any(key in deps for key in ("@types/bun", "bun-types", "elysia"))
+            or os.path.isfile(os.path.join(pkg_dir, "bun.lockb"))
+            or os.path.isfile(os.path.join(pkg_dir, "bun.lock"))
+        )
+        if bun_marker:
+            managers.append("bun")
 
         if node_fw:
+            supported_fw = node_fw in ("express", "fastify")
             be_out = {
                 "framework": node_fw,
-                "provider": "node",
-                "adapter": "tokensafe-backend/node",
-                "language": "node",
+                "provider": "bun" if node_fw == "elysia" else "node",
+                "adapter": None if node_fw == "elysia" else "tokensafe-backend/node",
+                "language": "bun" if node_fw == "elysia" else "node",
                 "root": rel_dir,
                 # Express/Fastify ship a certified adapter (npm tokensafe-backend-node);
-                # Nest/Hono/Koa do not yet.
-                "oumv_supported": node_fw in ("express", "fastify"),
-                "status": "ready" if node_fw in ("express", "fastify") else "planned",
+                # Elysia/Nest/Hono/Koa do not yet.
+                "oumv_supported": supported_fw,
+                "status": "ready" if supported_fw else "planned",
+            }
+        elif bun_marker and not fe_out:
+            # Bun runtime without a web framework: a worker/queue service, not a
+            # backend. A frontend package that merely uses Bun as its package
+            # manager is not a worker, so `fe_out` wins.
+            be_out = {
+                "framework": "bun",
+                "provider": "bun",
+                "adapter": None,
+                "language": "bun",
+                "root": rel_dir,
+                "role": "worker",
+                "oumv_supported": False,
+                "status": "planned",
             }
 
         if isinstance(pkg_data.get("workspaces"), (list, dict)):
@@ -156,7 +186,10 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
         pkg_json_path = os.path.join(target_dir, "package.json")
         if os.path.isfile(pkg_json_path):
             _add_detected(os.path.relpath(pkg_json_path, workspace_dir))
-            fe_info, be_info, _ = _detect_package_json_entry(pkg_json_path, rel_dir=rel)
+            fe_info, be_info, pkg_managers = _detect_package_json_entry(pkg_json_path, rel_dir=rel)
+            for manager in pkg_managers:
+                if manager not in stack["package_managers"]:
+                    stack["package_managers"].append(manager)
             if fe_info:
                 if not stack["frontend"]:
                     stack["frontend"] = fe_info
@@ -171,16 +204,33 @@ def detect_project_stack(workspace_dir: str) -> Dict[str, Any]:
                     "status": fe_info.get("status", "ready"),
                 })
             if be_info:
-                if not stack["backend"]:
+                role = be_info.get("role") or "backend"
+                if role == "backend" and not stack["backend"]:
                     stack["backend"] = be_info
-                _add_package({
-                    "role": "backend",
+                entry = {
+                    "role": role,
                     "path": rel,
                     "framework": be_info["framework"],
                     "provider": be_info["provider"],
                     "adapter": be_info["adapter"],
                     "oumvSupported": bool(be_info.get("oumv_supported", False)),
                     "status": be_info.get("status", "planned"),
+                }
+                if not entry["oumvSupported"]:
+                    entry["reason"] = f"no OUMV adapter for {be_info['framework']} yet"
+                _add_package(entry)
+            if not fe_info and not be_info:
+                # Every manifest that was detected must also be accounted for: a
+                # package missing from `packages` reads as "not there", not "unsupported".
+                _add_package({
+                    "role": "package",
+                    "path": rel,
+                    "framework": "node",
+                    "provider": "node",
+                    "adapter": None,
+                    "oumvSupported": False,
+                    "status": "unsupported",
+                    "reason": "manifest present, but no supported frontend/backend framework was detected",
                 })
 
         # Go Backend detection

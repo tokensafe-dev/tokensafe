@@ -500,9 +500,9 @@ All hook adapters fail open: an internal error never stalls your agent. Failures
 | `compact_conversation` | Folds a long agent transcript into a compact state ledger |
 | `get_token_savings_metrics` | Cumulative token and cost savings analytics |
 | `oumv_status` | Status, capabilities, and connection health of frontend/backend OUMV runtimes with hybrid fallback mode |
-| `oumv_observe` | Progressive runtime observation (L0 pulse, L1 surface, L2 detail) with out-of-the-box static AST fallback |
+| `oumv_observe` | Progressive runtime observation (L0 pulse, L1 surface, L2 detail) with out-of-the-box static AST fallback. `path=<file>` observes that file offline: its symbols plus `file.version` (the OCC token) |
 | `oumv_understand` | Query runtime causality, state dependencies, and backend route mappings |
-| `oumv_mutate` | OCC-guarded source edits (mandatory `expectedVersion`, path jail, syntax pre-flight, backup) |
+| `oumv_mutate` | OCC-guarded source edits (`expectedVersion` from `observe` → `file.version`, path jail, syntax pre-flight, backup). A `symbol` edit splices that declaration only, with or without a live runtime |
 | `oumv_verify` | Transactional verification and state invariant assertions |
 </details>
 

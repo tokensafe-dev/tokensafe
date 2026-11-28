@@ -64,6 +64,33 @@ _STATIC_ASSET_EXTS = {
     ".map", ".pdf", ".mp4", ".mp3",
 }
 
+# Build output that happens to share a source extension: Vite/webpack bundles
+# (`index-otG6xuvO.js`), minified copies, and webview asset trees
+# (`android/app/src/main/assets/public/assets/`). Indexing them made L1 report
+# frontend.action calls from a compiled bundle instead of the source that produced it.
+_BUNDLE_HASH_RE = re.compile(r"^[^/]+-[A-Za-z0-9_-]{8,}\.(?:m?js|cjs|css)$")
+# Capacitor/Cordova copy the built web app into the native project; nothing under
+# that tree is source. Elsewhere (web `public/`) only hash-named bundles are output.
+_GENERATED_ASSET_PARTS = ("android/app/src/main/assets",)
+
+# Directory snapshots and tool output trees: they hold copies of code, not the
+# live code, so indexing them doubles the graph and every L1 answer.
+_SNAPSHOT_DIRS = {"backups", "graphify-out", "oumv-debug-logs"}
+
+
+def _is_generated_asset(rel_path: str, filename: str) -> bool:
+    """True for compiled/minified artifacts that only look like source files."""
+    lower = filename.lower()
+    if lower.endswith((".min.js", ".min.css", ".bundle.js", ".chunk.js")):
+        return True
+    normalized = "/" + rel_path.replace("\\", "/")
+    if any(part in normalized for part in _GENERATED_ASSET_PARTS):
+        return True
+    if not _BUNDLE_HASH_RE.match(filename):
+        return False
+    return "/public/assets/" in normalized or "/dist/assets/" in normalized
+
+
 _BACKEND_ROUTE_PATTERNS = [
     # (regex, default_method). Group 1 is always the route literal; the declaring
     # receiver (if any) is read back from the match text with _RECEIVER_RE.
@@ -574,6 +601,7 @@ class CodeGraph:
                 finally:
                     con.close()
                 os.replace(tmp_path, path)
+                GraphEngine._prune_cache(cache_dir, path)
             except Exception:
                 try:
                     os.unlink(tmp_path)
@@ -617,12 +645,23 @@ class CodeGraph:
         current_files = set()
 
         for dirpath, dirnames, filenames in os.walk(self.root_dir):
-            dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS and not d.startswith(".")]
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in IGNORED_DIRS and d not in _SNAPSHOT_DIRS and not d.startswith(".")
+            ]
             for filename in filenames:
                 _, ext = os.path.splitext(filename)
                 if ext.lower() in SUPPORTED_EXTS:
                     full_path = os.path.join(dirpath, filename)
                     rel_path = os.path.relpath(full_path, self.root_dir).replace("\\", "/")
+                    if _is_generated_asset(rel_path, filename):
+                        # A bundle indexed by an older scan must be dropped, not just skipped.
+                        if rel_path in self.file_symbols or rel_path in self.file_stats:
+                            self._purge_file(rel_path)
+                            self.file_stats.pop(rel_path, None)
+                            self.file_mtimes.pop(rel_path, None)
+                            reindexed += 1
+                        continue
                     current_files.add(rel_path)
 
                     try:
@@ -1744,6 +1783,43 @@ class CodeGraph:
         items = [f"{g['file']} ({g['dependents']} deps)" for g in nodes_to_show]
         return f"[TokenSafe Architecture Map | Core Hubs: {', '.join(items)}]"
 
+    def _as_repo_rel(self, target: str) -> str:
+        """Normalises a caller-supplied target to a repo-relative path.
+
+        Absolute paths arrive from MCP callers that pass `path=`; a path outside
+        this graph keeps only its basename so the candidate lookup can still say
+        which file was meant instead of matching nothing.
+        """
+        t = (target or "").replace("\\", "/").strip()
+        if os.path.isabs(t):
+            try:
+                rel = os.path.relpath(t, self.root_dir).replace("\\", "/")
+            except ValueError:
+                return os.path.basename(t)
+            if rel.startswith("../"):
+                return os.path.basename(t)
+            t = rel
+        root_name = os.path.basename(self.root_dir)
+        if root_name and t.startswith(root_name + "/"):
+            t = t[len(root_name) + 1:]
+        return t
+
+    def _file_facts(self, rel_path: str) -> Dict[str, Any]:
+        """Stable facts about an indexed file: symbol count, line count, OCC token."""
+        facts: Dict[str, Any] = {
+            "path": rel_path,
+            "lines": 0,
+            "symbols": len(self.file_symbols.get(rel_path, [])),
+        }
+        try:
+            with open(os.path.join(self.root_dir, rel_path), "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return facts
+        facts["version"] = "sha256:" + hashlib.sha256(data).hexdigest()
+        facts["lines"] = data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+        return facts
+
     def get_static_oumv_slice(self, level: str = "L0", target: Optional[str] = None) -> Dict[str, Any]:
         """
         Level 1 Static OUMV Inspection:
@@ -1765,7 +1841,7 @@ class CodeGraph:
             god_nodes = self.get_god_nodes(top_n=5)
             endpoints_count = sum(len(eps) for eps in self.file_endpoints.values())
             calls_count = sum(len(c) for c in self.file_api_calls.values())
-            return {
+            pulse: Dict[str, Any] = {
                 "level": "L0",
                 "mode": "STATIC_OFFLINE_PULSE",
                 "status": "OFFLINE_STATIC",
@@ -1778,12 +1854,57 @@ class CodeGraph:
                 "topGodNodes": [g["file"] for g in god_nodes],
                 "evidence": evidence,
             }
+            clean = (target or "").strip() or None
+            if clean:
+                # A target on L0 is not noise: answer for it even at pulse level.
+                rel = self._as_repo_rel(clean)
+                pulse["target"] = rel
+                if rel in self.file_symbols:
+                    pulse["targetResolved"] = True
+                    pulse["file"] = self._file_facts(rel)
+                elif os.path.splitext(clean)[1].lower() in SUPPORTED_EXTS:
+                    pulse["targetResolved"] = False
+            return pulse
 
         # L1: Discovered API surface & Routes
+        #
+        # A file path is a legitimate L1 target: offline, "show me this file's
+        # surface" is the question a caller has when the runtime is gone. It used
+        # to be impossible — the path was compared as a substring against routes
+        # and every file of the repo leaked into the answer.
+        clean_target = (target or "").strip() or None
+        rel_target = self._as_repo_rel(clean_target) if clean_target else None
+        # A *file* target ends with a source extension. A plain path prefix without
+        # one (`src/modules/contest`) keeps the old substring behaviour; only a file
+        # that cannot be resolved is refused instead of dumping the repository.
+        target_ext = os.path.splitext(clean_target)[1].lower() if clean_target else ""
+        looks_like_file = bool(clean_target) and target_ext in SUPPORTED_EXTS
+        file_target: Optional[str] = None
+        file_candidates: List[str] = []
+        if rel_target:
+            if rel_target in self.file_symbols:
+                file_target = rel_target
+            elif looks_like_file:
+                base = os.path.basename(rel_target).lower()
+                file_candidates = sorted(
+                    p for p in self.file_symbols
+                    if p.lower() == base or p.lower().endswith("/" + base)
+                )[:5]
+                if len(file_candidates) == 1:
+                    file_target = file_candidates[0]
+        t = clean_target.lower() if clean_target else ""
+
+        def _matches(rel_path: str, route: Optional[str]) -> bool:
+            if not clean_target:
+                return True
+            if file_target:
+                return rel_path == file_target
+            return t in (route or "").lower() or t in rel_path.lower()
+
         endpoints = []
         for rel_path, eps in self.file_endpoints.items():
             for norm_route, sym, method in eps:
-                if not target or target.lower() in norm_route.lower() or target.lower() in rel_path.lower():
+                if _matches(rel_path, norm_route):
                     endpoints.append({
                         "route": norm_route,
                         "method": method,
@@ -1795,7 +1916,7 @@ class CodeGraph:
         client_calls = []
         for rel_path, calls in self.file_api_calls.items():
             for norm_route, sym, method in calls:
-                if not target or target.lower() in norm_route.lower() or target.lower() in rel_path.lower():
+                if _matches(rel_path, norm_route):
                     client_calls.append({
                         "route": norm_route,
                         "method": method,
@@ -1807,14 +1928,17 @@ class CodeGraph:
         # Cross-stack relationships (frontend call -> backend endpoint) with evidence
         relationships = []
         for link in self.api_links:
-            if target:
-                t = target.lower()
+            if clean_target and not file_target:
                 hay = " ".join([
                     link["source"]["route"] or "", link["source"]["file"] or "",
                     link["target"]["route"] or "", link["target"]["file"] or "",
                 ]).lower()
                 if t not in hay:
                     continue
+            elif file_target and not any(
+                link[side].get("file") == file_target for side in ("source", "target")
+            ):
+                continue
             relationships.append({
                 "source": link["source"],
                 "target": link["target"],
@@ -1826,23 +1950,34 @@ class CodeGraph:
             })
 
         matching_symbols = []
-        if target:
-            t = target.lower()
-            for sk, sym in self.symbols.items():
-                # Match both names and file paths, like get_static_impact: a target
-                # that is a file path ("src/api/wheel.ts") must resolve to that
-                # file's symbols, or every path-shaped target silently matches none.
-                if t in sym.name.lower() or t in sym.file_path.lower():
-                    matching_symbols.append({
-                        "name": sym.name,
-                        "kind": sym.kind,
-                        "file": sym.file_path,
-                        "lines": [sym.line_start, sym.line_end],
-                    })
+        if clean_target:
+            if file_target:
+                for sk in self.file_symbols.get(file_target, []):
+                    sym = self.symbols.get(sk)
+                    if sym:
+                        matching_symbols.append({
+                            "name": sym.name,
+                            "kind": sym.kind,
+                            "file": sym.file_path,
+                            "lines": [sym.line_start, sym.line_end],
+                        })
+            else:
+                for sk, sym in self.symbols.items():
+                    # Match both names and file paths, like get_static_impact: a target
+                    # that is a file path ("src/api/wheel.ts") must resolve to that
+                    # file's symbols, or every path-shaped target silently matches none.
+                    if t in sym.name.lower() or t in sym.file_path.lower():
+                        matching_symbols.append({
+                            "name": sym.name,
+                            "kind": sym.kind,
+                            "file": sym.file_path,
+                            "lines": [sym.line_start, sym.line_end],
+                        })
 
         result = {
             "level": "L1",
-            "target": target,
+            "target": rel_target or clean_target,
+            "targetKind": "file" if file_target else ("target" if clean_target else "workspace"),
             "mode": "STATIC_SURFACE",
             "endpoints": endpoints[:30],
             "clientCalls": client_calls[:30],
@@ -1850,6 +1985,40 @@ class CodeGraph:
             "matchingSymbols": matching_symbols[:20],
             "evidence": evidence,
         }
+
+        if looks_like_file:
+            if file_target:
+                result["targetResolved"] = True
+                facts = self._file_facts(file_target)
+                result["file"] = facts
+                if facts.get("version"):
+                    # Offline mutations are real: the gateway splices the symbol,
+                    # enforces this OCC token, runs the syntax guard and keeps a backup.
+                    result["mutation"] = {
+                        "available": True,
+                        "mode": "offline-direct",
+                        "expectedVersion": facts["version"],
+                        "howTo": (
+                            "oumv(action='mutate', path='<file>', symbol='<name>', "
+                            "replacement='<new declaration>', expectedVersion='<file.version>'). "
+                            "Without a live runtime the gateway performs the same OCC + syntax-guard + backup edit."
+                        ),
+                    }
+            else:
+                # A path that resolves to nothing must answer "nothing", never the repo.
+                result["targetResolved"] = False
+                result["hint"] = (
+                    "No static index entry for this path (unsupported extension, generated asset, "
+                    "or an ignored directory). L1 only answers for indexed source files; use "
+                    "smart_read_file for the content."
+                )
+                if file_candidates:
+                    result["hint"] += " Did you mean one of `suggestions`?"
+                    result["suggestions"] = file_candidates
+                result["endpoints"] = []
+                result["clientCalls"] = []
+                result["relationships"] = []
+                result["matchingSymbols"] = []
         if lvl != "L1":
             # Asking for L2-L4 offline used to return this L1 payload with
             # confidence "confirmed" and no marker, so callers could not tell a
@@ -2114,6 +2283,13 @@ class GraphEngine:
 
     _instances: Dict[str, CodeGraph] = {}
     _instances_lock = threading.RLock()
+    # One lock per workspace root: a 15 s cold crawl used to hold the global lock,
+    # so every other tool call (repo_map, smart_read_file, oumv) timed out at 8 s
+    # while it waited for a repo it never asked about.
+    _scan_locks: Dict[str, threading.Lock] = {}
+    _warming: Set[str] = set()
+    _CACHE_MAX_FILES = int(os.environ.get("TOKENSAFE_GRAPH_CACHE_MAX", "400"))
+    _CACHE_MAX_BYTES = int(float(os.environ.get("TOKENSAFE_GRAPH_CACHE_MAX_MB", "2048")) * 1024 * 1024)
 
     @classmethod
     def find_project_root(cls, start_path: str) -> str:
@@ -2134,21 +2310,115 @@ class GraphEngine:
         return os.path.abspath(start_path if os.path.isdir(start_path) else os.path.dirname(start_path))
 
     @classmethod
+    def _scan_lock(cls, root_abs: str) -> threading.Lock:
+        with cls._instances_lock:
+            lock = cls._scan_locks.get(root_abs)
+            if lock is None:
+                lock = threading.Lock()
+                cls._scan_locks[root_abs] = lock
+            return lock
+
+    @classmethod
     def get_instance(cls, root_dir: str = ".") -> CodeGraph:
         root_abs = os.path.abspath(root_dir)
         # Rescans are full AST crawls; a 3s TTL caused near-constant rescans on every
         # smart_read_file(symbol=...) call. 60s keeps graphs fresh without the churn.
         rescan_ttl = float(os.environ.get("TOKENSAFE_GRAPH_TTL", "60.0"))
         with cls._instances_lock:
-            if root_abs not in cls._instances:
-                graph = CodeGraph(root_abs, use_disk_cache=True)
-                graph.scan()
-                cls._instances[root_abs] = graph
-            else:
-                graph = cls._instances[root_abs]
-                if time.time() - graph.last_scanned > rescan_ttl:
+            graph = cls._instances.get(root_abs)
+        if graph is None:
+            with cls._scan_lock(root_abs):
+                with cls._instances_lock:
+                    graph = cls._instances.get(root_abs)
+                if graph is None:
+                    graph = CodeGraph(root_abs, use_disk_cache=True)
                     graph.scan()
+                    with cls._instances_lock:
+                        cls._instances[root_abs] = graph
             return graph
+        if time.time() - graph.last_scanned > rescan_ttl:
+            lock = cls._scan_lock(root_abs)
+            if lock.acquire(blocking=False):
+                try:
+                    if time.time() - graph.last_scanned > rescan_ttl:
+                        graph.scan()
+                finally:
+                    lock.release()
+            # Another caller is already refreshing this root: serve the current
+            # graph instead of stacking a second crawl behind it.
+        return graph
+
+    @classmethod
+    def warm_async(cls, root_dir: str = ".") -> bool:
+        """Starts one background crawl per root so the first graph tool call is warm.
+
+        Returns True when a crawl was started, False when one is already running.
+        """
+        root_abs = os.path.abspath(root_dir)
+        with cls._instances_lock:
+            if root_abs in cls._warming:
+                return False
+            cls._warming.add(root_abs)
+
+        def _run() -> None:
+            try:
+                cls.get_instance(root_abs)
+            except Exception:
+                pass
+            finally:
+                with cls._instances_lock:
+                    cls._warming.discard(root_abs)
+
+        threading.Thread(target=_run, name="tokensafe-graph-warm", daemon=True).start()
+        return True
+
+    @classmethod
+    def _prune_cache(cls, cache_dir: str, keep_path: str, max_age_days: float = 30.0) -> int:
+        """Bounds the on-disk graph cache. One .db per root, forever, is a leak:
+        a working machine had 4,994 files / 10 GB because nothing evicted them."""
+        marker = os.path.join(cache_dir, ".pruned")
+        try:
+            if time.time() - os.path.getmtime(marker) < 3600:
+                return 0
+        except OSError:
+            pass
+        removed = 0
+        try:
+            keep_abs = os.path.abspath(keep_path)
+            now = time.time()
+            entries = []
+            total = 0
+            for name in os.listdir(cache_dir):
+                if not name.endswith((".db", ".json")):
+                    continue
+                path = os.path.join(cache_dir, name)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                entries.append((st.st_mtime, st.st_size, path))
+                total += st.st_size
+            entries.sort(reverse=True)  # newest first
+            for idx, (mtime, size, path) in enumerate(entries):
+                if os.path.abspath(path) == keep_abs or (now - mtime) < 3600:
+                    continue
+                too_old = (now - mtime) > max_age_days * 86400
+                over_cap = idx >= cls._CACHE_MAX_FILES
+                over_bytes = total > cls._CACHE_MAX_BYTES
+                if not (too_old or over_cap or over_bytes):
+                    continue
+                try:
+                    os.unlink(path)
+                    total -= size
+                    removed += 1
+                except OSError:
+                    pass
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(str(int(now)))
+        except OSError:
+            pass
+        return removed
 
     @classmethod
     def for_file(cls, file_path: str) -> Tuple[CodeGraph, str]:
@@ -2157,6 +2427,7 @@ class GraphEngine:
         graph = cls.get_instance(root)
         rel_path = os.path.relpath(os.path.abspath(file_path), root).replace("\\", "/")
         return graph, rel_path
+
 
 def main():
     import sys

@@ -141,6 +141,8 @@ TokenSafe integrates the **Universal Agent-Runtime Protocol (UARP / OUMV)** to i
 
 5. **OPTIMISTIC CONCURRENCY MUTATIONS (`oumv(action="mutate")`)**:
    - Submits surgical edits verified against `expectedVersion` with built-in Babel AST TSX/JSX syntax guards and security leak prevention.
+   - **Offline (no live runtime)**: `tokensafe:oumv(action="observe", level="L1", path="<file>")` returns that file's symbols and `file.version`; pass it as `expectedVersion`. A `symbol` edit splices only that declaration (other declarations stay), an unknown symbol is refused, and a stale token returns `-32001`.
+   - For a non-declaration range use `apply_edits` with `start_line`/`end_line`; for an unsupported stack (Bun/Elysia, worker, Node without an adapter) `oumv(action="status")` lists the package as `oumvSupported: false` instead of hiding it.
 
 ---
 
