@@ -244,7 +244,23 @@ function download(url, dest, expectedSize, redirects) {
 
 function extractArchive(archive, destDir) {
   fs.mkdirSync(destDir, { recursive: true });
-  const res = spawnSync('tar', ['-xzf', archive, '-C', destDir], { encoding: 'utf-8', stdio: 'pipe', timeout: 600000 });
+  // Windows: GNU tar (the one Git for Windows ships) reads `D:\...` as a remote
+  // host and fails with "Cannot connect to D:". Copying the archive next to the
+  // target and extracting it by relative name keeps the drive letter out of the
+  // argument list, which works for both GNU tar and bsdtar.
+  const localArchive = path.join(destDir, `.runtime${path.extname(archive) || '.tgz'}`);
+  fs.copyFileSync(archive, localArchive);
+  const res = spawnSync('tar', ['-xzf', path.basename(localArchive)], {
+    cwd: destDir,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+    timeout: 600000,
+  });
+  try {
+    fs.rmSync(localArchive, { force: true });
+  } catch (_) {
+    /* the extraction verdict matters more than the leftover */
+  }
   if (res.status !== 0) {
     const detail = ((res.stderr || '') || (res.error && res.error.message) || '').trim();
     throw new Error(`failed to extract the runtime archive${detail ? `: ${detail}` : ''}`);
