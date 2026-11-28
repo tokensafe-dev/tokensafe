@@ -63,7 +63,7 @@ class WindowsInstallerAssetsTest(unittest.TestCase):
         self.assertIn("Get-FileHash", source)
         self.assertIn("SHA256", source)
         # The download must be verified before it is extracted.
-        self.assertLess(source.index("Get-FileHash"), source.index("tar.exe -xzf"))
+        self.assertLess(source.index("Get-FileHash"), source.index("'-xzf'"))
         # And it must land in the layout the npm launcher recognises.
         self.assertIn("'python\\python.exe'", source)
         self.assertIn(".complete", source)
