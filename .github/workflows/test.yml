@@ -30,6 +30,43 @@ jobs:
         run: |
           python3 -m unittest discover tests
 
+  # The managed CPython provisioner was only ever exercised on darwin-arm64 when
+  # it shipped: this job runs it end to end on the platforms users actually
+  # install on. TOKENSAFE_FORCE_MANAGED_RUNTIME hides the runner's own CPython, so
+  # the download, the SHA-256 pin, the extraction layout and the dependency probe
+  # all have to work before `tokensafe` prints anything.
+  managed-runtime:
+    name: Managed CPython (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Provision the pinned runtime and run the CLI on it
+        shell: bash
+        env:
+          TOKENSAFE_FORCE_MANAGED_RUNTIME: "1"
+          TOKENSAFE_HOME: ${{ runner.temp }}/tokensafe-home
+        run: |
+          set -euo pipefail
+          out=$(node bin/tokensafe.js --version)
+          printf '%s\n' "$out"
+          # Reaching the CLI at all means the archive was downloaded, its SHA-256
+          # matched the pin, it extracted into the expected layout and the runtime
+          # answered a dependency probe. Pin that down so a silent fallback to a
+          # broken interpreter cannot pass.
+          printf '%s' "$out" | grep -q "TokenSafe v" || { echo "::error::the managed runtime did not run the CLI"; exit 1; }
+          ls -d "$TOKENSAFE_HOME"/runtime/*/ >/dev/null || { echo "::error::no managed runtime directory"; exit 1; }
+          test -f "$TOKENSAFE_HOME"/runtime/*/.complete || { echo "::error::the managed runtime is not marked complete"; exit 1; }
+
   node-check:
     runs-on: ubuntu-latest
     steps:

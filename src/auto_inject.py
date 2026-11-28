@@ -281,7 +281,7 @@ def go_patch_state(workspace: str) -> Dict[str, Any]:
 _GO_MODULE = "github.com/tokensafe-dev/tokensafe-backend/go"
 # Keep in step with the backend release tag (go/vX.Y.Z): injection must never
 # downgrade an adapter that is already newer than this pin.
-_GO_MODULE_VERSION = "v0.9.0"
+_GO_MODULE_VERSION = "v0.9.2"
 
 
 def _version_tuple(tag: str):
@@ -911,17 +911,17 @@ def revert_dotnet_patch(workspace: str) -> Dict[str, Any]:
 # Pinned to the backend release: the sidecars are single files, so the cache is
 # content-addressed by SHA-256 and a clean machine downloads the exact bytes the
 # release was certified from. Bump both the tag and the hashes together.
-_SIDECAR_RELEASE_TAG = "v0.9.0"
+_SIDECAR_RELEASE_TAG = "v0.9.2"
 _SIDECARS = {
     "spring": (
         "java/src/dev/tokensafe/oumv/OumvSpring.java",
         "OumvSpring.java",
-        "011b770c69e182f339b36ef1002dbcf135e066744285354b64990ec3b595afb3",
+        "45aa63f2c71cf25065f591ebd589b21c7c7c58d218f3dce45880af0e1f1e7d81",
     ),
     "php": (
         "php/bin/oumv-php",
         "oumv-php",
-        "f22c19c050869d613989dea24edde0cacdc3d3fb876cd43834ca4e614ec89900",
+        "660e7f53cc3799bd700cea2173f672594a5b8bc33e26cfa91ee559aec66f325a",
     ),
 }
 

@@ -366,6 +366,13 @@ async function findPython(options = {}) {
     fail(`TOKENSAFE_PYTHON=${pinned} is not a usable CPython ${MIN_PYTHON[0]}.${MIN_PYTHON[1]}+ with 'cryptography'.`);
   }
 
+  // CI and support repros need the managed path even when the machine happens to
+  // have a suitable CPython: without this the provisioner is never exercised on
+  // the runners, which is exactly how a broken Linux/Windows archive ships.
+  if ((process.env.TOKENSAFE_FORCE_MANAGED_RUNTIME || '').trim() === '1') {
+    return allowProvision ? await ensureManagedRuntime() : null;
+  }
+
   const candidates = [];
   const venvPy = venvPythonPath();
   if (fs.existsSync(venvPy)) candidates.push(venvPy);
