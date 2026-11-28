@@ -63,9 +63,13 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
     ValueData: "{olddata};{app}\bin"; Check: NeedsAddPath('{app}\bin')
 
 [Run]
-; `login` opens the browser and waits for the local callback, so the user can
-; activate the free Community license without knowing a command. CreateProcess
-; cannot start a .cmd directly, hence the explicit {cmd}.
+; Agent wiring and login are interactive (they may start a proxy, install the UI
+; companion and open a browser), so they run from the Finish page in a visible
+; console. A hidden, unattended `setup --all` can block forever on a prompt -
+; that is exactly what a silent install must never do.
+Filename: "{cmd}"; Parameters: "/c ""{app}\bin\tokensafe.cmd"" setup --all & echo. & pause"; \
+    Description: "Configure the AI agents found on this machine"; \
+    Flags: postinstall skipifsilent
 Filename: "{cmd}"; Parameters: "/c ""{app}\bin\tokensafe.cmd"" login"; \
     Description: "Log in to activate the free Community license"; \
     Flags: postinstall nowait skipifsilent
@@ -119,7 +123,7 @@ begin
   PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\' + BootstrapRelative) + '" -AppDir "' + ExpandConstant('{app}') +
-    '" -Mode Setup';
+    '" -Mode Provision';
 
   if (not Exec(PowerShell, Params, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode))
      or (ResultCode <> 0) then

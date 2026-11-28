@@ -41,7 +41,12 @@ class WindowsInstallerAssetsTest(unittest.TestCase):
     def test_installer_runs_the_bootstrapper(self):
         source = ISS_PATH.read_text(encoding="utf-8")
         self.assertIn("bootstrap.ps1", source)
-        self.assertIn("-Mode Setup", source)
+        # Provisioning is unattended and must stay that way: the interactive
+        # agent wiring runs from the Finish page, never inside a hidden process
+        # that can block on a prompt (a silent install hung exactly like that).
+        self.assertIn("-Mode Provision", source)
+        self.assertNotIn("-Mode Setup", source)
+        self.assertIn("setup --all", source)
         # A failed bootstrap must surface the log path, not a silent no-op.
         self.assertIn("install.log", source)
 
