@@ -20,6 +20,7 @@ The block is exercised through bash with fake interpreters on PATH, so the
 Windows branch is covered without a Windows runner.
 """
 
+import json
 import os
 import shutil
 import stat
@@ -368,6 +369,102 @@ class InstallerBootstrapTest(unittest.TestCase):
         # Nothing to register and nothing to explain: the fallback stays untouched.
         self.assertFalse((self.tmp / "local" / "bin" / "tokensafe.cmd").exists())
         self.assertNotIn("new terminals", result.stdout)
+
+    # -- the pinned download (no Python, no Node) ---------------------------
+
+    def test_manifest_lookups_match_the_json(self):
+        """bin/python-runtime.json is parsed with awk: the pin has one source."""
+        manifest = PROJECT_ROOT / "bin" / "python-runtime.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        keys = " ".join(sorted(data["targets"]))
+        result = self.run_block(
+            f"""
+            echo "base=$(ts_manifest_top '{manifest}' base_url)"
+            echo "release=$(ts_manifest_top '{manifest}' release)"
+            echo "python=$(ts_manifest_top '{manifest}' python)"
+            for key in {keys}; do
+                printf '%s|%s|%s\\n' "$key" \\
+                    "$(ts_manifest_target '{manifest}' "$key" asset)" \\
+                    "$(ts_manifest_target '{manifest}' "$key" sha256)"
+            done
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertIn(f"base={data['base_url']}", lines)
+        self.assertIn(f"release={data['release']}", lines)
+        self.assertIn(f"python={data['python']}", lines)
+        parsed = {}
+        for line in lines:
+            if "|" in line:
+                key, asset, sha = line.split("|")
+                parsed[key] = (asset, sha)
+        self.assertEqual(parsed, {
+            key: (target["asset"], target["sha256"]) for key, target in data["targets"].items()
+        })
+
+    def test_provisioner_downloads_the_pinned_asset_and_writes_the_marker(self):
+        """`curl | bash` on a machine with no Python and no Node still installs."""
+        manifest = PROJECT_ROOT / "bin" / "python-runtime.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        target = data["targets"]["darwin-arm64"]
+        url_log = self.tmp / "curl-url.txt"
+        write_executable(self.bin / "uname", "#!/bin/sh\n[ \"$1\" = \"-m\" ] && echo arm64 || echo Darwin\n")
+        # curl: record the URL and drop a dummy archive where -o pointed.
+        write_executable(
+            self.bin / "curl",
+            f'#!/bin/sh\nfor last; do :; done\nprintf "%s\\n" "$last" > "{url_log}"\n'
+            'while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+            ': > "$out"\n',
+        )
+        write_executable(self.bin / "sha256sum", f"#!/bin/sh\necho '{target['sha256']}  $1'\n")
+        # tar: produce the layout the npm launcher expects.
+        write_executable(
+            self.bin / "tar",
+            '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = "-C" ] && dir="$2"; shift; done\n'
+            'mkdir -p "$dir/python/bin"; printf "#!/bin/sh\\n" > "$dir/python/bin/python3"; '
+            'chmod +x "$dir/python/bin/python3"\n',
+        )
+
+        result = self.run_block(
+            f"""
+            ts_provision_python '{manifest}'
+            printf 'PROVISIONED=%s\\n' "$TS_PYTHON"
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PROVISIONED=", result.stdout)
+        exe = Path(result.stdout.split("PROVISIONED=")[1].strip())
+        self.assertTrue(str(exe).endswith("python/bin/python3"), exe)
+        self.assertEqual(url_log.read_text().strip(),
+                         f"{data['base_url']}/{data['release']}/{target['asset']}")
+        marker = (
+            self.home / ".tokensafe" / "runtime" / f"{data['python']}-{data['release']}" / ".complete"
+        )
+        self.assertEqual(marker.read_text().strip(), target["sha256"])
+
+    def test_provisioner_rejects_a_digest_mismatch(self):
+        manifest = PROJECT_ROOT / "bin" / "python-runtime.json"
+        write_executable(self.bin / "uname", "#!/bin/sh\n[ \"$1\" = \"-m\" ] && echo arm64 || echo Darwin\n")
+        write_executable(
+            self.bin / "curl",
+            '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n: > "$out"\n',
+        )
+        write_executable(self.bin / "sha256sum", "#!/bin/sh\necho 'deadbeef  $1'\n")
+        write_executable(self.bin / "tar", "#!/bin/sh\nexit 0\n")
+
+        result = self.run_block(
+            f"""
+            if ts_provision_python '{manifest}'; then echo "ACCEPTED"; else echo "REJECTED"; fi
+            """
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("REJECTED", result.stdout)
+        self.assertIn("SHA-256 mismatch", result.stdout)
+        self.assertFalse((self.home / ".tokensafe" / "runtime").exists())
 
     # -- the copies --------------------------------------------------------
 

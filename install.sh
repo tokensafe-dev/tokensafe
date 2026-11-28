@@ -169,6 +169,106 @@ ts_print_no_python_guidance() {
     echo "  Any platform:  https://www.python.org/downloads/"
     echo "  Point at one:  TOKENSAFE_PYTHON=/path/to/python3 (prefix the command)"
 }
+
+# Maps uname to the keys of bin/python-runtime.json.
+ts_platform_key() {
+    case "$(uname -s 2>/dev/null)/$(uname -m 2>/dev/null)" in
+        Darwin/arm64) printf 'darwin-arm64' ;;
+        Darwin/x86_64) printf 'darwin-x64' ;;
+        Linux/x86_64) printf 'linux-x64' ;;
+        Linux/aarch64|Linux/arm64) printf 'linux-arm64' ;;
+        MINGW*/x86_64|MSYS*/x86_64|CYGWIN*/x86_64) printf 'win32-x64' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Field lookups in bin/python-runtime.json without Python or Node to parse it
+# (the whole point of this block is that neither is installed).
+ts_manifest_top() {
+    awk -v field="$2" '
+        index($0, "\"targets\"") { exit }
+        index($0, "\"" field "\":") {
+            value = $0
+            sub(/.*:[ ]*"/, "", value); sub(/".*/, "", value)
+            print value; exit
+        }
+    ' "$1"
+}
+
+ts_manifest_target() {
+    awk -v key="$2" -v field="$3" '
+        index($0, "\"" key "\": {") { inside = 1; next }
+        inside && index($0, "\"" field "\":") {
+            value = $0
+            sub(/.*:[ ]*"/, "", value); sub(/".*/, "", value)
+            print value; exit
+        }
+        inside && index($0, "}") { exit }
+    ' "$1"
+}
+
+# Downloads and verifies the pinned CPython itself, so `curl | bash` needs
+# neither Python nor Node. Same layout and `.complete` marker the npm launcher
+# writes, so the two runtimes are interchangeable. Sets TS_PYTHON on success.
+ts_provision_python() {
+    local manifest="$1" platform base release version asset sha dir exe archive actual
+    [ -f "${manifest}" ] || return 1
+    platform=$(ts_platform_key) || return 1
+    base=$(ts_manifest_top "${manifest}" base_url)
+    release=$(ts_manifest_top "${manifest}" release)
+    version=$(ts_manifest_top "${manifest}" python)
+    asset=$(ts_manifest_target "${manifest}" "${platform}" asset)
+    sha=$(ts_manifest_target "${manifest}" "${platform}" sha256)
+    [ -n "${base}" ] && [ -n "${release}" ] && [ -n "${version}" ] || return 1
+    [ -n "${asset}" ] && [ -n "${sha}" ] || return 1
+
+    dir="${HOME}/.tokensafe/runtime/${version}-${release}"
+    case "${platform}" in
+        win32-*) exe="${dir}/python/python.exe" ;;
+        *) exe="${dir}/python/bin/python3" ;;
+    esac
+    if [ -f "${dir}/.complete" ] && [ -x "${exe}" ] \
+        && [ "$(head -n 1 "${dir}/.complete" | tr -d '\r')" = "${sha}" ]; then
+        TS_PYTHON="${exe}"
+        return 0
+    fi
+
+    command -v curl >/dev/null 2>&1 || return 1
+    echo "  No CPython 3.10+ found — downloading the pinned CPython ${version} (one time, ~50 MB)..."
+    archive="${TMPDIR:-/tmp}/tokensafe-runtime-${asset}"
+    rm -f "${archive}"
+    if ! curl -fsSL -o "${archive}" "${base}/${release}/${asset}"; then
+        echo "  ✖ Download failed: ${base}/${release}/${asset}"
+        rm -f "${archive}"
+        return 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "${archive}" | awk '{print $1}')
+    else
+        actual=$(shasum -a 256 "${archive}" | awk '{print $1}')
+    fi
+    if [ "${actual}" != "${sha}" ]; then
+        echo "  ✖ SHA-256 mismatch for ${asset} (got ${actual})"
+        rm -f "${archive}"
+        return 1
+    fi
+    rm -rf "${dir}"
+    if ! mkdir -p "${dir}" || ! tar -xzf "${archive}" -C "${dir}"; then
+        echo "  ✖ Could not extract ${asset}"
+        rm -f "${archive}"
+        return 1
+    fi
+    rm -f "${archive}"
+    # Single line: bin/tokensafe.js compares split("\n")[0] against the pin.
+    printf '%s\n' "${sha}" > "${dir}/.complete"
+    [ -x "${exe}" ] || chmod +x "${exe}" 2>/dev/null || true
+    if [ ! -x "${exe}" ]; then
+        echo "  ✖ The runtime archive did not contain ${exe}"
+        return 1
+    fi
+    TS_PYTHON="${exe}"
+    return 0
+}
 # <<< bootstrap-python <<<
 
 # >>> windows-cli-shim >>>
@@ -287,7 +387,7 @@ POWERSHELL
 }
 # <<< windows-cli-shim <<<
 
-if ! ts_resolve_python; then
+if ! ts_resolve_python && ! ts_provision_python "${SCRIPT_DIR}/bin/python-runtime.json"; then
     ts_print_no_python_guidance
     exit 1
 fi

@@ -31,8 +31,10 @@ pip install tokensafe && tokensafe
 curl -fsSL https://tokensafe.dev/install.sh | bash
 
 # Option 4: Windows installer (.exe — no Python, Node or Git Bash required)
-# https://github.com/tokensafe-dev/tokensafe/releases/latest -> TokenSafe-Setup-<version>.exe
+# https://github.com/tokensafe-dev/tokensafe/releases/latest/download/TokenSafe-Setup.exe
 ```
+
+Every option now works on a machine with **neither Python nor Node**: `install.sh` honours an existing CPython, otherwise downloads and SHA-256-verifies the pinned `bin/python-runtime.json` build itself (curl + tar only), and finally hands over to the npm launcher. The `.exe` does the same provisioning in PowerShell.
 
 The installer detects which AI coding agents live on your machine, registers the TokenSafe MCP server, injects project rules, and (where the agent supports it) wires lifecycle hooks. Run `tokensafe setup --all` to configure every detected agent non-interactively.
 

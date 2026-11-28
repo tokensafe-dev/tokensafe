@@ -85,6 +85,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
           Get-ChildItem 'installer-output'
 
+      - name: Add the stable download alias
+        shell: pwsh
+        # The version lives inside the .exe; the asset name must not, so
+        # https://github.com/…/releases/latest/download/TokenSafe-Setup.exe is a
+        # permanent URL the landing prompt and docs can point at.
+        run: |
+          $exe = Get-ChildItem 'installer-output\*.exe' | Select-Object -First 1
+          Copy-Item $exe.FullName (Join-Path 'installer-output' 'TokenSafe-Setup.exe') -Force
+          Get-ChildItem 'installer-output'
+
       - name: Detect signing credentials
         shell: pwsh
         run: |
@@ -120,10 +130,11 @@ jobs:
         if: env.HAS_SIGNING == '1'
         shell: pwsh
         run: |
-          $exe = Get-ChildItem 'installer-output\*.exe' | Select-Object -First 1
-          $signature = Get-AuthenticodeSignature $exe.FullName
-          Write-Host "$($exe.Name): $($signature.Status) / $($signature.SignerCertificate.Subject)"
-          if ($signature.Status -ne 'Valid') { throw "signature status is $($signature.Status)" }
+          foreach ($exe in Get-ChildItem 'installer-output\*.exe') {
+            $signature = Get-AuthenticodeSignature $exe.FullName
+            Write-Host "$($exe.Name): $($signature.Status) / $($signature.SignerCertificate.Subject)"
+            if ($signature.Status -ne 'Valid') { throw "$($exe.Name) signature status is $($signature.Status)" }
+          }
 
       - name: Upload the installer artifact
         uses: actions/upload-artifact@v4
@@ -189,12 +200,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $exe = (Get-ChildItem 'installer-output\*.exe' | Select-Object -First 1).FullName
+          $exes = @(Get-ChildItem 'installer-output\*.exe' | ForEach-Object { $_.FullName })
           for ($attempt = 1; $attempt -le 20; $attempt++) {
             gh release view $env:GITHUB_REF_NAME 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) {
-              gh release upload $env:GITHUB_REF_NAME $exe --clobber
-              if ($LASTEXITCODE -eq 0) { Write-Host "uploaded $exe"; exit 0 }
+              gh release upload $env:GITHUB_REF_NAME @exes --clobber
+              if ($LASTEXITCODE -eq 0) { Write-Host "uploaded: $($exes -join ', ')"; exit 0 }
             }
             Write-Host "attempt $attempt/20: release $env:GITHUB_REF_NAME not ready yet"
             Start-Sleep -Seconds 30
