@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A wedged step must fail on a budget, never run for hours.
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
@@ -38,6 +40,8 @@ jobs:
   managed-runtime:
     name: Managed CPython (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A wedged step must fail on a budget, never run for hours.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +73,8 @@ jobs:
 
   node-check:
     runs-on: ubuntu-latest
+    # A wedged step must fail on a budget, never run for hours.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

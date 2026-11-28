@@ -21,6 +21,8 @@ jobs:
     # or touch an existing GitHub release.
     if: github.event_name == 'push' || inputs.publish_ref == ''
     runs-on: ubuntu-latest
+    # A wedged step must fail on a budget, never run for hours.
+    timeout-minutes: 40
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -120,6 +122,8 @@ jobs:
     # tagged tree without re-publishing npm or moving the tag.
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_ref != ''
     runs-on: ubuntu-latest
+    # A wedged step must fail on a budget, never run for hours.
+    timeout-minutes: 20
     environment:
       name: pypi
       url: https://pypi.org/project/tokensafe/
