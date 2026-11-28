@@ -48,6 +48,11 @@ _BACKEND_LINES = {
         "(`mountTokensafe(app)` for Express, `registerTokensafe(app)` for Fastify); "
         "then use tokensafe:oumv for endpoints/impact and oumv_verify for live checks."
     ),
+    "elysia": (
+        "backend elysia/{framework} (Bun): install `tokensafe-backend-node` and add "
+        "`app.use(require('tokensafe-backend-node/elysia').oumv())` before `app.listen()`; "
+        "then use tokensafe:oumv for endpoints/impact and oumv_verify for live checks."
+    ),
 }
 
 

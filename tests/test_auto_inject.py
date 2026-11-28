@@ -73,6 +73,47 @@ class TestAutoInject(unittest.TestCase):
         self.assertEqual(reverted["status"], "reverted")
         self.assertEqual(open(server_path, encoding="utf-8").read(), original)
 
+    def test_elysia_app_gets_a_plugin_line_and_a_clean_revert(self):
+        with open(os.path.join(self.tmp, "package.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "name": "api",
+                    "scripts": {"dev": "bun --watch src/index.ts"},
+                    "dependencies": {"elysia": "^1.2.20"},
+                    "devDependencies": {"@types/bun": "latest"},
+                },
+                f,
+            )
+        os.makedirs(os.path.join(self.tmp, "src"))
+        path = os.path.join(self.tmp, "src", "index.ts")
+        original = (
+            "import { Elysia } from 'elysia';\n\n"
+            "export const app = new Elysia()\n"
+            "  .get('/api/orders', () => ({ orders: [] }));\n\n"
+            "app.listen(3000);\n"
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        plan = auto_inject.plan(self.tmp)
+        action = next(a for a in plan["actions"] if a["kind"] == "elysia_plugin_patch")
+        self.assertEqual(action["framework"], "elysia")
+        self.assertIn("bun add tokensafe-backend-node", action["install"])
+
+        patched = auto_inject.apply_elysia_patch(self.tmp)
+        self.assertEqual(patched["status"], "patched")
+        after = open(path, encoding="utf-8").read()
+        self.assertIn("// tokensafe:oumv:begin", after)
+        self.assertIn("app.use(_oumv());", after)
+        # Inserted before `.listen(`: the `.use(...)` chain above stays intact.
+        self.assertLess(after.index("app.use(_oumv());"), after.index("app.listen(3000)"))
+
+        again = auto_inject.apply_elysia_patch(self.tmp)
+        self.assertEqual(again["status"], "already_patched")
+        reverted = auto_inject.revert_elysia_patch(self.tmp)
+        self.assertEqual(reverted["status"], "reverted")
+        self.assertEqual(open(path, encoding="utf-8").read(), original)
+
     def test_spring_and_php_are_detected_and_get_a_sidecar_action(self):
         os.makedirs(os.path.join(self.tmp, "svc"))
         with open(os.path.join(self.tmp, "svc", "pom.xml"), "w", encoding="utf-8") as f:

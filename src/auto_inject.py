@@ -558,7 +558,7 @@ def revert_go_patch(workspace: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 def _find_node_entrypoint(workspace: str) -> Optional[str]:
-    """Finds the Node entry file that creates the framework app."""
+    """Finds the Node/Bun entry file that creates the framework app."""
     candidates: List[str] = []
     pkg_path = os.path.join(workspace, "package.json")
     try:
@@ -569,7 +569,11 @@ def _find_node_entrypoint(workspace: str) -> Optional[str]:
             candidates.append(main)
     except Exception:
         pass
-    candidates += ["src/index.js", "src/server.js", "src/app.js", "index.js", "server.js", "app.js"]
+    candidates += [
+        "src/index.js", "src/server.js", "src/app.js", "index.js", "server.js", "app.js",
+        # Bun/Elysia projects are TypeScript: `bun --watch src/index.ts` is the default script.
+        "src/index.ts", "src/server.ts", "src/app.ts", "index.ts", "server.ts", "app.ts",
+    ]
     for rel in candidates:
         path = os.path.join(workspace, rel)
         if os.path.isfile(path):
@@ -584,6 +588,9 @@ def _node_framework_of(workspace: str) -> Optional[str]:
         deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
     except Exception:
         return None
+    # Elysia implies Bun; a project that has both should get the Bun mount.
+    if "elysia" in deps:
+        return "elysia"
     if "fastify" in deps:
         return "fastify"
     if "express" in deps:
@@ -672,6 +679,111 @@ def revert_node_patch(workspace: str) -> Dict[str, Any]:
     manifest = _read_manifest(workspace, "node", ("node_mount",))
     if manifest is None:
         return {"status": "clean", "reason": "no Node patch manifest"}
+    entrypoint = manifest.get("entrypoint")
+    backup = manifest.get("backup")
+    if not (entrypoint and backup and os.path.isfile(backup)):
+        return {"status": "error", "reason": "backup missing; restore manually"}
+    shutil.copy2(backup, entrypoint)
+    _delete_manifest(manifest)
+    return {"status": "reverted", "entrypoint": os.path.relpath(entrypoint, workspace)}
+
+
+def _elysia_app_reference(source: str) -> Optional[Tuple[str, str, int]]:
+    """(var, indent, insert_at) for the `.use(oumv())` line: before `listen` when present.
+
+    Elysia apps are usually a `.use(...)` chain ending in `app.listen(...)`. Injecting
+    before `listen` keeps the chain intact and runs after every route plugin, so the
+    route table `onStart` reads is complete. A file that exports the app without
+    listening falls back to the `new Elysia()` assignment.
+    """
+    listen = re.search(r"(?m)^(?P<indent>[ \t]*)(?P<var>[A-Za-z_$][\w$]*)\.listen\(", source)
+    if listen:
+        return listen.group("var"), listen.group("indent"), listen.start()
+    created = re.search(
+        r"(?m)^(?P<indent>[ \t]*)(?:export\s+)?(?:const|let|var)\s+(?P<var>[A-Za-z_$][\w$]*)"
+        r"\s*=\s*new\s+Elysia\([^)]*\)[ \t]*;?[ \t]*$",
+        source,
+    )
+    if not created:
+        return None
+    line_end = source.find("\n", created.end())
+    insert_at = len(source) if line_end < 0 else line_end + 1
+    return created.group("var"), created.group("indent"), insert_at
+
+
+def elysia_patch_state(workspace: str) -> Dict[str, Any]:
+    path = _find_node_entrypoint(workspace)
+    if not path or _node_framework_of(workspace) != "elysia":
+        return {"entrypoint": None, "patched": False, "framework": _node_framework_of(workspace)}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            source = f.read()
+    except OSError:
+        source = ""
+    return {
+        "entrypoint": os.path.relpath(path, workspace),
+        "patched": _MARK_BEGIN in source and _MARK_END in source,
+        "framework": "elysia",
+    }
+
+
+def apply_elysia_patch(workspace: str, dry_run: bool = False) -> Dict[str, Any]:
+    """Adds `app.use(oumv())` to an Elysia app, with a byte-exact backup."""
+    if _node_framework_of(workspace) != "elysia":
+        return {"status": "skipped", "reason": "no Elysia dependency in package.json"}
+    path = _find_node_entrypoint(workspace)
+    if not path:
+        return {"status": "skipped", "reason": "no Bun entrypoint found"}
+
+    with open(path, "r", encoding="utf-8") as f:
+        source = f.read()
+    if _MARK_BEGIN in source:
+        return {"status": "already_patched", "entrypoint": os.path.relpath(path, workspace)}
+
+    ref = _elysia_app_reference(source)
+    if not ref:
+        return {
+            "status": "skipped",
+            "reason": f"could not find `new Elysia(...)` or `<app>.listen(...)` in {os.path.relpath(path, workspace)}",
+        }
+    var, indent, insert_at = ref
+    mount = (
+        f"{indent}{_MARK_BEGIN}\n"
+        f"{indent}const {{ oumv: _oumv }} = require('tokensafe-backend-node/elysia');\n"
+        f"{indent}{var}.use(_oumv());\n"
+        f"{indent}{_MARK_END}\n"
+    )
+    patched = source[:insert_at] + mount + source[insert_at:]
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "entrypoint": os.path.relpath(path, workspace),
+            "framework": "elysia",
+            "preview": f"{var}.use(_oumv());",
+        }
+
+    backup_dir = _inject_dir(workspace)
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, os.path.relpath(path, workspace).replace(os.sep, "__") + ".bak")
+    shutil.copy2(path, backup_path)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(patched)
+    _write_manifest(workspace, "elysia", {"entrypoint": path, "backup": backup_path, "framework": "elysia"})
+    return {
+        "status": "patched",
+        "entrypoint": os.path.relpath(path, workspace),
+        "framework": "elysia",
+        "mode": "elysia_plugin",
+        "backup": backup_path,
+        "line": f"{var}.use(_oumv());",
+    }
+
+
+def revert_elysia_patch(workspace: str) -> Dict[str, Any]:
+    manifest = _read_manifest(workspace, "elysia", ("elysia_plugin",))
+    if manifest is None:
+        return {"status": "clean", "reason": "no Elysia patch manifest"}
     entrypoint = manifest.get("entrypoint")
     backup = manifest.get("backup")
     if not (entrypoint and backup and os.path.isfile(backup)):
@@ -1169,6 +1281,7 @@ def plan(workspace: str) -> Dict[str, Any]:
             "fastapi": "backend/fastapi",
             "go": "backend/go",
             "node": "backend/node",
+            "elysia": "backend/elysia",
             "spring": "backend/spring",
             "php": "backend/php",
             "dotnet": "backend/aspnetcore",
@@ -1196,6 +1309,18 @@ def plan(workspace: str) -> Dict[str, Any]:
                 "entrypoint": state["entrypoint"],
                 "description": "one AutoMount() line between tokensafe markers; byte-exact backup + --revert",
                 "install": install,
+            })
+        elif provider == "elysia":
+            state = elysia_patch_state(workspace)
+            actions.append({
+                "kind": "elysia_plugin_patch",
+                "profile": "backend",
+                "framework": "elysia",
+                "writes_repo": True,
+                "already_patched": state["patched"],
+                "entrypoint": state["entrypoint"],
+                "description": "one app.use(oumv()) line before app.listen() between tokensafe markers; byte-exact backup + --revert",
+                "install": install or "bun add tokensafe-backend-node",
             })
         elif provider == "node":
             state = node_patch_state(workspace)
@@ -1292,6 +1417,8 @@ def apply(workspace: str, dry_run: bool = False, include_go: bool = True) -> Dic
 
     if backend.get("provider") == "go" and include_go:
         results["actions"].append({"kind": "go_one_line_patch", **apply_go_patch(workspace, dry_run=dry_run)})
+    elif backend.get("provider") == "elysia":
+        results["actions"].append({"kind": "elysia_plugin_patch", **apply_elysia_patch(workspace, dry_run=dry_run)})
     elif backend.get("provider") == "node":
         results["actions"].append({"kind": "node_one_line_patch", **apply_node_patch(workspace, dry_run=dry_run)})
     elif backend.get("provider") == "dotnet":
@@ -1314,6 +1441,7 @@ def revert(workspace: str) -> Dict[str, Any]:
         "workspace": workspace,
         "go": revert_go_patch(workspace),
         "node": revert_node_patch(workspace),
+        "elysia": revert_elysia_patch(workspace),
         "dotnet": revert_dotnet_patch(workspace),
         "next": revert_next_patch(workspace),
     }

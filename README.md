@@ -215,7 +215,7 @@ Deeper mechanics (language matrix, AST syntax trees, cache tiers, governor) live
 
 You install TokenSafe, open a project in your agent, and the first turn does the wiring:
 
-1. **Detect** the stack (React/Vue + Vite, FastAPI, Go/Gin|Chi, or nothing supported).
+1. **Detect** the stack (React/Vue + Vite, FastAPI, Go/Gin|Chi, Node/Express|Fastify, Next.js, Elysia on Bun, ASP.NET Core, or nothing supported).
 2. **Activate** the adapters:
    * frontend — `tokensafe dev` serves OUMV from an inline Vite config; **no file in the
      repository changes**;
@@ -226,7 +226,9 @@ You install TokenSafe, open a project in your agent, and the first turn does the
    * Node (Express/Fastify) — one `mountTokensafe(app)` / `registerTokensafe(app)` line, same
      markers and byte-exact revert; ASP.NET Core — one `AddTokensafe()`/`UseTokensafe()` pair;
    * Next.js (App Router) — one generated `app/api/tokensafe/route.ts` Route Handler
-     (`createNextRouteHandlers`), server profile; `--revert` deletes the file.
+     (`createNextRouteHandlers`), server profile; `--revert` deletes the file;
+   * Elysia (Bun) — one `app.use(oumv())` line before `app.listen()`
+     (`tokensafe-backend-node/elysia`), same markers and byte-exact revert.
 3. **Brief the agent** — a short routing block (hook context and MCP `instructions`) says which
    stack is worked through OUMV and which through the TokenSafe tools. Nothing is written into
    the repository by the brief.

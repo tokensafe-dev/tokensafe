@@ -15,7 +15,9 @@ the recommended path and are not documented as a product surface.
 | Backend | Go / Gin | `oumvgin.AutoMount(r)` | `tokensafe inject` | one line + one import (marker-delimited, revertible) **and** `go.mod`/`go.sum` dependency entries |
 | Backend | Go / Chi | `oumvchi.AutoMount(r)` | `tokensafe inject` | same |
 | Backend | Go / net/http | `stdhttp.NewServeMux(rt)` | generated project (`tokensafe create --template gin`) | adapter-owned mux |
-| Backend | Node.js / Express, Fastify, NestJS | — | not yet | — |
+| Backend | Node.js / Express, Fastify | `mountTokensafe(app)` / `registerTokensafe(app)` | `tokensafe inject` | one line (marker-delimited, revertible) **and** npm dependency |
+| Backend | Next.js (App Router) | `createNextRouteHandlers()` Route Handler | `tokensafe inject` | one generated `app/api/tokensafe/route.ts` |
+| Backend | Elysia (Bun) | `app.use(oumv())` from `tokensafe-backend-node/elysia` | `tokensafe inject` | one line (marker-delimited, revertible) **and** `bun add tokensafe-backend-node` |
 
 Anything else (Django, Angular, Rails, …) is explicitly unsupported: the routing brief
 tells the agent to use `repo_map` / `scoped_search` / `smart_read_file` there instead of

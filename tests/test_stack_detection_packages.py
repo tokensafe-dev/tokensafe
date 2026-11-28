@@ -48,10 +48,10 @@ class StackPackagesTest(unittest.TestCase):
 
         elysia = packages["paidz-backend"]
         self.assertEqual(elysia["framework"], "elysia")
-        self.assertEqual(elysia["provider"], "bun")
-        self.assertFalse(elysia["oumvSupported"])
-        self.assertFalse(elysia["status"] == "ready")
-        self.assertIn("no OUMV adapter", elysia["reason"])
+        self.assertEqual(elysia["provider"], "elysia")
+        self.assertEqual(elysia["adapter"], "tokensafe-backend/elysia")
+        self.assertTrue(elysia["oumvSupported"])
+        self.assertEqual(elysia["status"], "ready")
 
         worker = packages["paidz-workers"]
         self.assertEqual(worker["framework"], "bun")
@@ -59,8 +59,13 @@ class StackPackagesTest(unittest.TestCase):
         self.assertFalse(worker["oumvSupported"])
         self.assertIn("reason", worker)
 
-        # The supported Go backend still wins the top-level slot.
-        self.assertEqual(stack["backend"]["framework"], "net/http")
+        # Elysia is a supported HTTP backend, so the first supported service keeps the
+        # top-level slot (paidz-backend sorts before paidz-core); the Go row stays in
+        # `packages` and is served by the Go adapter.
+        self.assertEqual(stack["backend"]["framework"], "elysia")
+        go_row = packages["paidz-core"]
+        self.assertTrue(go_row["oumvSupported"])
+        self.assertEqual(go_row["adapter"], "tokensafe-backend/go")
         self.assertIn("bun", stack["package_managers"])
 
     def test_a_manifest_without_any_framework_is_still_accounted_for(self):

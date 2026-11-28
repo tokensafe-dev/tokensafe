@@ -148,6 +148,7 @@ dependencies = [
         self.assertIn("backend/go", adapter_ids)
         self.assertIn("backend/fastapi", adapter_ids)
         self.assertIn("backend/aspnetcore", adapter_ids)
+        self.assertIn("backend/elysia", adapter_ids)
 
     def test_adapters_catalog_follows_adapter_contract(self):
         # Language-neutral OUMV Adapter Contract (agent-oumv/schemas/adapter.json)
@@ -161,7 +162,7 @@ dependencies = [
             self.assertIn("language", tech, f"{adapter['id']}: missing technology.language")
             package = tech.get("package", {})
             self.assertIn("manager", package, f"{adapter['id']}: missing package.manager")
-            self.assertIn(package["manager"], ("npm", "pip", "go", "binary", "nuget"))
+            self.assertIn(package["manager"], ("npm", "pip", "go", "binary", "nuget", "bun"))
             self.assertTrue(package.get("install"), f"{adapter['id']}: missing install command")
             # Baseline capabilities with constraints (Decision 12: no unguarded claims)
             caps = adapter.get("capabilities", [])

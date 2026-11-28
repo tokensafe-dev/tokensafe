@@ -45,7 +45,7 @@ TOKENSAFE_DIRECTIVES = (
     "• When context budget reports warning/critical or Grade C/F: call 'tokensafe:session_context(action=\"compact\", transcript_path=...)' to fold history before continuing.\n"
     "• Prohibited File Edits: NEVER use 'sed -i', 'perl -i', or stream editors to modify source files; ALWAYS use 'edit_file' with exact string targets. NEVER suppress errors with '2>/dev/null'.\n"
     "• Prefer 'edit_file' over 'write_file' for existing files.\n"
-    "• Universal OUMV Protocol (Mandatory When Supported): If the workspace reports an OUMV-supported stack (React+Vite, Vue, Solid, Go, FastAPI), ALWAYS prefer the 'oumv' MCP tool (status/observe/understand/verify) before full file crawls, raw curl, or browser checks — even when only reading/editing files (static AST OUMV works offline; use 'tokensafe dev' for zero-footprint live Vite+React). Check capability boundaries in mixed monorepos (for unsupported stacks like backend/node Express/Fastify/Nest, use repo_map/smart_read_file/scoped_search).\n"
+    "• Universal OUMV Protocol (Mandatory When Supported): If the workspace reports an OUMV-supported stack (React+Vite, Vue, Solid, Go, FastAPI, Express/Fastify, Next.js, Elysia on Bun, ASP.NET Core), ALWAYS prefer the 'oumv' MCP tool (status/observe/understand/verify) before full file crawls, raw curl, or browser checks — even when only reading/editing files (static AST OUMV works offline; use 'tokensafe dev' for zero-footprint live Vite+React). Check capability boundaries in mixed monorepos (for unsupported stacks like backend/node Express/Fastify/Nest, use repo_map/smart_read_file/scoped_search).\n"
     "• Multi-Root Sessions: the OUMV routing brief is classified PER workspace root (hosts that report several folders get every root listed). A single-root verdict never describes another repo — before editing a repo outside the listed roots, call 'oumv' with workspace_dir='<that repo>'; never conclude 'OUMV is unavailable' from one root's line."
 )
 
@@ -489,7 +489,7 @@ def _gc_oumv_markers(data_dir: str) -> None:
 
 def get_oumv_read_edit_advisory(workspace_dir: str, file_path: str, session_id: str = "") -> Optional[str]:
     """One-shot per-session advisory when reading/editing files inside an OUMV-supported stack
-    (React+Vite, Vue, Solid, Go, FastAPI) without having called `tokensafe:oumv` recently.
+    (React+Vite, Vue, Solid, Go, FastAPI, Express/Fastify, Next.js, Elysia on Bun, ASP.NET Core) without having called `tokensafe:oumv` recently.
 
     Returns None immediately for unsupported stacks in mixed monorepos (e.g. backend/node),
     when OUMV was already used in this workspace, or if already nudged in this session.

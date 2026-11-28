@@ -60,7 +60,7 @@ UNIFIED_TOKENSAFE_RULE = (
     "`🛡️ **TokenSafe Security Guard**: Prevented secret / private key leak into git (<target_file>: <details>)`\n"
     "11. **Proof-of-Savings Turn Footer (strictly English)**: Append on tool-using turns:\n"
     "`⚡ **TokenSafe Turn Savings**: +<tokens> tokens saved on this turn (<breakdown in English>) | Cumulative Total: <total> tokens (≈$<usd> approx)`\n"
-    "12. **Universal OUMV Protocol (`oumv`)**: When a workspace profile is OUMV-supported (React+Vite, Vue, Solid, Go, FastAPI), "
+    "12. **Universal OUMV Protocol (`oumv`)**: When a workspace profile is OUMV-supported (React+Vite, Vue, Solid, Go, FastAPI, Express/Fastify, Next.js, Elysia on Bun, ASP.NET Core), "
     "ALWAYS prefer `tokensafe:oumv(action='status'|'observe'|'understand'|'verify'|'mutate'|'graph', ...)` BEFORE full file crawls, raw curls, or browser checks — "
     "static OUMV works offline on read/edit tasks too, and `tokensafe dev` starts zero-footprint live Vite+React RPC without touching repo files. "
     "In mixed monorepos (e.g. React + Node.js), use `oumv` on supported profiles and `repo_map`/`smart_read_file`/`scoped_search` on unsupported stacks (e.g. `backend/node`).\n"

@@ -105,15 +105,17 @@ def _detect_package_json_entry(pkg_json_path: str, rel_dir: str = ".") -> Tuple[
             managers.append("bun")
 
         if node_fw:
-            supported_fw = node_fw in ("express", "fastify")
+            is_elysia = node_fw == "elysia"
+            supported_fw = node_fw in ("express", "fastify", "elysia")
             be_out = {
                 "framework": node_fw,
-                "provider": "bun" if node_fw == "elysia" else "node",
-                "adapter": None if node_fw == "elysia" else "tokensafe-backend/node",
-                "language": "bun" if node_fw == "elysia" else "node",
+                "provider": "elysia" if is_elysia else "node",
+                "adapter": "tokensafe-backend/elysia" if is_elysia else "tokensafe-backend/node",
+                "language": "bun" if is_elysia else "node",
                 "root": rel_dir,
-                # Express/Fastify ship a certified adapter (npm tokensafe-backend-node);
-                # Elysia/Nest/Hono/Koa do not yet.
+                # Express/Fastify ship the certified Node adapter; Elysia ships on the
+                # `tokensafe-backend-node/elysia` subpath and is certified L3 on Bun.
+                # Nest/Hono/Koa do not yet.
                 "oumv_supported": supported_fw,
                 "status": "ready" if supported_fw else "planned",
             }
@@ -680,6 +682,34 @@ def get_adapters_catalog() -> List[Dict[str, Any]]:
             ],
         },
         {
+            "id": "backend/elysia",
+            "name": "Elysia Adapter for Bun (HTTP + SSE + WebSocket)",
+            "profile": "backend",
+            "profiles": ["backend"],
+            "repo": "tokensafe-backend/node",
+            "mode": "hybrid",
+            "status": "ready",
+            "description": "Elysia plugin on Bun: the runtime mounts as a Web Request/Response binding, the route table is read from the composed app, verify dispatches through app.handle, and read-only mode registers no mutating method (certified Level 3: HTTP 51/51, SSE 52/52, WS 49/49)",
+            "technology": {
+                "language": "typescript",
+                "framework": "elysia (bun)",
+                "package": {"manager": "bun", "name": "tokensafe-backend-node", "install": "bun add tokensafe-backend-node"},
+            },
+            "capabilities": [
+                {"name": "observe.pulse", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.surface", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.contract", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.source", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "observe.traces", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.impact", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "understand.causality", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "mutate.source", "constraints": {"readOnly": False, "developmentOnly": True, "requiresPermission": "permissions.mutate != false"}},
+                {"name": "verify.behavior", "constraints": {"readOnly": True, "developmentOnly": True}},
+                {"name": "verify.sandboxRollback", "constraints": {"readOnly": True, "developmentOnly": True, "limitations": ["the adopter supplies sandbox.db.run (e.g. bun:sqlite)"]}},
+                {"name": "index.symbols", "constraints": {"readOnly": True, "developmentOnly": True}},
+            ],
+        },
+        {
             "id": "backend/next",
             "name": "Next.js App Router Adapter (Route Handler, server profile)",
             "profile": "backend",
@@ -1184,8 +1214,8 @@ def is_path_in_supported_oumv_scope(workspace_dir: str, file_path: str, use_cach
             if role == "backend":
                 if ext in (".go", ".py"):
                     return pkg
-                # Express/Fastify adapters ship from npm; their sources are in scope.
-                if pkg.get("provider") == "node" and ext in (".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx"):
+                # Express/Fastify/Elysia adapters ship from npm; their sources are in scope.
+                if pkg.get("provider") in ("node", "elysia") and ext in (".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx"):
                     return pkg
                 return None
             return None
