@@ -29,6 +29,9 @@ pip install tokensafe && tokensafe
 
 # Option 3: Direct shell script (macOS / Linux, Windows via Git Bash)
 curl -fsSL https://tokensafe.dev/install.sh | bash
+
+# Option 4: Windows installer (.exe — no Python, Node or Git Bash required)
+# https://github.com/tokensafe-dev/tokensafe/releases/latest -> TokenSafe-Setup-<version>.exe
 ```
 
 The installer detects which AI coding agents live on your machine, registers the TokenSafe MCP server, injects project rules, and (where the agent supports it) wires lifecycle hooks. Run `tokensafe setup --all` to configure every detected agent non-interactively.

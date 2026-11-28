@@ -29,3 +29,6 @@ data/.mcp_reload
 docs/plans/
 .tokensafe/
 .zcode/
+# Inno Setup output (installer/tokensafe.iss)
+installer-output/
+output/
