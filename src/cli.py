@@ -22,6 +22,7 @@ from src.metrics import MetricsTracker
 from src.dashboard import Dashboard, render_bar
 from src.compactor import PromptCompactor
 from src.tokenizer import count_tokens
+from src import oumv_policy
 
 def summarize_unittest_output(raw: str, full_traceback: bool = False) -> str:
     """Compacts `python3 -m unittest discover` output to what a developer
@@ -270,6 +271,11 @@ def main(argv: Optional[List[str]] = None):
                 print(f"  Booster:   Cloud Prompt Booster {state}")
             except Exception:
                 pass
+        profile, _sextant_tier = oumv_policy.current()
+        if profile == oumv_policy.PROFILE_READ_ONLY:
+            print(f"  Sextant:   \033[33mread-only\033[0m (observe everywhere; change/verify on Solo+)")
+        else:
+            print(f"  Sextant:   \033[32mfull\033[0m (change and verify the running app)")
         # Verifiable egress transparency: what left this machine today
         try:
             from src.egress_counter import today_counts
@@ -773,7 +779,9 @@ def main(argv: Optional[List[str]] = None):
             return
         if os.path.basename(tool) in ("java", "php", "node", "npm", "npx"):
             print(f"⚡ Launching {os.path.basename(tool)} with the Sextant runtime")
-            os.execvpe(resolved, argv_rest, dict(os.environ))
+            # Go/Node/.NET and the PHP sidecar read the env; Java takes the CLI
+            # flag, which `sidecar_run_command` already appends.
+            os.execvpe(resolved, argv_rest, oumv_policy.spawn_env())
         ensure_python_autoload()
         env = backend_env()
         os.execvpe(resolved, argv_rest, env)
@@ -913,7 +921,9 @@ def main(argv: Optional[List[str]] = None):
             target_dir, port=port_val, host=host_val, open_browser=open_browser
         )
         print(f"⚡ Launching Zero-Footprint Vite OUMV server ({source})...")
-        proc = subprocess.run(cmd, cwd=target_dir)
+        # The Vite bridge is a process-start profile: a free license must never
+        # advertise write methods the engine would refuse anyway.
+        proc = subprocess.run(cmd, cwd=target_dir, env=oumv_policy.spawn_env())
         sys.exit(proc.returncode)
 
     elif command in ("bench-oumv", "bench_oumv"):
@@ -1702,6 +1712,11 @@ def main(argv: Optional[List[str]] = None):
                 print(f"  Expires:    {dt}")
             else:
                 print(f"  Expires:    Never (Lifetime)")
+        profile, _sextant_tier = oumv_policy.current()
+        if profile == oumv_policy.PROFILE_READ_ONLY:
+            print("  Sextant:    read-only (observe everywhere; change/verify on Solo+)")
+        else:
+            print("  Sextant:    full (change and verify the running app)")
         print()
 
     elif command in ("booster",):

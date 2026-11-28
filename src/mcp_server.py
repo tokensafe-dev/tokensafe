@@ -38,13 +38,14 @@ from src.diff_slicer import DiffSlicer
 from src.guard import TokenSafeGuard
 from src.scoped_search import ScopedSearch
 from src import route_index
+from src import oumv_policy
 from src.license_manager import LicenseManager
 from src.paths import get_active_workspace, is_plugin_or_system_dir
 from src.session_context import current_root, current_session_id
 
 SERVER_INFO = {
     "name": "tokensafe-mcp",
-    "version": "4.7.17"
+    "version": "4.7.18"
 }
 
 # MCP client attribution: the initialize handshake carries clientInfo, which
@@ -843,7 +844,9 @@ TOOLS = [{'name': 'smart_read_file',
   'annotations': {'readOnlyHint': False},
   'description': "OUMV runtime: 'status'|'observe' L0-L4|'understand'|'verify'|'mutate' (OCC edit)|'graph'|'index' "
                  "(repo-wide symbol search: query, kinds?, limit?)|'preview' (dry-run diff, no write)|'build' "
-                 "(run the runtime's build/test command, §14.3)|'cancel' (cooperative, by requestId).",
+                 "(run the runtime's build/test command, §14.3)|'cancel' (cooperative, by requestId). "
+                 "Observation is free on every plan; the write actions (verify, mutate, preview, build) "
+                 "need Solo or higher and are refused with a read-only notice on guest/free.",
   'inputSchema': {'type': 'object',
                   'properties': {'action': {'type': 'string',
                                             'enum': ['status',
@@ -2102,6 +2105,12 @@ def _dispatch_tool_call(name: str, args: dict) -> dict:
     tracker = _get_safe_tracker()
     quota = LicenseManager.check_quota(tracker)
     is_quota_exceeded = bool(quota.get("is_quota_exceeded", False))
+
+    # Observation is free on every plan; the OUMV write profile is licensed, not
+    # metered. Refuse exactly where a read-only adapter has no method at all, so
+    # a hand-mounted read-write runtime cannot be driven by a free license either.
+    if name in oumv_policy.WRITE_TOOLS and oumv_policy.current()[0] == oumv_policy.PROFILE_READ_ONLY:
+        return _fallback_error(name, oumv_policy.deny_text(name))
 
     if name == "smart_read_file":
         path = args.get("path") or args.get("file_path") or args.get("file") or ""

@@ -510,6 +510,8 @@ All hook adapters fail open: an internal error never stalls your agent. Failures
 | `oumv_understand` | Query runtime causality, state dependencies, and backend route mappings |
 | `oumv_mutate` | OCC-guarded source edits (`expectedVersion` from `observe` → `file.version`, path jail, syntax pre-flight, backup). A `symbol` edit splices that declaration only, with or without a live runtime |
 | `oumv_verify` | Transactional verification and state invariant assertions |
+
+Observation is free on every plan. The write tools (`oumv_mutate`, `oumv_preview`, `oumv_verify`, `oumv_build`) need Solo or higher: guest and free run OUMV's read-only profile, where those methods are absent and answer `-32601`.
 </details>
 
 <details>
@@ -613,7 +615,7 @@ TokenSafe integrates with the [OUMV Protocol](https://github.com/tokensafe-dev/o
 - **Consolidated Adapters**:
   - **Frontend**: `tokensafe-ui/react`, `tokensafe-ui/vue`, and the zero-footprint Vite bridge (`tokensafe-ui/vite`) with a session token stored in the per-workspace descriptor (`~/.tokensafe/runtimes/<hash>.json`, mode 0600).
   - **Backend**: Go (`gin`, `chi`, `stdhttp`) and Python (`fastapi`, `sqlalchemy`) in [`tokensafe-backend`](https://github.com/tokensafe-dev/tokensafe-backend).
-- **Guarded Mutations, Enabled by Default**: `oumv_mutate` works out of the box and guards every write — mandatory OCC `expectedVersion`, workspace path jail, syntax pre-flight, backup of previous bytes. Opt out with `permissions.mutate: false` in `.tokensafe/oumv.json`.
+- **Guarded Mutations, Enabled by Default**: `oumv_mutate` works out of the box on Solo and above and guards every write — mandatory OCC `expectedVersion`, workspace path jail, syntax pre-flight, backup of previous bytes. Opt out with `permissions.mutate: false` in `.tokensafe/oumv.json`.
 - **Automatic Wiring CLI**: `tokensafe inject` activates adapters with zero repository footprint (Vite wrapper, Python autoload, one marker-delimited Go line), `tokensafe inject --revert` restores it, and `tokensafe oumv doctor` reports readiness with blocking reasons.
 - **Greenfield Recipes**: `tokensafe create <name> --template react-fastapi|react-go|vue-gin|fastapi|gin` generates a normal project in your stack with OUMV already wired.
 

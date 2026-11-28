@@ -27,6 +27,7 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
+from src import oumv_policy
 from src.retrofit import detect_project_stack, generate_config, get_adapters_catalog
 
 _PYHOOKS_DIRNAME = "pyhooks"
@@ -200,13 +201,18 @@ def backend_env(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     hook = pyhooks_dir()
     base["PYTHONPATH"] = f"{hook}{os.pathsep}{existing}" if existing else hook
     base["TOKENSAFE_OUMV_AUTOMOUNT"] = "1"
+    if oumv_policy.current()[0] == oumv_policy.PROFILE_READ_ONLY:
+        base["TOKENSAFE_OUMV_READ_ONLY"] = "1"
     return base
 
 
 def python_run_hint(workspace: str) -> str:
     """The command an agent should use to start a FastAPI dev server with OUMV."""
+    prefix = ""
+    if oumv_policy.current()[0] == oumv_policy.PROFILE_READ_ONLY:
+        prefix = "TOKENSAFE_OUMV_READ_ONLY=1 "
     return (
-        f'TOKENSAFE_OUMV_AUTOMOUNT=1 PYTHONPATH="{pyhooks_dir()}:$PYTHONPATH" '
+        f'{prefix}TOKENSAFE_OUMV_AUTOMOUNT=1 PYTHONPATH="{pyhooks_dir()}:$PYTHONPATH" '
         "uvicorn <module:app> --reload"
     )
 
@@ -1163,8 +1169,11 @@ def sidecar_run_command(kind: str, sidecar_path: str, workspace: str) -> Optiona
     """The exact command that starts the sidecar against `workspace`."""
     if not sidecar_path:
         return None
+    # Java only knows the CLI flag; the PHP sidecar also reads OUMV_READ_ONLY,
+    # which run-backend sets, so its command line stays unchanged.
+    read_only = " --read-only" if oumv_policy.current()[0] == oumv_policy.PROFILE_READ_ONLY else ""
     if kind == "spring":
-        return f"tokensafe run-backend java {sidecar_path} --root {workspace} --port 7331"
+        return f"tokensafe run-backend java {sidecar_path} --root {workspace} --port 7331{read_only}"
     if kind == "php":
         return f"tokensafe run-backend php -S 127.0.0.1:7332 {sidecar_path} --root {workspace}"
     return None
