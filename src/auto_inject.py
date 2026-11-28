@@ -121,10 +121,16 @@ _SITECUSTOMIZE = '''"""TokenSafe OUMV autoload (generated) — see `tokensafe in
 
 Mounts `mount_tokensafe(app)` on a FastAPI app the moment uvicorn resolves it.
 Inert unless TOKENSAFE_OUMV_AUTOMOUNT=1, which `tokensafe run-backend` sets.
+
+TOKENSAFE_OUMV_READ_ONLY=1 mounts the spec §8.5 read-only deployment: the writing
+methods are not registered at all, so applyEdit/previewEdit/verify/build answer
+-32601 instead of being refused by a handler.
 """
 import os
 
 if os.environ.get("TOKENSAFE_OUMV_AUTOMOUNT") == "1":
+    _READ_ONLY = os.environ.get("TOKENSAFE_OUMV_READ_ONLY") in ("1", "true", "yes", "on")
+
     def _install():
         try:
             from tokensafe_python.adapters.fastapi import mount_tokensafe as _mount
@@ -141,7 +147,7 @@ if os.environ.get("TOKENSAFE_OUMV_AUTOMOUNT") == "1":
         def _patched(import_str, *args, **kwargs):
             app = _original(import_str, *args, **kwargs)
             try:
-                _mount(app)
+                _mount(app, read_only=_READ_ONLY)
             except Exception as exc:  # never break the user's server
                 import sys
                 print(f"[tokensafe] OUMV autoload skipped: {exc}", file=sys.stderr)
@@ -281,7 +287,7 @@ def go_patch_state(workspace: str) -> Dict[str, Any]:
 _GO_MODULE = "github.com/tokensafe-dev/tokensafe-backend/go"
 # Keep in step with the backend release tag (go/vX.Y.Z): injection must never
 # downgrade an adapter that is already newer than this pin.
-_GO_MODULE_VERSION = "v0.11.0"
+_GO_MODULE_VERSION = "v0.13.0"
 
 
 def _version_tuple(tag: str):
@@ -1018,17 +1024,17 @@ def revert_dotnet_patch(workspace: str) -> Dict[str, Any]:
 # Pinned to the backend release: the sidecars are single files, so the cache is
 # content-addressed by SHA-256 and a clean machine downloads the exact bytes the
 # release was certified from. Bump both the tag and the hashes together.
-_SIDECAR_RELEASE_TAG = "v0.9.2"
+_SIDECAR_RELEASE_TAG = "v0.13.0"
 _SIDECARS = {
     "spring": (
         "java/src/dev/tokensafe/oumv/OumvSpring.java",
         "OumvSpring.java",
-        "45aa63f2c71cf25065f591ebd589b21c7c7c58d218f3dce45880af0e1f1e7d81",
+        "a4defc121be23ce2266a1f7f8cfd361d5b5b1fe7ea85f818e5f322322ab2642e",
     ),
     "php": (
         "php/bin/oumv-php",
         "oumv-php",
-        "660e7f53cc3799bd700cea2173f672594a5b8bc33e26cfa91ee559aec66f325a",
+        "3369ee5fd03ec9b16b7eaebc33cc003033cadcb1d325b3445661eba058405b5f",
     ),
 }
 

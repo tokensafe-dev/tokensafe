@@ -20,6 +20,12 @@ from src.paths import get_active_workspace
 class OUMVRpcError(RuntimeError):
     """Raised when a live OUMV runtime explicitly returns a JSON-RPC error."""
 
+    def __init__(self, message: str, code: Optional[int] = None):
+        super().__init__(message)
+        # The JSON-RPC code, when the runtime sent one. Classification must not depend
+        # on the message text: every adapter words -32601 differently.
+        self.code = code
+
 
 class OUMVUnsupportedMethodError(OUMVRpcError):
     """The runtime answered but does not implement the requested method.
@@ -291,11 +297,26 @@ class OUMVGateway:
                             "observeLevels": res.get("capabilities", {}).get("observe", {}).get("levels"),
                             "causality": res.get("capabilities", {}).get("understand", {}).get("causality"),
                             "occ": res.get("capabilities", {}).get("mutate", {}).get("occ"),
+                            # Spec §8.5 (revision v1.11): a read-only deployment registers
+                            # no writing method at all, so the answer is -32601 and this flag
+                            # is the authoritative "do not edit behind its back" signal.
+                            "readOnly": bool(res.get("capabilities", {}).get("readOnly")),
                         },
                     }
             except Exception:
                 continue
         return None
+
+    @classmethod
+    def _runtime_is_reachable(cls, url: Optional[str]) -> bool:
+        """True when a live OUMV runtime answers a handshake at `url`."""
+        if not url:
+            return False
+        try:
+            res = cls._rpc_call(url, "oumv/handshake", {"protocolVersion": "1.6.0"}, timeout=0.35)
+        except Exception:
+            return False
+        return bool(res and isinstance(res, dict) and "runtimeInfo" in res)
 
     @classmethod
     def _rpc_call(cls, endpoint_url: str, method: str, params: Optional[dict] = None, timeout: float = 3.0) -> Any:
@@ -334,7 +355,7 @@ class OUMVGateway:
                     if isinstance(err, dict):
                         code = err.get("code")
                         msg = err.get("message") or str(err)
-                        raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}")
+                        raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}", code=code)
                     raise OUMVRpcError(f"JSON-RPC error from {endpoint_url}: {err}")
                 return data.get("result")
         except urllib.error.HTTPError as exc:
@@ -342,7 +363,7 @@ class OUMVGateway:
             # JSON-RPC envelope. Treat that as a protocol error (RuntimeError) so
             # callers can fall back to offline operation instead of crashing on OSError.
             code, msg = cls._http_error_detail(exc)
-            raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}") from exc
+            raise OUMVRpcError(f"JSON-RPC error ({code}) from {endpoint_url}: {msg}", code=code) from exc
         except urllib.error.URLError as exc:
             raise OUMVRpcError(f"runtime unreachable at {endpoint_url}: {exc.reason}") from exc
         except (TimeoutError, OSError) as exc:
@@ -927,6 +948,7 @@ class OUMVGateway:
             except Exception:
                 pass
 
+        url: Optional[str] = None
         try:
             url = cls._resolve_client_url(runtime=runtime, target=path, workspace_dir=workspace_dir)
             return cls._rpc_call(url, "oumv/applyEdit", {
@@ -939,12 +961,28 @@ class OUMVGateway:
             })
         except RuntimeError as e:
             if isinstance(e, OUMVRpcError) and not isinstance(e, OUMVUnsupportedMethodError):
-                if not any(hint in str(e).lower() for hint in _UNSUPPORTED_HINTS):
+                # -32601 by code, or a message an older bridge only words that way.
+                method_missing = getattr(e, "code", None) == -32601 or any(
+                    hint in str(e).lower() for hint in _UNSUPPORTED_HINTS
+                )
+                if not method_missing:
                     # Explicit safety rejection (conflict, syntax, permission): obey it.
                     raise
-                # The runtime cannot mediate the edit at all; the offline path below
-                # performs the same guarded edit and reports why.
-                e = OUMVUnsupportedMethodError(str(e))
+                # Spec §8.5 (revision v1.11): a *live* runtime that does not register
+                # applyEdit has no write path on purpose (read-only deployment, or the
+                # production lock-down). The offline path below would silently restore
+                # the very write path the deployment removed, so refuse instead of
+                # editing behind its back. The fallback stays for a runtime that died
+                # mid-flight, where nothing is reachable to ask.
+                if cls._runtime_is_reachable(url):
+                    raise RuntimeError(
+                        "[OUMV PERMISSION_DENIED: -32007] the OUMV runtime is running read-only "
+                        "(oumv/applyEdit is not registered, spec §8.5); the edit was refused instead "
+                        "of being written offline behind its back."
+                    )
+                # Nothing answered: the dev server is offline, so the same guarded edit
+                # is performed locally and the result says why.
+                e = OUMVUnsupportedMethodError(str(e), code=getattr(e, "code", None))
             # Out-of-the-box direct fallback when live dev-servers are offline
             if replacement is not None:
                 abs_path = os.path.normpath(os.path.join(ws, path))
